@@ -31,6 +31,7 @@ That single decision is what the rest of the system is built out of:
 | A hallucinated command is a syntax error, not an incident | The model's output language is [GLYPH](docs/GLYPH.md), which is checked against the capability registry |
 | Everything is undoable | Mutations record their inverse *before* they run |
 | It works with no model at all | A deterministic resolver handles what people actually type |
+| It runs on the system you already have | A `desk` capability domain drives your existing desktop rather than replacing it |
 | Routine work is free and private | Small tasks route to a local model and never leave the machine |
 | Your keys cannot be read back | Credentials sit on the capability system's protected-read list |
 
@@ -143,6 +144,27 @@ Full detail in [docs/HARDWARE.md](docs/HARDWARE.md).
 ---
 
 ## Installing
+
+### On top of the system you already have
+
+You do not have to replace anything. This installs NOUS **alongside** Linux Mint,
+Ubuntu, Debian or any Debian-family desktop — your desktop environment, file
+manager and applications all stay exactly as they are.
+
+```console
+./dist/mint/install.sh            # shows what it would do; writes nothing
+./dist/mint/install.sh --commit   # does it
+```
+
+Then press **Ctrl+Alt+Space** anywhere and say what you want. It knows which
+window you were looking at, and Nemo's right-click menu passes your selection
+straight through, so *"open these"* and *"tidy these"* mean something exact.
+
+Nothing outside `/usr/local/bin`, `~/.config/nous` and `~/.local/share` is
+touched, the bootloader is never involved, and `nous-uninstall` reverses all of
+it. Full detail in [docs/MINT.md](docs/MINT.md).
+
+### As the operating system
 
 NOUS assumes dual boot rather than treating it as a special case. It installs
 into free space you have already made, **adopts** the existing EFI System

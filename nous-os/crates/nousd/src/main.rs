@@ -327,9 +327,21 @@ impl Daemon {
     }
 }
 
-/// Load the builtin policy with any site policy layered *above* it, so a local
-/// rule can override a default (first match wins).
-fn load_policy(dir: &std::path::Path) -> Policy {
+/// Load policy from every configuration directory, then the builtin defaults
+/// underneath. First match wins, so the user's own rules override the site's,
+/// and the site's override the defaults.
+fn load_policy_from(dirs: &[PathBuf]) -> Policy {
+    let mut policy = Policy::empty();
+    for dir in dirs {
+        policy.extend(read_policy_dir(dir));
+    }
+    policy.extend(Policy::builtin());
+    policy
+}
+
+/// Read one `policy.d` directory. Unreadable and malformed files are reported
+/// and skipped; a typo must never silently fail open.
+fn read_policy_dir(dir: &std::path::Path) -> Policy {
     let mut policy = Policy::empty();
     let policy_d = dir.join("policy.d");
     if let Ok(entries) = std::fs::read_dir(&policy_d) {
@@ -356,7 +368,6 @@ fn load_policy(dir: &std::path::Path) -> Policy {
             }
         }
     }
-    policy.extend(Policy::builtin());
     policy
 }
 
@@ -501,7 +512,7 @@ fn main() {
     let cfg = Config::load();
     nous_core::log::set_level(nous_core::log::Level::parse(cfg.str_or("log.level", "info")));
 
-    let policy = load_policy(&ipc::config_dir());
+    let policy = load_policy_from(&ipc::config_dirs());
     let journal_dir = cfg.journal_dir();
     let journal = match Journal::open(&journal_dir) {
         Ok(j) => j,
@@ -707,7 +718,7 @@ mod tests {
         )
         .unwrap();
 
-        let policy = load_policy(&dir);
+        let policy = load_policy_from(&[dir.clone()]);
         let cap = nous_core::Capability::parse("fs.read:/home/joey/notes.md").unwrap();
         let v = policy.evaluate(&Subject::User, &cap);
         assert!(
@@ -719,13 +730,42 @@ mod tests {
     }
 
     #[test]
+    fn user_policy_overrides_system_policy() {
+        // The case that matters for an install over an existing distribution:
+        // rules in ~/.config/nous must win over anything in /etc/nous.
+        let base = std::env::temp_dir().join(format!("nous-twodir-{}", std::process::id()));
+        let (user, system) = (base.join("user"), base.join("system"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(user.join("policy.d")).unwrap();
+        std::fs::create_dir_all(system.join("policy.d")).unwrap();
+
+        std::fs::write(system.join("policy.d/50-site.conf"), "deny  user  shell.exec  # site says no\n").unwrap();
+        std::fs::write(user.join("policy.d/10-mine.conf"), "allow user  shell.exec  # my machine\n").unwrap();
+
+        let policy = load_policy_from(&[user.clone(), system.clone()]);
+        let cap = nous_core::Capability::parse("shell.exec:ls").unwrap();
+        assert!(
+            policy.evaluate(&Subject::User, &cap).decision.is_allow(),
+            "the user's own rule should be reached first"
+        );
+
+        // Reverse the search order and the site rule wins instead.
+        let reversed = load_policy_from(&[system, user]);
+        assert!(matches!(
+            reversed.evaluate(&Subject::User, &cap).decision,
+            nous_core::Decision::Deny(_)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_malformed_policy_file_does_not_fail_open() {
         let dir = std::env::temp_dir().join(format!("nous-badpolicy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("policy.d")).unwrap();
         std::fs::write(dir.join("policy.d/10-bad.conf"), "permit everyone everything\n").unwrap();
 
-        let policy = load_policy(&dir);
+        let policy = load_policy_from(&[dir.clone()]);
         // The bad file is skipped, but the builtin floor is still in place.
         let cap = nous_core::Capability::parse("fs.write:/boot/x").unwrap();
         assert!(matches!(policy.evaluate(&Subject::User, &cap).decision, nous_core::Decision::Deny(_)));

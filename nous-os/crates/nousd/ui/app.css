@@ -588,3 +588,83 @@ button { background: none; border: none; cursor: pointer; }
 .kv-key { flex: 0 0 132px; }
 .bar i { width: 0; }
 .ok-text { color: var(--ok); }
+
+/* ------------------------------------------------------------- overlay mode
+ *
+ * The summon bar. A global hotkey brings this up over whatever you were doing,
+ * so it has to establish itself in one glance and then get out of the way: no
+ * rail, no meters, no navigation. Just what you were looking at, a place to
+ * say what you want, and the plan.
+ */
+body.overlay { background: transparent; }
+body.overlay::before { display: none; }
+body.overlay .shell { grid-template-columns: 1fr; height: auto; }
+body.overlay .rail,
+body.overlay .content,
+body.overlay .status { display: none; }
+
+body.overlay .main {
+  padding: 14px;
+  overflow: visible;
+}
+body.overlay .intent-zone { padding: 0; }
+
+body.overlay .intent {
+  height: 62px;
+  border-radius: 18px;
+  border-color: var(--line-strong);
+  background: rgba(12, 14, 18, 0.94);
+  box-shadow: 0 30px 80px -24px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+body.overlay .intent input { font-size: 17px; }
+
+/* Context chips: what NOUS already knows without being told. */
+.context-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px 4px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(12, 14, 18, 0.88);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  max-width: 380px;
+}
+.chip b { font-weight: 500; color: var(--text); }
+.chip .ico { color: var(--accent); font-size: 11px; }
+.chip .trunc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.overlay #plan-host { margin-top: 10px; }
+body.overlay .plan {
+  background: rgba(12, 14, 18, 0.94);
+  box-shadow: 0 30px 80px -24px rgba(0, 0, 0, 0.95);
+  border-radius: 16px;
+}
+body.overlay .plan-head { border-radius: 16px 16px 0 0; }
+
+.overlay-hint {
+  display: flex;
+  gap: 14px;
+  margin: 10px 0 0 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.overlay-hint span { display: inline-flex; align-items: center; gap: 5px; }
+.overlay-hint .k {
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+}

@@ -22,6 +22,10 @@ const state = {
   plan: null,
   status: null,
   playing: null,
+  /// Whether this window is the summon overlay rather than the full shell.
+  overlay: false,
+  /// What the user was looking at when they summoned NOUS.
+  context: {},
 };
 
 // ---------------------------------------------------------------- transport
@@ -162,6 +166,7 @@ async function runPlan(opts) {
     const run = await rpc('intent.submit', {
       text: state.plan.utterance,
       plan: state.plan,
+      context: state.context,
       ...opts,
     });
     renderRun(run, opts.dry_run);
@@ -245,6 +250,34 @@ function showProposal(value) {
       toast(e.message, 'bad');
     }
   };
+}
+
+/* The chips that show what NOUS already knows. They are worth the space: the
+ * difference between "delete these" working and not is whether the user can see
+ * that the system knows what "these" are. */
+function renderContext() {
+  const strip = $('#context-strip');
+  const chips = [];
+  const { focus, paths, cwd } = state.context;
+
+  if (Array.isArray(paths) && paths.length) {
+    const names = paths.map((p) => p.split('/').pop());
+    const label = paths.length === 1
+      ? names[0]
+      : `${paths.length} items`;
+    chips.push(`<span class="chip" title="${esc(paths.join('\n'))}">
+      <i class="ico">◈</i><span class="trunc">selected <b>${esc(label)}</b></span></span>`);
+  }
+  if (cwd) {
+    chips.push(`<span class="chip"><i class="ico">▸</i><span class="trunc">in <b>${esc(cwd.split('/').pop() || cwd)}</b></span></span>`);
+  }
+  if (focus) {
+    chips.push(`<span class="chip"><i class="ico">□</i><span class="trunc">${esc(focus)}</span></span>`);
+  }
+
+  if (!chips.length) { strip.hidden = true; return; }
+  strip.innerHTML = chips.join('');
+  strip.hidden = false;
 }
 
 // ---------------------------------------------------------------- the views
@@ -556,7 +589,7 @@ async function boot() {
     if (!text) return;
     input.value = '';
     try {
-      renderPlan(await rpc('intent.plan', { text }));
+      renderPlan(await rpc('intent.plan', { text, context: state.context }));
     } catch (err) {
       toast(err.message, 'bad');
     }
@@ -564,7 +597,13 @@ async function boot() {
 
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); $('#intent-input').focus(); }
-    if (e.key === 'Escape') { $('#plan-host').innerHTML = ''; state.plan = null; }
+    if (e.key === 'Escape') {
+      // In the overlay, Escape means "go away" -- unless there is a plan on
+      // screen, in which case it means "not that", and a second press dismisses.
+      if (state.overlay && !state.plan) { window.close(); return; }
+      $('#plan-host').innerHTML = '';
+      state.plan = null;
+    }
   });
 
   $('#btn-scan').onclick = scanNow;
@@ -580,10 +619,40 @@ async function boot() {
   $('#btn-render').onclick = () => toast('Say “render my edit” to compile the timeline.');
   $$('[data-media]').forEach((b) => { b.onclick = () => mediaControl(b.dataset.media); });
 
+  // What kind of window is this? Decided before anything else, because the
+  // overlay and the full shell want almost nothing in common.
+  const params = new URLSearchParams(location.search);
+  if (params.get('mode') === 'overlay') {
+    state.overlay = true;
+    document.body.classList.add('overlay');
+    $('#overlay-hint').hidden = false;
+    $('#intent-input').placeholder = 'What would you like to do?';
+    state.context = {
+      focus: params.get('focus') || '',
+      cwd: params.get('cwd') || '',
+      // Paths arrive newline-separated: a filename may contain almost anything
+      // else, including commas.
+      paths: (params.get('paths') || '').split('\n').filter(Boolean),
+    };
+    renderContext();
+  }
+
   try {
     applyStatus(await rpc('sys.status'));
   } catch {
     toast('The daemon is not answering.', 'bad');
+  }
+
+  // The overlay stops here: no library, no file listing, no event stream. It is
+  // on screen for a few seconds and should cost nothing.
+  if (state.overlay) {
+    const ask = params.get('ask');
+    if (ask) {
+      $('#intent-input').value = ask;
+      $('#intent-form').requestSubmit();
+    }
+    $('#intent-input').focus();
+    return;
   }
 
   // Files opens at home; the daemon reports it via sys.info.
@@ -595,9 +664,8 @@ async function boot() {
   connectEvents();
 
   // Deep links. `?view=ledger` opens a context directly and `?ask=...` submits
-  // an intent on load, which is how the greeter hands off to the shell and how
-  // a notification can point at the thing it is about.
-  const params = new URLSearchParams(location.search);
+  // an intent on load -- how the greeter hands off to the shell, and how a
+  // notification points at the thing it is about.
   const view = params.get('view');
   if (view && $(`#view-${view}`)) showView(view);
 

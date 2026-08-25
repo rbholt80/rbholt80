@@ -4,7 +4,7 @@
 //! preserved and readable, so an agent can carry its own settings in the same
 //! file without the core needing to know about them.
 
-use crate::ipc::{config_dir, state_dir};
+use crate::ipc::state_dir;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -83,15 +83,19 @@ impl Config {
         Config { values }
     }
 
-    /// Load `nous.conf` from the config directory, layered over the defaults.
-    /// A missing file is not an error — the defaults are a working system.
+    /// Load `nous.conf` from every configuration directory, layered over the
+    /// defaults. A missing file is not an error — the defaults are a working
+    /// system. Directories are read least-specific first so that the user's own
+    /// configuration wins over the system's.
     pub fn load() -> Config {
         let mut cfg = Config::with_defaults();
-        let path = config_dir().join("nous.conf");
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            match Config::parse(&text) {
-                Ok(file) => cfg.merge(file),
-                Err(e) => eprintln!("nous: ignoring {}: {}", path.display(), e),
+        for dir in crate::ipc::config_dirs().into_iter().rev() {
+            let path = dir.join("nous.conf");
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                match Config::parse(&text) {
+                    Ok(file) => cfg.merge(file),
+                    Err(e) => eprintln!("nous: ignoring {}: {}", path.display(), e),
+                }
             }
         }
         cfg

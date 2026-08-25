@@ -1,0 +1,30 @@
+[Unit]
+Description=NOUS system daemon (user session)
+Documentation=man:nousd(8)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nousd
+Restart=on-failure
+RestartSec=2
+
+# Running as you, in your session, with no elevated access. NOUS installed over
+# an existing distribution does not need root, and does not take it: everything
+# it can reach, you could already reach.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# The same protected paths the capability system enforces, enforced again by
+# the kernel, so a bug in the broker is not sufficient on its own.
+ReadOnlyPaths=/boot /efi
+InaccessiblePaths=/etc/shadow /etc/gshadow
+
+[Install]
+WantedBy=default.target

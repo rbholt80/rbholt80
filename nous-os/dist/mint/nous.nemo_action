@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Ask NOUS about %N
+Comment=Summon NOUS with this selection attached
+Exec=/usr/local/bin/nous-ask --paths %F
+Icon-Name=nous
+Selection=Any
+Extensions=any;
+Quote=double

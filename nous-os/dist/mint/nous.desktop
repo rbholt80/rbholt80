@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NOUS
+GenericName=AI shell
+Comment=Say what you want done
+Exec=/usr/local/bin/nous-shell
+Icon=nous
+Terminal=false
+Categories=System;Utility;
+Keywords=ai;assistant;shell;tidy;search;
+StartupNotify=true

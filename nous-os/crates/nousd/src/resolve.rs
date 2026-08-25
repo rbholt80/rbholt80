@@ -444,13 +444,18 @@ pub mod grammar {
                 return Some((steps, 0.88));
             }
             if any(&["tidy", "clean", "organise", "organize", "sort"]) {
-                let roots: Vec<Json> = ctx
+                // Several selected files usually share a parent; scanning it
+                // once is enough, and twice would double every finding.
+                let mut dirs: Vec<PathBuf> = ctx
                     .context
                     .paths
                     .iter()
                     .filter_map(|p| if p.is_dir() { Some(p.clone()) } else { p.parent().map(|d| d.to_path_buf()) })
-                    .map(|d| Json::Str(d.to_string_lossy().to_string()))
                     .collect();
+                dirs.sort();
+                dirs.dedup();
+                let roots: Vec<Json> =
+                    dirs.iter().map(|d| Json::Str(d.to_string_lossy().to_string())).collect();
                 let args = json_obj([("roots", Json::Arr(roots))]);
                 return Some((
                     vec![
@@ -997,6 +1002,11 @@ mod tests {
 
         // "copy paths" needs no demonstrative: with a selection in hand it
         // cannot mean anything else.
+        // Several files in one folder must not scan that folder twice.
+        let (steps, _) = grammar::resolve("tidy these", &c).unwrap();
+        let roots = steps[0].args.arr_or_empty("roots");
+        assert_eq!(roots.len(), 1, "shared parents should collapse: {:?}", roots);
+
         let (steps, _) = grammar::resolve("copy the paths", &c).unwrap();
         assert_eq!(steps[0].capability, "desk.copy");
         assert!(steps[0].args.str_or("text", "").contains("one.txt"));

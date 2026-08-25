@@ -64,6 +64,7 @@
 
     <!-- The primary surface. Everything the system does starts here. -->
     <div class="intent-zone">
+      <div class="context-strip" id="context-strip" hidden></div>
       <form class="intent" id="intent-form" autocomplete="off">
         <span class="glyph" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -76,6 +77,10 @@
         <span class="kbd">⌘K</span>
       </form>
       <div id="plan-host"></div>
+      <div class="overlay-hint" id="overlay-hint" hidden>
+        <span><i class="k">Enter</i> resolve</span>
+        <span><i class="k">Esc</i> dismiss</span>
+      </div>
     </div>
 
     <div class="content" id="content">

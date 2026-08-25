@@ -40,12 +40,33 @@ pub fn state_dir() -> PathBuf {
     PathBuf::from("/var/lib/nous")
 }
 
-/// Where policy and configuration are read from.
-pub fn config_dir() -> PathBuf {
+/// Where policy and configuration are read from, most specific first.
+///
+/// NOUS installed over an existing distribution lives in the user's own
+/// configuration directory and needs no root at all. NOUS as the operating
+/// system uses `/etc`. Both are supported at once: the user's directory is
+/// consulted first, and site policy in `/etc` still applies underneath it.
+pub fn config_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("NOUS_CONFIG_DIR") {
-        return PathBuf::from(p);
+        return vec![PathBuf::from(p)];
     }
-    PathBuf::from("/etc/nous")
+    let mut dirs = Vec::new();
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            dirs.push(PathBuf::from(xdg).join("nous"));
+        }
+    } else if let Ok(home) = std::env::var("HOME") {
+        if home != "/root" {
+            dirs.push(PathBuf::from(home).join(".config/nous"));
+        }
+    }
+    dirs.push(PathBuf::from("/etc/nous"));
+    dirs
+}
+
+/// The directory configuration is written to, and the first one read.
+pub fn config_dir() -> PathBuf {
+    config_dirs().into_iter().next().unwrap_or_else(|| PathBuf::from("/etc/nous"))
 }
 
 fn next_id() -> String {
@@ -285,6 +306,21 @@ mod tests {
         std::fs::write(&path, b"not a socket").unwrap();
         assert!(bind(&path).is_ok(), "a leftover file must not block startup");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_search_prefers_the_user_then_the_system() {
+        std::env::remove_var("NOUS_CONFIG_DIR");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", "/home/joey");
+        let dirs = config_dirs();
+        assert_eq!(dirs.first().unwrap(), &PathBuf::from("/home/joey/.config/nous"));
+        assert_eq!(dirs.last().unwrap(), &PathBuf::from("/etc/nous"));
+
+        // An explicit override replaces the search entirely.
+        std::env::set_var("NOUS_CONFIG_DIR", "/opt/nous-config");
+        assert_eq!(config_dirs(), vec![PathBuf::from("/opt/nous-config")]);
+        std::env::remove_var("NOUS_CONFIG_DIR");
     }
 
     #[test]
