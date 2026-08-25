@@ -38,7 +38,12 @@ class LoudnessAudioProcessor(adjust: AudioAdjust) : BaseAudioProcessor() {
         val size = inputBuffer.remaining()
         if (size == 0) return
         val output = replaceOutputBuffer(size)
-        val input = inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        // A duplicate, not the caller's buffer: Media3 documents the input as
+        // read-only apart from its position, and it reuses that buffer across
+        // processors. Setting the byte order on it would reach outside this
+        // processor. The duplicate shares the bytes but has its own order,
+        // position and limit.
+        val input = inputBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         output.order(ByteOrder.LITTLE_ENDIAN)
 
         while (input.remaining() >= 2) {

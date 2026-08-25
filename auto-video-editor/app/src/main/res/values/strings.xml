@@ -28,6 +28,7 @@
     <string name="action_play">Play</string>
     <string name="action_share">Share</string>
     <string name="edit_saved">Saved to Movies/AutoCut</string>
+    <string name="edit_no_player">No app on this phone can play video.</string>
     <string name="edit_failed">%1$s</string>
     <string name="edit_saves_time">saves %1$s</string>
 

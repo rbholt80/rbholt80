@@ -120,31 +120,65 @@ class AutoCutRenderer(private val context: Context) {
         }
     }
 
+    /**
+     * Effects are handed COMPOSITION-relative timestamps, not item-relative ones.
+     *
+     * Media3 gives each item a `FrameInfo.offsetToAddUs` equal to the running sum
+     * of the previous items' durations, and the frame processor adds that to
+     * every frame time before an effect sees it. So the running offset is tracked
+     * here and passed down, and the stabilisation track subtracts it again.
+     * Without that, every clip after the first would be sampled past the end of
+     * its own track and get one frozen correction for its whole length.
+     */
     private fun buildComposition(source: Uri, plan: EditPlan): Composition {
-        val items = plan.clips.map { clip -> buildItem(source, plan, clip) }
+        var compositionOffsetUs = 0L
+        val items = plan.clips.map { clip ->
+            val item = buildItem(source, plan, clip, compositionOffsetUs)
+            compositionOffsetUs += clip.outputDurationUs
+            item
+        }
         return Composition.Builder(listOf(EditedMediaItemSequence(items))).build()
     }
 
-    private fun buildItem(source: Uri, plan: EditPlan, clip: Clip): EditedMediaItem {
+    private fun buildItem(
+        source: Uri,
+        plan: EditPlan,
+        clip: Clip,
+        clipStartInCompositionUs: Long,
+    ): EditedMediaItem {
         val mediaItem = MediaItem.Builder()
             .setUri(source)
             .setClippingConfiguration(
                 MediaItem.ClippingConfiguration.Builder()
-                    .setStartPositionMs(clip.sourceStartUs / 1_000)
-                    .setEndPositionMs(clip.sourceEndUs / 1_000)
+                    // Microseconds, not milliseconds. Media3's own offset
+                    // accumulator uses the real clipped duration, so rounding the
+                    // boundaries to whole milliseconds here would drift the
+                    // offsets computed above away from the ones the frame
+                    // processor actually applies.
+                    .setStartPositionUs(clip.sourceStartUs)
+                    .setEndPositionUs(clip.sourceEndUs)
                     .build()
             )
             .build()
 
         return EditedMediaItem.Builder(mediaItem)
-            .setEffects(Effects(audioProcessorsFor(plan, clip), videoEffectsFor(plan, clip)))
+            .setEffects(
+                Effects(
+                    audioProcessorsFor(plan, clip),
+                    videoEffectsFor(plan, clip, clipStartInCompositionUs),
+                )
+            )
             // Audio presence has to match across every item in a sequence, so
             // this is decided for the whole plan rather than per clip.
             .setRemoveAudio(plan.audio.muted || !plan.source.hasAudio)
             .build()
     }
 
-    private fun videoEffectsFor(plan: EditPlan, clip: Clip): List<Effect> {
+    private fun videoEffectsFor(
+        plan: EditPlan,
+        clip: Clip,
+        clipStartInCompositionUs: Long,
+    ): List<Effect> {
         val effects = ArrayList<Effect>(5)
         val video = plan.video
 
@@ -153,9 +187,9 @@ class AutoCutRenderer(private val context: Context) {
         // Geometry before colour, and output sizing last, so the presentation
         // stage sees the frame the viewer will actually get.
         video.stabilization?.let { track ->
-            // The track is indexed by source time; each clip starts again at
-            // zero once it is cut out, so it has to be rebased onto that.
-            effects.add(StabilizationEffect(track.forClip(clip)))
+            // Rebase the track onto this clip's own timeline, then tell the
+            // effect where that timeline starts within the composition.
+            effects.add(StabilizationEffect(track.forClip(clip), clipStartInCompositionUs))
         }
 
         if (video.redScale != 1f || video.greenScale != 1f || video.blueScale != 1f) {

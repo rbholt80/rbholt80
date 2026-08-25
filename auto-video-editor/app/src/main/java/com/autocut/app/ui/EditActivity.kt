@@ -1,5 +1,6 @@
 package com.autocut.app.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -163,11 +164,17 @@ class EditActivity : AppCompatActivity() {
     }
 
     private fun play(uri: Uri) {
-        startActivity(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, "video/mp4")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        )
+        // A device with nothing registered for video/mp4 would otherwise take
+        // the activity down with an ActivityNotFoundException.
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "video/mp4")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            )
+        } catch (e: ActivityNotFoundException) {
+            Snackbar.make(binding.root, R.string.edit_no_player, Snackbar.LENGTH_LONG).show()
+        }
     }
 
     private fun share(uri: Uri) {

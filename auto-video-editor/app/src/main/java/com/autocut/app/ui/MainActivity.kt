@@ -2,6 +2,7 @@ package com.autocut.app.ui
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -25,8 +26,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val requestAutoModePermissions =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
-            if (granted[libraryPermission()] == true) {
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            // Deliberately ignores the result map. It only carries the
+            // permissions that were actually asked for, and the request below
+            // filters out anything already granted — so on the very common path
+            // of re-enabling auto mode with video access already held, the map
+            // has no entry for it, which read as a refusal and switched the mode
+            // straight back off. The system is the authority here, not the map.
+            if (hasLibraryAccess()) {
                 MediaWatchScheduler.enable(this)
             } else {
                 binding.autoMode.isChecked = false
@@ -56,9 +63,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        binding.autoMode.setOnCheckedChangeListener { _, checked ->
-            if (checked) enableAutoMode() else MediaWatchScheduler.disable(this)
-        }
+        syncAutoModeSwitch()
 
         sharedVideo(intent)?.let(::openEditor)
     }
@@ -70,8 +75,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Reflects the real state rather than the last thing tapped: the mode
-        // turns itself off if library access is withdrawn.
+        syncAutoModeSwitch()
+    }
+
+    /**
+     * Shows what the mode is actually doing, not what was last tapped.
+     *
+     * Video access can be taken away from system settings while the app is in
+     * the background. The scheduled job survives that, so it would keep waking
+     * up to a library it can no longer read, behind a switch still showing on.
+     */
+    private fun syncAutoModeSwitch() {
+        if (settings.autoEditNewVideos && !hasLibraryAccess()) {
+            MediaWatchScheduler.disable(this)
+        }
         binding.autoMode.setOnCheckedChangeListener(null)
         binding.autoMode.isChecked = settings.autoEditNewVideos
         binding.autoMode.setOnCheckedChangeListener { _, checked ->
@@ -79,13 +96,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun hasLibraryAccess(): Boolean =
+        checkSelfPermission(libraryPermission()) == PackageManager.PERMISSION_GRANTED
+
     private fun enableAutoMode() {
         val needed = buildList {
             add(libraryPermission())
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
             }
-        }.filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
+        }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
 
         if (needed.isEmpty()) {
             MediaWatchScheduler.enable(this)
