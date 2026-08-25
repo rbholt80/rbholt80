@@ -29,6 +29,7 @@ import java.io.File
  * screen — the automatic mode is not a reduced version of the app, it is the
  * app with nobody overruling it.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class AutoEditWorker(
     context: Context,
     params: androidx.work.WorkerParameters,

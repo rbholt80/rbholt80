@@ -29,6 +29,7 @@ import java.io.File
  * every toggle after that is a re-plan from the same measurements, so the UI can
  * respond immediately and the user never waits to see what their change did.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class EditViewModel(application: Application) : AndroidViewModel(application) {
 
     sealed interface State {

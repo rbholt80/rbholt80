@@ -28,7 +28,6 @@ android {
         targetSdk 35
         versionCode 1
         versionName "1.0"
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -69,14 +68,17 @@ android {
     }
 
     lint {
-        // Every Transformer and effect class this app is built on is marked
-        // @UnstableApi, so the opt-in check would flag most of the media
-        // package. The mitigation that actually matters is the pinned Media3
-        // version above, not an annotation on each call site.
-        disable 'UnsafeOptInUsageError'
         checkReleaseBuilds true
         abortOnError true
     }
+}
+
+// Pins the Kotlin JVM target instead of inferring it from whichever JDK happens
+// to launch Gradle. :engine already declares a 21 toolchain, and if the daemon
+// runs on anything else the two modules disagree and the build dies with
+// "Inconsistent JVM-target compatibility detected".
+kotlin {
+    jvmToolchain(21)
 }
 
 dependencies {
@@ -107,5 +109,4 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 
     testImplementation 'junit:junit:4.13.2'
-    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }

@@ -141,23 +141,35 @@ It models translation only. Rotation and rolling shutter are not corrected.
 
 ## Build
 
-Android Studio, JDK 21. `minSdk 29`, `targetSdk 35`.
+Android Studio, JDK 21. `minSdk 29`, `targetSdk 35`. Toolchain: Gradle 9.5,
+AGP 9.3.1, Kotlin 2.2.10.
+
+Open the `auto-video-editor` folder — the one containing `settings.gradle` — not
+the repository root.
 
 ```bash
-./gradlew assembleDebug          # the app
 ./gradlew :engine:test           # the editorial logic, on the JVM, in seconds
+./gradlew assembleDebug          # the app
 ```
 
-Toolchain: Gradle 9.5, AGP 9.3.1, Kotlin 2.2.10.
+From a terminal, the Android SDK has to be findable before either command:
+Android Studio writes `local.properties` when it imports the project, otherwise
+`export ANDROID_HOME=$HOME/Android/Sdk`. **Every** task needs it, including
+`:engine:test` — the Android plugin configures the whole build before any task
+runs. SDK platform 35 must be installed, or AGP stops with *"Failed to find
+target with hash string android-35"*.
 
-Media3 is pinned to **1.4.1** deliberately. Transformer's composition API changed
-shape between 1.4 and 1.5 (varargs builders, `EditedMediaItemSequence.Builder`),
-so the version and the call sites in `AutoCutRenderer` move together or not at
-all.
+Media3 is pinned to **1.4.1** deliberately. Its composition API changes shape
+across versions in both directions — `EditedMediaItemSequence.Builder` and
+varargs composition builders arrive in 1.5, `Presentation.createForShortSide`
+only in 1.8 — so the version and the call sites in `AutoCutRenderer` move
+together or not at all.
 
-Release builds run lint with `abortOnError`. If a lint error blocks a release
-build after a dependency bump, `./gradlew updateLintBaseline` records the
-current state rather than lowering the bar.
+Release builds run lint with `abortOnError`. Nothing is suppressed: the three
+classes that sit on Media3's `@UnstableApi` surface are marked as such, and the
+two that call into them opt in explicitly. If a lint error blocks a release build
+after a dependency bump, `./gradlew updateLintBaseline` records the current state
+rather than lowering the bar.
 
 ### Tests
 
@@ -177,7 +189,14 @@ current state rather than lowering the bar.
   both report *no* shift rather than a confident wrong one.
 
 There are no unit tests for the decoders or the encoder; those need a device and
-a real file.
+a real file. They are, however, type-checked: the app module is compiled outside
+Android Studio against Robolectric's real API-35 `android.jar`, against Media3
+stubs transcribed from the actual 1.4.1 sources, and against `R` and viewBinding
+classes generated from the real layouts. That is what caught
+`Presentation.createForShortSide` not existing in 1.4.1, and reading Media3's own
+source is what caught stabilisation being handed composition-relative timestamps
+rather than clip-relative ones — a bug invisible on a single-clip export and
+wrong on every real multi-cut edit.
 
 ---
 
@@ -197,4 +216,11 @@ a real file.
 - **An interactive export lives in the screen's ViewModel.** Leaving the app for
   a long time mid-export can lose it. The automatic mode uses WorkManager and
   does not have this problem.
+- **10-bit HDR sources are analysed at 8-bit precision.** P010 output is read
+  from the high byte of each sample, which is correct but throws away two bits.
+- **Speed ramps drive the video effect and the audio processor independently.**
+  Media3 offers a paired "experimental speed changing effect" that keeps them
+  locked; it is not used here because it is driven by the audio track and this
+  app also exports clips with no audio at all. The two are anchored slightly
+  differently, so a ramped clip can start with up to about one frame of A/V skew.
 - **English only.** No localisation yet.
