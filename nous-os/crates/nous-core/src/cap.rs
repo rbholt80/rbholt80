@@ -84,7 +84,7 @@ impl Capability {
     pub fn risk(&self) -> Risk {
         match (self.domain.as_str(), self.action.as_str()) {
             // Observation
-            ("fs", "read") | ("fs", "stat") | ("fs", "list") => Risk::Read,
+            ("fs", "read") | ("fs", "stat") | ("fs", "list") | ("fs", "search") => Risk::Read,
             ("proc", "list") | ("sys", "info") | ("sys", "metrics") => Risk::Read,
             ("svc", "status") | ("net", "status") | ("pkg", "query") => Risk::Read,
             ("ctx", "read") | ("journal", "read") => Risk::Read,
@@ -147,7 +147,7 @@ impl fmt::Display for Capability {
 /// explicit is what makes "what can this program possibly do?" an answerable
 /// question.
 pub const KNOWN_CAPABILITIES: &[&str] = &[
-    "fs.read", "fs.stat", "fs.list", "fs.write", "fs.mkdir", "fs.move", "fs.delete",
+    "fs.read", "fs.stat", "fs.list", "fs.search", "fs.write", "fs.mkdir", "fs.move", "fs.delete",
     "fs.chmod", "fs.chown",
     "proc.list", "proc.signal", "proc.spawn",
     "sys.info", "sys.metrics", "sys.power", "sys.mount", "sys.firmware",

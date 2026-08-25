@@ -29,18 +29,33 @@ impl Config {
         // Model routing. Backends are tried in order; the first that is
         // reachable wins. `offline` is last but always succeeds, which is what
         // keeps the shell usable on a machine with no model at all.
-        set("model.route", "ollama,anthropic,offline");
+        // Two routes, because most of what an AI-native OS does all day is
+        // small: naming a file, classifying a download, summarising a folder.
+        // That work goes to a local model and never leaves the machine. The
+        // large route is only reached when an intent genuinely needs it.
+        set("model.route", "ollama,anthropic,openai,offline");
+        set("model.route.small", "ollama,offline");
+        set("model.route.large", "anthropic,openai,ollama,offline");
         set("model.timeout_secs", "60");
         set("model.max_context_chars", "24000");
 
         set("model.ollama.url", "http://127.0.0.1:11434");
         set("model.ollama.model", "qwen2.5:7b-instruct");
+        // The bundled small model: a few hundred megabytes, good enough for
+        // classification and naming, and it runs on a laptop with no GPU.
+        set("model.ollama.small_model", "qwen2.5:1.5b-instruct");
 
         set("model.anthropic.url", "https://api.anthropic.com/v1/messages");
         set("model.anthropic.model", "claude-sonnet-5");
         set("model.anthropic.max_tokens", "2048");
         // Read from the environment by default so the key is never in a file.
         set("model.anthropic.key_env", "ANTHROPIC_API_KEY");
+
+        // Any OpenAI-compatible endpoint: OpenAI itself, OpenRouter, Groq, a
+        // local llama.cpp or LM Studio server. Bring whichever key you hold.
+        set("model.openai.url", "https://api.openai.com/v1/chat/completions");
+        set("model.openai.model", "gpt-4o-mini");
+        set("model.openai.provider", "openai");
 
         // The resolver prefers the grammar when it is confident; below this it
         // escalates to a model, and below `plan.show_threshold` it shows you the

@@ -143,6 +143,7 @@ allow    *              fs.read:/home/**
 allow    *              fs.read:/tmp/**
 allow    *              fs.list
 allow    *              fs.stat
+allow    *              fs.search
 allow    *              proc.list
 allow    *              sys.info
 allow    *              sys.metrics
