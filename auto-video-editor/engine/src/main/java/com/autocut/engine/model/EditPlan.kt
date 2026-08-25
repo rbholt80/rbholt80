@@ -197,13 +197,26 @@ data class EditPlan(
 
     fun fix(id: String): Fix? = fixes.firstOrNull { it.id == id }
 
-    /** e.g. "1:04 -> 0:47, 17.2s trimmed". */
+    /**
+     * How much shorter the finished video is, however that was achieved.
+     *
+     * Not the same as [removedDurationUs], which counts only source time that
+     * was cut out. Time compressed by a speed ramp is still inside a clip, so a
+     * plan that speeds through a long dead stretch removes nothing while more
+     * than halving the running time.
+     */
+    val savedDurationUs: Long get() = (source.durationUs - outputDurationUs).coerceAtLeast(0L)
+
+    /** e.g. "1:04 -> 0:47, 17.2s saved". */
     fun summary(): String {
         val before = formatDuration(source.durationUs)
         val after = formatDuration(outputDurationUs)
-        val saved = removedDurationUs
-        return if (saved > 0) {
-            String.format(Locale.ROOT, "%s -> %s, %.1fs trimmed", before, after, saved / 1_000_000.0)
+        return if (savedDurationUs > 0) {
+            String.format(
+                Locale.ROOT,
+                "%s -> %s, %.1fs saved",
+                before, after, savedDurationUs / 1_000_000.0,
+            )
         } else {
             "$before, no cuts"
         }

@@ -186,11 +186,29 @@ class FrameProfiler(
             for (i in from until to) total += abs(previous[i] - current[i + offset]).toDouble()
             val cost = (total / (to - from)).toFloat()
             costs[offset + limit] = cost
-            if (cost < bestCost) {
+            // Ties break toward the smallest displacement. Scanning from the most
+            // negative offset with a strict comparison handed every tie to the
+            // most negative candidate, which on a repeating texture — blinds, a
+            // fence, brick, a striped shirt — is an aliased match one period away
+            // and usually of the opposite sign.
+            if (cost < bestCost || (cost == bestCost && abs(offset) < abs(bestOffset))) {
                 bestCost = cost
                 bestOffset = offset
             }
         }
+
+        // A repeating pattern matches equally well one period away, and the
+        // aliased match is just as sharp, so nothing above can tell them apart.
+        // When a second, distant minimum scores nearly as well, the honest answer
+        // is that the displacement is unknowable — the same reasoning the
+        // contrast guard above applies to a profile with no features at all.
+        var runnerUp = Float.MAX_VALUE
+        for (offset in -limit..limit) {
+            if (abs(offset - bestOffset) <= 1) continue
+            val cost = costs[offset + limit]
+            if (cost < runnerUp) runnerUp = cost
+        }
+        if (runnerUp <= bestCost * AMBIGUOUS_MATCH_RATIO + 1e-6f) return 0f
 
         // If even the best alignment leaves a residual far larger than the
         // profile's own variation, these two frames are not the same shot —
@@ -225,5 +243,8 @@ class FrameProfiler(
 
         /** Residual, as a multiple of that variation, past which it is a cut. */
         const val UNRELATED_FRAME_RATIO = 2f
+
+        /** How close a distant second match may be before the answer is unknowable. */
+        const val AMBIGUOUS_MATCH_RATIO = 1.25f
     }
 }

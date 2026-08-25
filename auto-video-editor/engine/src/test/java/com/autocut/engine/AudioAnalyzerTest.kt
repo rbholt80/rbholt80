@@ -3,10 +3,14 @@ package com.autocut.engine
 import com.autocut.engine.Fixtures.range
 import com.autocut.engine.Fixtures.seconds
 import com.autocut.engine.analysis.AudioAnalyzer
+import com.autocut.engine.analysis.Dsp
+import com.autocut.engine.model.AudioSample
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.PI
+import kotlin.math.sin
 
 class AudioAnalyzerTest {
 
@@ -85,6 +89,55 @@ class AudioAnalyzerTest {
         val profile = AudioAnalyzer.analyze(samples, duration)
 
         assertEquals(-20f, profile.programDb, 0.5f)
+    }
+
+    @Test
+    fun `a mostly silent recording is the most cuttable one, not the least`() {
+        // 90% room tone: a long recording with one short burst of speech. Reading
+        // the "loud parts" off a high percentile made that percentile describe
+        // room tone, which put the threshold below the noise floor and declared
+        // the file to have no usable silence — refusing to cut precisely the
+        // recording that needs it most.
+        val duration = seconds(60.0)
+        val profile = AudioAnalyzer.analyze(
+            Fixtures.speechWithSilences(duration, listOf(range(2.0, 56.0))),
+            duration,
+        )
+
+        assertTrue(profile.reliable)
+        assertEquals(1, profile.silences.size)
+        assertEquals(seconds(2.0), profile.silences.first().range.startUs)
+        assertEquals(seconds(56.0), profile.silences.first().range.endUs)
+        assertEquals(-60f, profile.noiseFloorDb, 1f)
+    }
+
+    @Test
+    fun `speech that swings in level is not mistaken for silence`() {
+        // Real speech moves about 24 dB across a sentence. Every other fixture
+        // here holds it constant, which hides the failure this exists to catch:
+        // with pauses under a tenth of the clip, deriving the threshold from a
+        // low percentile put it INSIDE the speech, and a third of the actual
+        // words were reported as silence for the planner to cut out.
+        val duration = seconds(60.0)
+        val samples = buildList {
+            var startUs = 0L
+            var index = 0
+            while (startUs < duration) {
+                val roomTone = startUs < seconds(4.0)
+                val speechDb = -26f + 12f * sin(index * 2f * PI.toFloat() / 40f)
+                val rms = if (roomTone) Fixtures.ROOM_RMS else Dsp.dbToAmplitude(speechDb)
+                add(AudioSample(startUs, Fixtures.WINDOW_US, rms, rms * 3f))
+                startUs += Fixtures.WINDOW_US
+                index++
+            }
+        }
+
+        val profile = AudioAnalyzer.analyze(samples, duration)
+
+        assertTrue(profile.reliable)
+        assertEquals("only the head is quiet", 1, profile.silences.size)
+        assertEquals(0L, profile.silences.first().range.startUs)
+        assertEquals(seconds(4.0), profile.silences.first().range.endUs)
     }
 
     @Test

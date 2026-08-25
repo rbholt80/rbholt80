@@ -633,11 +633,13 @@ object EditPlanner {
 
         val track = shake.track
         if (track == null || track.isEmpty) {
+            // Not "too much to fix": shake larger than the crop budget is scaled
+            // down to fit and still produces a track. The only way to arrive
+            // here is a correction too small to be worth the crop it costs.
             draft.note(
-                "shake_unfixable",
-                "The camera moves too much to steady without cropping the picture badly, so it was " +
-                    "left as shot.",
-                Severity.SUGGESTED,
+                "shake_negligible",
+                "The camera wobble is too slight to be worth the crop that steadying it would cost, " +
+                    "so it was left as shot.",
             )
             return
         }
@@ -749,22 +751,41 @@ object EditPlanner {
             defaultEnabled: Boolean,
             candidates: List<TimeRange>,
         ) {
-            val enabled = prefs.resolve(id, defaultEnabled)
+            val wanted = prefs.resolve(id, defaultEnabled)
             var savedUs = TimeRange.totalDurationUs(candidates)
-            if (enabled) {
-                val accepted = ArrayList<TimeRange>(candidates.size)
+            var applied = wanted
+
+            if (wanted) {
+                var gainedUs = 0L
+                var accepted = 0
                 for (range in candidates) {
-                    if (range.durationUs <= budgetUs) {
-                        budgetUs -= range.durationUs
-                        accepted.add(range)
+                    // Charge the budget only for what this range removes that
+                    // some other fix has not already removed. Silence gaps and
+                    // soft-focus spans overlap constantly — a camera hunting
+                    // focus while nobody is talking is the textbook case — and
+                    // counting the same microseconds twice both overstated what
+                    // a fix saved and starved the fixes that came after it.
+                    val before = TimeRange.totalDurationUs(cuts)
+                    val after = TimeRange.totalDurationUs(cuts + range)
+                    val incrementalUs = after - before
+                    if (incrementalUs <= budgetUs) {
+                        budgetUs -= incrementalUs
+                        cuts.add(range)
+                        gainedUs += incrementalUs
+                        accepted++
                     }
                 }
-                if (accepted.isEmpty()) return
-                cuts.addAll(accepted)
-                savedUs = TimeRange.totalDurationUs(accepted)
-                enabledIds.add(id)
+                if (accepted == 0) {
+                    // Nothing fitted. The fix still belongs in the list — it was
+                    // vanishing from the UI entirely, so switching it on made its
+                    // own row disappear and left nothing to switch back off.
+                    applied = false
+                } else {
+                    savedUs = gainedUs
+                    enabledIds.add(id)
+                }
             }
-            fixes.add(Fix(id, kind, title, detail, severity, enabled, savedUs))
+            fixes.add(Fix(id, kind, title, detail, severity, applied, savedUs))
         }
 
         fun addRampFix(

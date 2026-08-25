@@ -189,6 +189,90 @@ class EditPlannerTest {
     }
 
     @Test
+    fun `a fix that cannot fit the budget still appears in the list`() {
+        // 8.7s of head trim plus one 8.6s pause leaves 6.7s of budget, and the
+        // 7.0s soft-focus span does not fit. It used to disappear from the plan
+        // entirely — so switching a fix on deleted its own row, leaving nothing
+        // to switch back off.
+        val duration = seconds(40.0)
+        val soft = Fixtures.steadyVideo(duration).map {
+            if (it.timeUs >= seconds(32.0) && it.timeUs < seconds(39.0)) {
+                it.copy(sharpness = 20f, motion = 0.005f)
+            } else {
+                it
+            }
+        }
+        val plan = plan(
+            Fixtures.signals(
+                duration,
+                audio = Fixtures.speechWithSilences(
+                    duration,
+                    listOf(range(0.0, 9.0), range(11.0, 20.0), range(22.0, 31.0)),
+                ),
+                video = soft,
+            )
+        )
+
+        val fix = plan.fix(EditPlanner.ID_REMOVE_SOFT_FOCUS)
+        assertNotNull("the row must survive even when nothing fitted", fix)
+        assertFalse("and it must not claim to have been applied", fix!!.enabled)
+    }
+
+    @Test
+    fun `overlapping fixes do not each claim the same removed time`() {
+        // A camera hunting focus while nobody is talking is the ordinary case,
+        // not a corner: the silence and the soft-focus span cover the same
+        // seconds. Charging both for it overstated what each saved and starved
+        // whichever ran second.
+        val duration = seconds(40.0)
+        val quiet = listOf(range(5.0, 12.0), range(20.0, 27.0))
+        val soft = Fixtures.steadyVideo(duration).map {
+            val inside = quiet.any { span -> it.timeUs >= span.startUs && it.timeUs < span.endUs }
+            if (inside) it.copy(sharpness = 20f, motion = 0.005f) else it
+        }
+        val plan = plan(
+            Fixtures.signals(
+                duration,
+                audio = Fixtures.speechWithSilences(duration, quiet),
+                video = soft,
+            ),
+            EditPreferences().withFix(EditPlanner.ID_REMOVE_SOFT_FOCUS, true),
+        )
+
+        val claimed = plan.fixes.filter { it.enabled && it.cuts }.sumOf { it.savedUs }
+        assertEquals(
+            "per-fix savings must add up to what was actually removed",
+            plan.removedDurationUs,
+            claimed,
+        )
+        // The pauses were cut first, so the focus fix contributes only the
+        // padding either side of them, not another whole seven seconds.
+        assertEquals(seconds(0.8), plan.fix(EditPlanner.ID_REMOVE_SOFT_FOCUS)!!.savedUs)
+    }
+
+    @Test
+    fun `a plan that only speeds things up does not report itself as no cuts`() {
+        // A 50s quiet stretch with the picture still moving is compressed rather
+        // than cut, so nothing is removed — but the video is less than half as
+        // long. Reporting that from the cut list alone told the user, in a
+        // notification, that a minute of video came back unchanged.
+        val duration = seconds(60.0)
+        val plan = plan(
+            Fixtures.signals(
+                duration,
+                audio = Fixtures.speechWithSilences(duration, listOf(range(5.0, 55.0))),
+                video = Fixtures.steadyVideo(duration, motion = 0.20f),
+            )
+        )
+
+        assertNotNull(plan.fix(EditPlanner.ID_SPEED_DEAD_TIME))
+        assertEquals(0L, plan.removedDurationUs)
+        assertEquals(seconds(22.5), plan.outputDurationUs)
+        assertEquals(seconds(37.5), plan.savedDurationUs)
+        assertTrue("summary was '${plan.summary()}'", plan.summary().contains("saved"))
+    }
+
+    @Test
     fun `a clip with no sound is not cut and its levels are not touched`() {
         val duration = seconds(30.0)
         val plan = plan(

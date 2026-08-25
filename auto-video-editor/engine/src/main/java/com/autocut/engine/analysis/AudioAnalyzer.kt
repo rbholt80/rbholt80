@@ -65,15 +65,17 @@ object AudioAnalyzer {
     /** Runs shorter than this are never reported; no style cuts below it. */
     private const val MIN_DETECT_US = 120_000L
 
-    /** How far above the room tone a window has to be to count as content. */
-    private const val NOISE_MARGIN_DB = 7f
-
-    /** Never put the threshold this close to the loud parts. */
-    private const val LOUD_HEADROOM_DB = 10f
-
     /** The threshold is clamped into this window whatever the material says. */
     private const val THRESHOLD_MIN_DB = -70f
     private const val THRESHOLD_MAX_DB = -32f
+
+    /** A level holding less than this share of the windows counts as empty. */
+    private const val EMPTY_DENSITY_FRACTION = 0.002f
+    private const val MIN_EMPTY_DENSITY = 0.5f
+
+    /** A gap only means something with this much material on both sides of it. */
+    private const val MIN_SIDE_FRACTION = 0.005f
+    private const val MIN_SIDE_WINDOWS = 2f
 
     /** Schmitt-trigger gap, so a window hovering at the threshold does not chatter. */
     private const val HYSTERESIS_DB = 3f
@@ -93,16 +95,21 @@ object AudioAnalyzer {
         val truePeakDb = Dsp.amplitudeToDb(samples.maxOf { it.peak })
         val clippedFraction = samples.count { it.peak >= CLIPPING_AMPLITUDE }.toFloat() / samples.size
 
-        // A low percentile is only a seed for the threshold, not the noise floor
-        // itself. On a well-paced take where pauses are less than a tenth of the
-        // running time, the 10th percentile lands inside the speech and reads far
-        // too high — which is exactly why the threshold is also held a fixed
-        // distance below the loud parts. Between the two, the split lands in the
-        // gap whether pauses are 3% of the clip or 40% of it.
-        val quietSeedDb = Dsp.percentileOfSorted(sorted, 0.10f)
-        val thresholdDb = (quietSeedDb + NOISE_MARGIN_DB)
-            .coerceAtMost(loudDb - LOUD_HEADROOM_DB)
-            .coerceIn(THRESHOLD_MIN_DB, THRESHOLD_MAX_DB)
+        // The split is found as a GAP in the level distribution rather than from
+        // percentiles. A percentile quietly assumes you already know how much of
+        // the clip is silence, and both ends of that assumption fail on real
+        // recordings. Above about nine tenths silence, the high percentile stops
+        // describing the loud parts and starts describing room tone, which
+        // declared the most cuttable file there is — a long recording with a
+        // short burst of speech — to contain no usable silence at all. Below
+        // about a tenth it is worse: with an ordinary sentence-level dynamic
+        // range the threshold landed inside the speech and reported a third of
+        // the actual speech as silence, which the planner would then cut out.
+        //
+        // Where the gap is does not depend on how wide either side of it is.
+        val gapDb = findQuietGapDb(levels)
+        val thresholdDb = gapDb?.coerceIn(THRESHOLD_MIN_DB, THRESHOLD_MAX_DB)
+            ?: Dsp.SILENCE_FLOOR_DB
 
         val quietLevels = levels.filter { it < thresholdDb }
         val activeIndices = levels.indices.filter { levels[it] >= thresholdDb }
@@ -110,7 +117,7 @@ object AudioAnalyzer {
         // Reliability is then judged on what the threshold actually separated,
         // rather than on a percentile spread that says nothing about whether the
         // quiet and loud parts are really two different things.
-        val noiseFloorDb = if (quietLevels.isEmpty()) quietSeedDb else Dsp.mean(quietLevels.toFloatArray())
+        val noiseFloorDb = if (quietLevels.isEmpty()) thresholdDb else Dsp.mean(quietLevels.toFloatArray())
         val activeDb = if (activeIndices.isEmpty()) {
             loudDb
         } else {
@@ -142,6 +149,73 @@ object AudioAnalyzer {
             silences = silences,
             reliable = reliable,
         )
+    }
+
+    /**
+     * Finds the quiet gap in the level distribution: the widest run of empty
+     * levels with real material on both sides of it.
+     *
+     * Speech and room tone are two populations with nothing in between, and it
+     * is that emptiness — not the size of either population — that says where
+     * one ends and the other begins. Measuring it directly is what makes this
+     * behave identically whether pauses are 2% of the running time or 90% of it.
+     *
+     * Returns null when there is no such gap, which is the honest answer for a
+     * music bed, a noisy street, or anything heavily compressed. Those really do
+     * have no quiet to find, and inventing a split would cut speech.
+     */
+    private fun findQuietGapDb(levels: FloatArray): Float? {
+        val binCount = (-Dsp.SILENCE_FLOOR_DB).toInt() + 1
+        val histogram = FloatArray(binCount)
+        for (level in levels) {
+            val index = (level - Dsp.SILENCE_FLOOR_DB).toInt().coerceIn(0, binCount - 1)
+            histogram[index]++
+        }
+
+        // Smoothed across neighbouring levels so a single stray window can
+        // neither punch a hole in a population nor look like one on its own.
+        val density = FloatArray(binCount) { i ->
+            (histogram[maxOf(0, i - 1)] + histogram[i] + histogram[minOf(binCount - 1, i + 1)]) / 3f
+        }
+
+        val total = levels.size.toFloat()
+        val emptyBelow = maxOf(MIN_EMPTY_DENSITY, EMPTY_DENSITY_FRACTION * total)
+        val minSide = maxOf(MIN_SIDE_WINDOWS, MIN_SIDE_FRACTION * total)
+
+        val cumulative = FloatArray(binCount + 1)
+        for (i in 0 until binCount) cumulative[i + 1] = cumulative[i] + histogram[i]
+
+        var bestWidth = 0
+        var bestStart = -1
+        var bestEnd = -1
+        var index = 0
+        while (index < binCount) {
+            if (density[index] >= emptyBelow) {
+                index++
+                continue
+            }
+            var end = index
+            while (end + 1 < binCount && density[end + 1] < emptyBelow) end++
+
+            val width = end - index + 1
+            val populationBelow = cumulative[index]
+            val populationAbove = total - cumulative[end + 1]
+            if (width >= MIN_USABLE_RANGE_DB &&
+                populationBelow >= minSide &&
+                populationAbove >= minSide &&
+                width > bestWidth
+            ) {
+                bestWidth = width
+                bestStart = index
+                bestEnd = end
+            }
+            index = end + 1
+        }
+
+        if (bestStart < 0) return null
+        // The middle of the gap, so a slightly noisier room still lands on the
+        // quiet side of it.
+        return Dsp.SILENCE_FLOOR_DB + (bestStart + bestEnd) / 2f
     }
 
     /**

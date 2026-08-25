@@ -26,6 +26,13 @@ class FrameProfilerTest {
         value.roundToInt().coerceIn(0, 255)
     }
 
+    /** A repeating pattern, like blinds or brick, that matches itself one period away. */
+    private fun stripes(dx: Int = 0, period: Double = 6.0): IntArray =
+        IntArray(width * height) { index ->
+            val x = index % width - dx
+            (128 + 90 * sin(x * 2.0 * Math.PI / period)).roundToInt().coerceIn(0, 255)
+        }
+
     /** Texture that vanishes from both projection profiles when averaged. */
     private fun separableTexture(dx: Int = 0): IntArray = IntArray(width * height) { index ->
         val x = index % width - dx
@@ -142,6 +149,21 @@ class FrameProfilerTest {
         val moved = profiler.profile(100_000L, separableTexture(dx = 3))
 
         assertEquals(0f, moved.shiftY, 0.0001f)
+    }
+
+    @Test
+    fun `a repeating pattern reports no shift rather than an aliased one`() {
+        // Blinds, brick, a fence, a striped shirt: the pattern matches itself one
+        // period away just as well as at the true offset. Picking one of those
+        // matches gives a confident answer that is usually the wrong SIGN, and it
+        // goes straight into the camera path, so stabilisation then drives the
+        // frame the wrong way. Admitting the displacement is unknowable is the
+        // only safe answer.
+        val profiler = profiler()
+        profiler.profile(0L, stripes())
+        val moved = profiler.profile(100_000L, stripes(dx = 1))
+
+        assertEquals(0f, moved.shiftX, 0.0001f)
     }
 
     @Test
