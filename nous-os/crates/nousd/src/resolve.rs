@@ -23,6 +23,62 @@ use std::path::PathBuf;
 /// Bindings produced by steps that have already run.
 pub type Env = BTreeMap<String, Json>;
 
+/// What the user was looking at when they asked.
+///
+/// This is the difference between an assistant you have to describe things to
+/// and one that is already in the room. The overlay captures the focused window
+/// *before* it appears — otherwise the answer would always be "NOUS" — and the
+/// file manager's context menu passes the selection straight through.
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    /// Title of the window that was focused before NOUS was summoned.
+    pub focus: Option<String>,
+    /// Files selected in the file manager, if that is where this came from.
+    pub paths: Vec<PathBuf>,
+    /// The directory the user is looking at.
+    pub cwd: Option<PathBuf>,
+}
+
+impl Context {
+    pub fn from_json(v: &Json) -> Context {
+        Context {
+            focus: v.get("focus").and_then(|f| f.as_str()).filter(|s| !s.is_empty()).map(String::from),
+            paths: v.str_list("paths").iter().map(|p| nous_core::config::expand_tilde(p)).collect(),
+            cwd: v.get("cwd").and_then(|c| c.as_str()).filter(|s| !s.is_empty()).map(nous_core::config::expand_tilde),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.focus.is_none() && self.paths.is_empty() && self.cwd.is_none()
+    }
+
+    /// A short description for the model prompt.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(f) = &self.focus {
+            parts.push(format!("The user is looking at a window titled \"{}\".", f));
+        }
+        if let Some(c) = &self.cwd {
+            parts.push(format!("Their current folder is {}.", c.display()));
+        }
+        match self.paths.len() {
+            0 => {}
+            1 => parts.push(format!("They have selected the file {}.", self.paths[0].display())),
+            n => {
+                let shown: Vec<String> =
+                    self.paths.iter().take(6).map(|p| p.display().to_string()).collect();
+                parts.push(format!(
+                    "They have selected {} files: {}{}",
+                    n,
+                    shown.join(", "),
+                    if n > 6 { ", and others" } else { "" }
+                ));
+            }
+        }
+        parts.join(" ")
+    }
+}
+
 /// Marker keys used to defer a value until run time.
 pub const REF_KEY: &str = "$ref";
 pub const FMT_KEY: &str = "$fmt";
@@ -230,6 +286,8 @@ pub mod grammar {
 
     pub struct Ctx {
         pub home: PathBuf,
+        /// What the user was looking at when they asked.
+        pub context: Context,
     }
 
     /// Well-known folders, so "downloads" resolves without a model.
@@ -269,12 +327,43 @@ pub mod grammar {
         String::new()
     }
 
+    /// Is there an installed application by roughly this name?
+    ///
+    /// Consulted before claiming an "open X" utterance, so a phrase that merely
+    /// begins with a verb is not turned into a launch of something that does
+    /// not exist.
+    fn app_exists(name: &str) -> bool {
+        let dirs: Vec<PathBuf> = ["/usr/share/applications", "/usr/local/share/applications"]
+            .iter()
+            .map(PathBuf::from)
+            .chain(
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".local/share/applications")),
+            )
+            .collect();
+        let lower = name.to_ascii_lowercase();
+        crate::exec::desktop::installed_apps(&dirs)
+            .iter()
+            .any(|a| a.str_or("name", "").to_ascii_lowercase().contains(&lower))
+    }
+
     fn step(n: usize, cap: &str, handler: &str, summary: &str, args: Json) -> Step {
         Step::new(&format!("s{}", n + 1), cap, handler, summary, args)
     }
 
     fn p(path: &PathBuf) -> Json {
         Json::Str(path.to_string_lossy().to_string())
+    }
+
+    /// Does this utterance point at whatever the user has selected?
+    fn refers_to_selection(words: &[String]) -> bool {
+        words.iter().any(|w| {
+            matches!(
+                w.trim_end_matches(&['.', '?', '!', ','][..]),
+                "this" | "these" | "them" | "their" | "its" | "it" | "selected" | "selection"
+            )
+        })
     }
 
     /// Try to resolve deterministically. Returns steps and a confidence.
@@ -286,7 +375,93 @@ pub mod grammar {
         }
         let has = |w: &str| words.iter().any(|x| x.trim_end_matches(&['.', '?', '!', ','][..]) == w);
         let any = |ws: &[&str]| ws.iter().any(|w| has(w));
-        let path = find_path(&words, ctx);
+        // An explicit path in the words wins; otherwise the folder the user is
+        // looking at stands in for one.
+        let path = find_path(&words, ctx).or_else(|| ctx.context.cwd.clone());
+
+        // --- what you have selected ----------------------------------------
+        // "open these", "delete this", "tidy these" -- the file manager already
+        // told us what they are, so there is nothing to guess at.
+        if !ctx.context.paths.is_empty() {
+            if any(&["copy"]) && any(&["path", "paths", "name", "names"]) {
+                let joined = ctx
+                    .context
+                    .paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let n = ctx.context.paths.len();
+                return Some((
+                    vec![step(0, "desk.copy", "desk", &format!("copy {} path(s)", n), json_obj([("text", joined.into())]))],
+                    0.9,
+                ));
+            }
+        }
+        if !ctx.context.paths.is_empty() && refers_to_selection(&words) {
+            let selected: Vec<Json> = ctx
+                .context
+                .paths
+                .iter()
+                .map(|p| Json::Str(p.to_string_lossy().to_string()))
+                .collect();
+            let n = selected.len();
+
+            if any(&["open", "view", "show"]) {
+                let steps: Vec<Step> = ctx
+                    .context
+                    .paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        step(
+                            i,
+                            &format!("desk.open:{}", p.display()),
+                            "desk",
+                            &format!("open {}", p.file_name().and_then(|f| f.to_str()).unwrap_or("?")),
+                            json_obj([("path", self::p(p))]),
+                        )
+                    })
+                    .collect();
+                return Some((steps, 0.9));
+            }
+            if any(&["delete", "remove", "bin", "trash"]) {
+                let steps: Vec<Step> = ctx
+                    .context
+                    .paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        step(
+                            i,
+                            &format!("fs.delete:{}", p.display()),
+                            "fs",
+                            &format!("move {} to the trash store", p.file_name().and_then(|f| f.to_str()).unwrap_or("?")),
+                            json_obj([("path", self::p(p))]),
+                        )
+                    })
+                    .collect();
+                return Some((steps, 0.88));
+            }
+            if any(&["tidy", "clean", "organise", "organize", "sort"]) {
+                let roots: Vec<Json> = ctx
+                    .context
+                    .paths
+                    .iter()
+                    .filter_map(|p| if p.is_dir() { Some(p.clone()) } else { p.parent().map(|d| d.to_path_buf()) })
+                    .map(|d| Json::Str(d.to_string_lossy().to_string()))
+                    .collect();
+                let args = json_obj([("roots", Json::Arr(roots))]);
+                return Some((
+                    vec![
+                        step(0, "curate.scan", "curate", "look for things to tidy", args.clone()),
+                        step(1, "curate.propose", "curate", "work out what to move", args),
+                    ],
+                    0.87,
+                ));
+            }
+            let _ = (selected, n);
+        }
 
         // --- the ledger ----------------------------------------------------
         if any(&["undo", "revert", "unde"]) {
@@ -419,6 +594,71 @@ pub mod grammar {
             }
         }
 
+        // --- the desktop you are already running ---------------------------
+        // These sit below the folder rules on purpose: "open my downloads" is a
+        // folder, and only an utterance that names no path falls through here.
+        if any(&["screenshot", "screengrab", "capture"]) {
+            return Some((
+                vec![step(0, "desk.screenshot", "desk", "capture the screen", Json::obj())],
+                0.9,
+            ));
+        }
+        if has("lock") && words.len() <= 4 {
+            return Some((
+                vec![step(0, "desk.session", "desk", "lock the screen", json_obj([("action", "lock".into())]))],
+                0.9,
+            ));
+        }
+        if any(&["clipboard"]) {
+            return Some((
+                vec![step(0, "desk.clipboard", "desk", "read the clipboard", Json::obj())],
+                0.85,
+            ));
+        }
+        if (any(&["what", "which"]) && any(&["open", "running"]) && any(&["windows", "window", "apps"]))
+            || (any(&["windows"]) && words.len() <= 3)
+        {
+            return Some((
+                vec![step(0, "desk.windows", "desk", "list open windows", Json::obj())],
+                0.85,
+            ));
+        }
+        if any(&["close", "quit"]) {
+            let target = tail_after(&words, &["close", "quit"]).trim().to_string();
+            if !target.is_empty() {
+                return Some((
+                    vec![step(0, "desk.close", "desk", &format!("close {}", target), json_obj([("window", target.into())]))],
+                    0.85,
+                ));
+            }
+        }
+        if any(&["switch", "focus"]) {
+            let target = tail_after(&words, &["switch", "focus"])
+                .trim_start_matches("to ")
+                .trim()
+                .to_string();
+            if !target.is_empty() {
+                return Some((
+                    vec![step(0, "desk.focus", "desk", &format!("switch to {}", target), json_obj([("window", target.into())]))],
+                    0.85,
+                ));
+            }
+        }
+        if any(&["launch", "start", "run", "open"]) {
+            let name = tail_after(&words, &["launch", "start", "run", "open"])
+                .trim_start_matches("up ")
+                .trim()
+                .to_string();
+            // Only claim this if something installed actually matches, so
+            // "run the backup" does not become a launch attempt.
+            if !name.is_empty() && app_exists(&name) {
+                return Some((
+                    vec![step(0, &format!("desk.launch:{}", name), "desk", &format!("launch {}", name), json_obj([("name", name.into())]))],
+                    0.85,
+                ));
+            }
+        }
+
         // --- packages and services -----------------------------------------
         if any(&["install"]) {
             let name = tail_after(&words, &["install"]).trim().to_string();
@@ -460,9 +700,20 @@ impl Resolver {
         }
     }
 
-    /// Resolve an utterance into a plan.
+    /// Resolve an utterance into a plan, with no surrounding context.
     pub fn resolve(&self, intent_id: &str, utterance: &str, router: &Router) -> Plan {
-        let ctx = grammar::Ctx { home: self.home.clone() };
+        self.resolve_with_context(intent_id, utterance, router, &Context::default())
+    }
+
+    /// Resolve an utterance against what the user was looking at.
+    pub fn resolve_with_context(
+        &self,
+        intent_id: &str,
+        utterance: &str,
+        router: &Router,
+        context: &Context,
+    ) -> Plan {
+        let ctx = grammar::Ctx { home: self.home.clone(), context: context.clone() };
         if let Some((steps, confidence)) = grammar::resolve(utterance, &ctx) {
             if confidence >= self.grammar_threshold {
                 return Plan {
@@ -476,7 +727,7 @@ impl Resolver {
             }
         }
 
-        match self.resolve_with_model(intent_id, utterance, router) {
+        match self.resolve_with_model(intent_id, utterance, router, context) {
             Ok(plan) => plan,
             Err(why) => {
                 // Fall back to a low-confidence grammar match rather than
@@ -502,6 +753,7 @@ impl Resolver {
         intent_id: &str,
         utterance: &str,
         router: &Router,
+        context: &Context,
     ) -> Result<Plan, String> {
         if !router.has_model() {
             return Err(format!(
@@ -510,7 +762,14 @@ impl Resolver {
                 utterance
             ));
         }
-        let served = router.complete(&Completion::new(&system_prompt(), utterance))?;
+        // The model is told what the user is looking at, so "convert these"
+        // and "why is this failing" mean something.
+        let prompt = if context.is_empty() {
+            utterance.to_string()
+        } else {
+            format!("{}\n\nContext: {}", utterance, context.describe())
+        };
+        let served = router.complete(&Completion::new(&system_prompt(), &prompt))?;
         let source = extract_glyph(&served.text);
         let program = glyph::parse(&source)
             .map_err(|e| format!("the model produced invalid GLYPH: {}", e))?;
@@ -623,7 +882,11 @@ mod tests {
     use super::*;
 
     fn ctx() -> Ctx {
-        Ctx { home: PathBuf::from("/home/joey") }
+        Ctx { home: PathBuf::from("/home/joey"), context: Context::default() }
+    }
+
+    fn ctx_with(context: Context) -> Ctx {
+        Ctx { home: PathBuf::from("/home/joey"), context }
     }
 
     fn resolve(u: &str) -> Option<(Vec<Step>, f64)> {
@@ -709,6 +972,113 @@ mod tests {
     fn installing_extracts_the_package_name() {
         let (steps, _) = resolve("install mpv").unwrap();
         assert_eq!(steps[0].capability, "pkg.install:mpv");
+    }
+
+    #[test]
+    fn a_selection_makes_this_and_these_mean_something() {
+        let dir = std::env::temp_dir().join(format!("nous-sel-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("one.txt");
+        let b = dir.join("two.txt");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+
+        let context = Context { focus: None, paths: vec![a.clone(), b.clone()], cwd: None };
+        let c = ctx_with(context);
+
+        let (steps, _) = grammar::resolve("open these", &c).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].capability.starts_with("desk.open:"));
+
+        let (steps, _) = grammar::resolve("delete these", &c).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|s| s.capability.starts_with("fs.delete:")));
+
+        // "copy paths" needs no demonstrative: with a selection in hand it
+        // cannot mean anything else.
+        let (steps, _) = grammar::resolve("copy the paths", &c).unwrap();
+        assert_eq!(steps[0].capability, "desk.copy");
+        assert!(steps[0].args.str_or("text", "").contains("one.txt"));
+        assert!(steps[0].args.str_or("text", "").contains("two.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_a_selection_this_and_these_mean_nothing() {
+        assert!(grammar::resolve("open these", &ctx()).is_none());
+    }
+
+    #[test]
+    fn a_named_folder_beats_a_selection() {
+        // Files being selected must not turn "open my downloads" into opening
+        // those files.
+        let context = Context {
+            focus: None,
+            paths: vec![PathBuf::from("/home/joey/a.txt")],
+            cwd: None,
+        };
+        let (steps, _) = grammar::resolve("open my downloads", &ctx_with(context)).unwrap();
+        assert!(steps[0].capability.starts_with("fs.list:"), "{}", steps[0].capability);
+    }
+
+    #[test]
+    fn the_current_folder_stands_in_for_an_unnamed_path() {
+        let context = Context { focus: None, paths: vec![], cwd: Some(PathBuf::from("/srv/work")) };
+        let (steps, _) = grammar::resolve("tidy up", &ctx_with(context)).unwrap();
+        assert_eq!(steps[0].capability, "curate.scan");
+        assert_eq!(steps[0].args.arr_or_empty("roots")[0].as_str(), Some("/srv/work"));
+    }
+
+    #[test]
+    fn context_describes_itself_for_the_model() {
+        let c = Context {
+            focus: Some("report.odt - LibreOffice Writer".into()),
+            paths: vec![PathBuf::from("/home/joey/a.png")],
+            cwd: Some(PathBuf::from("/home/joey/Pictures")),
+        };
+        let d = c.describe();
+        assert!(d.contains("LibreOffice Writer"), "{d}");
+        assert!(d.contains("/home/joey/Pictures"), "{d}");
+        assert!(d.contains("a.png"), "{d}");
+        assert!(Context::default().is_empty());
+    }
+
+    #[test]
+    fn desktop_intents_resolve_without_a_model() {
+        let (steps, _) = resolve("take a screenshot").unwrap();
+        assert_eq!(steps[0].capability, "desk.screenshot");
+
+        let (steps, _) = resolve("lock the screen").unwrap();
+        assert_eq!(steps[0].capability, "desk.session");
+        assert_eq!(steps[0].args.str_or("action", ""), "lock");
+
+        let (steps, _) = resolve("what windows are open").unwrap();
+        assert_eq!(steps[0].capability, "desk.windows");
+
+        let (steps, _) = resolve("close firefox").unwrap();
+        assert_eq!(steps[0].capability, "desk.close");
+        assert_eq!(steps[0].args.str_or("window", ""), "firefox");
+
+        let (steps, _) = resolve("switch to the terminal").unwrap();
+        assert_eq!(steps[0].capability, "desk.focus");
+        assert_eq!(steps[0].args.str_or("window", ""), "the terminal");
+    }
+
+    #[test]
+    fn opening_a_folder_still_beats_launching_an_app() {
+        // "open my downloads" must remain a folder listing even though the
+        // launch rule also matches the word "open".
+        let (steps, _) = resolve("open my downloads").unwrap();
+        assert!(steps[0].capability.starts_with("fs.list:"), "{}", steps[0].capability);
+    }
+
+    #[test]
+    fn a_launch_is_only_claimed_for_something_installed() {
+        // Nothing called this exists, so the grammar must decline rather than
+        // produce a launch that will fail.
+        assert!(resolve("open zzzznotaprogram").is_none());
     }
 
     #[test]

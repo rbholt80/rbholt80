@@ -6,6 +6,7 @@
 //! back an [`Undo`] that puts the machine back.
 
 pub mod curate;
+pub mod desktop;
 pub mod fsops;
 pub mod media;
 pub mod sysops;
@@ -79,6 +80,7 @@ pub fn execute(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         "fs" => fsops::execute(&cap, step, ctx),
         "media" => media::execute(&cap, step, ctx),
         "curate" => curate::execute(&cap, step, ctx),
+        "desk" => desktop::execute(&cap, step, ctx),
         "sys" | "proc" | "svc" | "pkg" | "shell" | "net" => sysops::execute(&cap, step, ctx),
         other => Err(format!("no executor for capability domain '{}'", other)),
     }

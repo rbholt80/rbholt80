@@ -207,7 +207,13 @@ impl Broker {
             let verdict = self.policy.evaluate(&opts.subject, &cap);
             let outcome_kind = match &verdict.decision {
                 Decision::Deny(reason) => {
-                    self.record(&cap, &verdict.decision.kind(), Outcome::Refused, plan, reason, Undo::None);
+                    if let Err(e) =
+                        self.record(&cap, verdict.decision.kind(), Outcome::Refused, plan, reason, Undo::None)
+                    {
+                        // The audit trail is the point. A hole in it is not a
+                        // detail to swallow.
+                        nous_core::log_error!("broker", "could not journal a refusal: {}", e);
+                    }
                     self.publish(
                         topic::CAPABILITY,
                         json_obj([
@@ -237,7 +243,11 @@ impl Broker {
             let effect = match self.dispatch(&cap, &resolved, &ctx, plan, opts) {
                 Ok(e) => e,
                 Err(e) => {
-                    self.record(&cap, verdict.decision.kind(), Outcome::Failed, plan, &e, Undo::None);
+                    if let Err(je) =
+                        self.record(&cap, verdict.decision.kind(), Outcome::Failed, plan, &e, Undo::None)
+                    {
+                        nous_core::log_error!("broker", "could not journal a failure: {}", je);
+                    }
                     status = RunStatus::Failed;
                     message = e.clone();
                     results.push(step_result(step, "failed", Json::Null, &e));

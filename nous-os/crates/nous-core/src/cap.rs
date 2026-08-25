@@ -89,6 +89,8 @@ impl Capability {
             ("svc", "status") | ("net", "status") | ("pkg", "query") => Risk::Read,
             ("ctx", "read") | ("journal", "read") => Risk::Read,
             ("media", "probe") | ("media", "search") | ("media", "thumbnail") => Risk::Read,
+            // Looking at the desktop is free; touching it is not.
+            ("desk", "apps") | ("desk", "windows") | ("desk", "session_info") => Risk::Read,
 
             // Local, reversible mutation
             ("fs", "write") | ("fs", "mkdir") | ("fs", "move") => Risk::Write,
@@ -108,15 +110,30 @@ impl Capability {
             ("curate", "scan") | ("curate", "propose") => Risk::Read,
             ("curate", "apply") => Risk::Write,
 
+            // Desktop actions that only affect what you can already see.
+            ("desk", "notify") | ("desk", "copy") | ("desk", "focus") => Risk::Write,
+            ("desk", "open") => Risk::Write,
+
             // Hard to undo, or leaves the machine
             ("fs", "delete") | ("fs", "chmod") | ("fs", "chown") => Risk::Elevated,
             ("proc", "signal") | ("proc", "spawn") => Risk::Elevated,
             ("net", "connect") | ("net", "listen") => Risk::Elevated,
+            // Reading the clipboard and capturing the screen are elevated for
+            // the same reason: whatever is there right now may be a password, a
+            // private message, or someone else's data, and it would be crossing
+            // an inference boundary. Neither is a "read" in the harmless sense.
+            ("desk", "clipboard") | ("desk", "screenshot") => Risk::Elevated,
+            // Launching an arbitrary application, closing a window that may
+            // hold unsaved work, and changing desktop settings.
+            ("desk", "launch") | ("desk", "close") | ("desk", "setting") => Risk::Elevated,
             ("pkg", "install") | ("pkg", "remove") => Risk::Elevated,
             ("shell", "exec") => Risk::Elevated,
 
             // Can end the machine or the user's privacy
             ("sys", "power") | ("sys", "mount") | ("sys", "firmware") => Risk::Critical,
+            // Locking or ending the session can lose work across every open
+            // application at once.
+            ("desk", "session") => Risk::Critical,
             ("policy", "amend") | ("secret", "read") | ("user", "admin") => Risk::Critical,
 
             // Unknown capabilities are treated as critical, never as safe.
@@ -190,6 +207,9 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "media.probe", "media.search", "media.thumbnail", "media.play", "media.control",
     "media.edit", "media.render", "media.index",
     "curate.scan", "curate.propose", "curate.apply",
+    "desk.apps", "desk.windows", "desk.session_info", "desk.notify", "desk.copy",
+    "desk.clipboard", "desk.focus", "desk.open", "desk.launch", "desk.close",
+    "desk.screenshot", "desk.setting", "desk.session",
     "policy.amend", "secret.read", "user.admin",
 ];
 
@@ -334,6 +354,7 @@ mod tests {
                 (c.domain.as_str(), c.action.as_str()),
                 ("policy", "amend") | ("secret", "read") | ("user", "admin")
                     | ("sys", "power") | ("sys", "mount") | ("sys", "firmware")
+                    | ("desk", "session")
             );
             assert!(
                 c.risk() != Risk::Critical || deliberate,

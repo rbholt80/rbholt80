@@ -29,7 +29,7 @@ use nous_core::journal::now_secs;
 use nous_core::proto::{errcode, method, Frame, Request, Response};
 use nous_core::{log_error, log_info, log_warn};
 use nous_core::{Config, Journal, Plan, Policy, Step, Subject};
-use resolve::Resolver;
+use resolve::{Context, Resolver};
 use router::Router;
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
@@ -70,7 +70,13 @@ impl Daemon {
                 if text.is_empty() {
                     return Response::err(&req.id, errcode::BAD_REQUEST, "no text to resolve");
                 }
-                let plan = self.resolver.resolve(&self.next_intent_id(), &text, &self.router);
+                let context = self.context_of(req);
+                let plan = self.resolver.resolve_with_context(
+                    &self.next_intent_id(),
+                    &text,
+                    &self.router,
+                    &context,
+                );
                 let mut out = self.broker.preflight(&plan, &Subject::User);
                 out.set("plan", plan.to_json());
                 if let Some(c) = &plan.clarification {
@@ -89,7 +95,12 @@ impl Daemon {
                 // plan from the one the human said yes to.
                 let plan = match req.params.get("plan") {
                     Some(p) if !p.is_null() => Plan::from_json(p),
-                    _ => self.resolver.resolve(&self.next_intent_id(), &text, &self.router),
+                    _ => self.resolver.resolve_with_context(
+                        &self.next_intent_id(),
+                        &text,
+                        &self.router,
+                        &self.context_of(req),
+                    ),
                 };
                 if let Some(c) = &plan.clarification {
                     return Response::err_with(
@@ -269,6 +280,27 @@ impl Daemon {
         }
     }
 
+    /// The context a client attached to its request, filled in from the live
+    /// session where the client could not know it.
+    fn context_of(&self, req: &Request) -> Context {
+        let mut ctx = match req.params.get("context") {
+            Some(c) if !c.is_null() => Context::from_json(c),
+            _ => Context::default(),
+        };
+        // The overlay captures the focused window before it appears, because by
+        // the time it is up, the focused window is the overlay. A client that
+        // did not do that gets whatever is focused now, which is better than
+        // nothing for a terminal or a script.
+        if ctx.focus.is_none() {
+            if let Some(title) =
+                exec::desktop::focus_context().get("focused_window").and_then(|v| v.as_str())
+            {
+                ctx.focus = Some(title.to_string());
+            }
+        }
+        ctx
+    }
+
     pub fn status(&self) -> Json {
         let hw = hwprofile::detect();
         let journal_len = self.broker.journal.read_all().map(|r| r.len()).unwrap_or(0);
@@ -281,6 +313,7 @@ impl Daemon {
             ("hardware", hw.to_json()),
             ("models", self.router.status()),
             ("policy_rules", self.broker.policy.rules.len().into()),
+            ("desktop", exec::desktop::session_info()),
             ("journal_entries", journal_len.into()),
             (
                 "bus",

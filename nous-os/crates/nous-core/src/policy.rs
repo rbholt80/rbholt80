@@ -159,6 +159,9 @@ allow    *              media.search
 allow    *              media.thumbnail
 allow    *              curate.scan
 allow    *              curate.propose
+allow    *              desk.apps
+allow    *              desk.windows
+allow    *              desk.session_info
 
 # --- the user's own machine, for the user ------------------------------------
 allow    user           fs.write:~/**
@@ -168,6 +171,16 @@ allow    user           ui.notify
 allow    user           ui.render
 allow    user           ctx.write
 allow    user           journal.revert           # undo is never harder than the act
+allow    user           desk.notify
+allow    user           desk.copy
+allow    user           desk.focus
+allow    user           desk.open                # opening a file in its usual app
+confirm  user           desk.clipboard           # the clipboard may hold a password
+confirm  user           desk.screenshot          # so may whatever is on screen
+confirm  user           desk.launch
+confirm  user           desk.close               # a window may hold unsaved work
+confirm  user           desk.setting
+confirm  user           desk.session
 allow    user           media.play
 allow    user           media.control
 allow    user           media.edit
@@ -190,6 +203,12 @@ confirm  user           sys.mount
 allow    agent:*        ui.notify
 allow    agent:*        ctx.write
 allow    agent:*        media.index
+allow    agent:*        desk.notify              # agents may tell you things
+deny     agent:*        desk.clipboard           # but never read your clipboard
+deny     agent:*        desk.screenshot          # nor watch your screen
+deny     agent:*        desk.session
+confirm  agent:*        desk.open
+confirm  agent:*        desk.launch
 confirm  agent:*        media.render:~/**
 confirm  agent:*        curate.apply
 confirm  agent:*        fs.write:~/**
