@@ -20,6 +20,7 @@ class SettingsActivity : AppCompatActivity() {
         settings = Settings(this)
 
         binding.toolbar.setNavigationOnClickListener { finish() }
+        binding.scroll.padForBottomSystemBar()
 
         for (style in EditStyle.entries) {
             binding.styleGroup.addView(
@@ -45,7 +46,9 @@ class SettingsActivity : AppCompatActivity() {
             settings.allowStabilization = checked
         }
 
-        binding.loudness.value = settings.targetLoudnessDb.coerceIn(-24f, -9f)
+        // Shows the current style's target until the user overrides it.
+        binding.loudness.value =
+            (settings.targetLoudnessDb ?: settings.style.targetLoudnessDb).coerceIn(-24f, -9f)
         showLoudness(binding.loudness.value)
         binding.loudness.addOnChangeListener { _, value, _ ->
             settings.targetLoudnessDb = value

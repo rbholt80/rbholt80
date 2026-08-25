@@ -47,6 +47,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         settings = Settings(this)
+        binding.scroll.padForBottomSystemBar()
 
         binding.toolbar.setOnMenuItemClickListener { item ->
             if (item.itemId == R.id.action_settings) {
@@ -65,11 +66,17 @@ class MainActivity : AppCompatActivity() {
 
         syncAutoModeSwitch()
 
-        sharedVideo(intent)?.let(::openEditor)
+        // Only on a genuinely new launch. getIntent() still returns the original
+        // ACTION_SEND intent after a configuration change, so without this guard
+        // every rotation pushed the editor back on top and the user could never
+        // get back to this screen.
+        if (savedInstanceState == null) sharedVideo(intent)?.let(::openEditor)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // Replaces the launch intent, so the same once-only rule applies to it.
+        setIntent(intent)
         sharedVideo(intent)?.let(::openEditor)
     }
 

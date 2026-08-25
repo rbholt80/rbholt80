@@ -30,9 +30,19 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_STABILIZE, true)
         set(value) = prefs.edit { putBoolean(KEY_STABILIZE, value) }
 
-    var targetLoudnessDb: Float
-        get() = prefs.getFloat(KEY_LOUDNESS, DEFAULT_LOUDNESS_DB)
-        set(value) = prefs.edit { putFloat(KEY_LOUDNESS, value.coerceIn(-24f, -9f)) }
+    /**
+     * Null until the user actually moves the slider.
+     *
+     * Returning a default instead meant every plan carried an explicit override,
+     * so the per-style loudness targets — quieter for Light touch, louder for
+     * Tight — could never take effect on a phone whose owner had never opened
+     * settings.
+     */
+    var targetLoudnessDb: Float?
+        get() = if (prefs.contains(KEY_LOUDNESS)) prefs.getFloat(KEY_LOUDNESS, DEFAULT_LOUDNESS_DB) else null
+        set(value) = prefs.edit {
+            if (value == null) remove(KEY_LOUDNESS) else putFloat(KEY_LOUDNESS, value.coerceIn(-24f, -9f))
+        }
 
     /**
      * Highest MediaStore id already considered by the automatic mode.

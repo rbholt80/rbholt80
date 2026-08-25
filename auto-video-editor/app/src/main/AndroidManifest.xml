@@ -21,9 +21,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Hardware video encoding is what makes an export take a minute and not an hour. -->
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-
     <application
         android:name=".AutoCutApp"
         android:allowBackup="true"

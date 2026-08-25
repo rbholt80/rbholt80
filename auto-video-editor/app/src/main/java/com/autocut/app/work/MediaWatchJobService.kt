@@ -32,10 +32,10 @@ class MediaWatchJobService : JobService() {
         // consumed when it fires and has to be put back — but rescheduling this
         // job's own id while it is executing makes JobScheduler tear the
         // execution down, losing the scan. finally still covers the crash case.
-        if (!Settings(this).autoEditNewVideos) {
-            MediaWatchScheduler.schedule(applicationContext)
-            return false
-        }
+        // Switched off: leave the trigger cancelled. Rescheduling here woke the
+        // app process on every library change — every photo, screenshot and
+        // download — to do nothing at all.
+        if (!Settings(this).autoEditNewVideos) return false
 
         work = scope.launch {
             try {
@@ -48,7 +48,12 @@ class MediaWatchJobService : JobService() {
             } catch (e: Exception) {
                 Log.e(TAG, "Could not scan for new videos", e)
             } finally {
-                MediaWatchScheduler.schedule(applicationContext)
+                // Only if the mode is still on. The SecurityException path above
+                // deliberately turns it off and cancels the job, and re-arming
+                // unconditionally put it straight back.
+                if (Settings(applicationContext).autoEditNewVideos) {
+                    MediaWatchScheduler.schedule(applicationContext)
+                }
                 jobFinished(params, false)
             }
         }

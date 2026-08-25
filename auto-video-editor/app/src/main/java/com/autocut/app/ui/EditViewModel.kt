@@ -15,11 +15,13 @@ import com.autocut.engine.model.EditPlan
 import com.autocut.engine.model.EditPreferences
 import com.autocut.engine.model.EditStyle
 import com.autocut.engine.plan.EditPlanner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -59,7 +61,12 @@ class EditViewModel(application: Application) : AndroidViewModel(application) {
     val hasOverrides: Boolean get() = preferences.overrides.isNotEmpty()
 
     fun open(uri: Uri) {
-        if (uri == source && analysis != null) return
+        // The in-flight job counts as "already open". The Activity calls this on
+        // every onCreate, recreation included, and `analysis` is only set once
+        // decoding finishes — so rotating during a long analysis used to throw
+        // away everything decoded so far and start again from zero. Rotate often
+        // enough and it would never finish at all.
+        if (uri == source && (analysis != null || running?.isActive == true)) return
         source = uri
         sourceName = displayName(uri)
         analyze(uri)
@@ -108,6 +115,11 @@ class EditViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun replan() {
         val current = analysis ?: return
+        // Never drop out of Exporting. The fix list stays on screen during an
+        // export, and a stray toggle used to flip the state to Ready — hiding the
+        // progress bar and re-enabling Save — until the next progress tick
+        // slammed it back, while the export carried on against the old plan.
+        if (_state.value is State.Exporting) return
         _state.value = State.Ready(EditPlanner.plan(current, preferences))
     }
 
@@ -124,11 +136,18 @@ class EditViewModel(application: Application) : AndroidViewModel(application) {
                 AutoCutRenderer(context).render(uri, plan, scratch) { percent ->
                     _state.value = State.Exporting(percent, plan)
                 }
-                val saved = OutputStore.publish(
-                    context,
-                    scratch,
-                    OutputStore.nameFor(sourceName, System.currentTimeMillis()),
-                )
+                // Off the main thread: this copies the whole exported file into
+                // the media library. viewModelScope is Main, and Transformer
+                // returns on Main, so publishing here directly blocked the UI
+                // thread for a byte-for-byte copy — seconds for a large export,
+                // which is an ANR, not a stutter.
+                val saved = withContext(Dispatchers.IO) {
+                    OutputStore.publish(
+                        context,
+                        scratch,
+                        OutputStore.nameFor(sourceName, System.currentTimeMillis()),
+                    )
+                }
                 _state.value = State.Saved(saved, plan)
             } catch (e: Exception) {
                 _state.value = State.Failed(e.message ?: FALLBACK_ERROR)

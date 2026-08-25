@@ -13,5 +13,13 @@
         <item name="android:statusBarColor">@color/surface</item>
         <item name="android:navigationBarColor">@color/surface</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">@bool/light_system_bars</item>
+        <!-- Without this the navigation icons stay light against a near-white
+             surface, so on a three-button device the glyphs vanish. -->
+        <item name="android:windowLightNavigationBar">@bool/light_system_bars</item>
+        <!-- Chips are created in code, so they pick up chipStyle. The Material3
+             default is an assist chip, which has no checked-state visuals at
+             all: with single-selection style pickers, every option looked
+             identical and the selected one was invisible. -->
+        <item name="chipStyle">@style/Widget.Material3.Chip.Filter</item>
     </style>
 </resources>

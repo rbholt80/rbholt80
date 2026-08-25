@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
+import kotlinx.coroutines.CancellationException
 import java.io.File
 import java.io.IOException
 
@@ -44,17 +45,27 @@ object OutputStore {
             resolver.openOutputStream(uri)?.use { output ->
                 file.inputStream().use { input -> input.copyTo(output) }
             } ?: throw IOException("The new library entry could not be opened for writing.")
+
+            // Inside the same try as the write. Left outside it, a failure here
+            // stranded a fully written row at IS_PENDING=1: invisible in the
+            // gallery, invisible to this app, and holding its full size on disk
+            // with nothing anywhere able to clean it up.
+            resolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) },
+                null,
+                null,
+            )
+        } catch (e: CancellationException) {
+            // Cancelling an export is not a media failure, and the row still has
+            // to go.
+            resolver.delete(uri, null, null)
+            throw e
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
             throw if (e is IOException) e else IOException("The edited video could not be saved.", e)
         }
 
-        resolver.update(
-            uri,
-            ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) },
-            null,
-            null,
-        )
         file.delete()
         return uri
     }

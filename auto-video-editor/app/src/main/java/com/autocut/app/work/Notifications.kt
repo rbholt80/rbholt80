@@ -15,7 +15,6 @@ object Notifications {
 
     const val CHANNEL_PROGRESS = "autocut.progress"
     const val CHANNEL_RESULTS = "autocut.results"
-    const val PROGRESS_NOTIFICATION_ID = 1
 
     fun createChannels(context: Context) {
         val manager = context.getSystemService<NotificationManager>() ?: return
@@ -71,6 +70,11 @@ object Notifications {
             )
         }
         return builder.build()
+    }
+
+    fun cancel(context: Context, id: Int) {
+        val manager = context.getSystemService<NotificationManager>() ?: return
+        runCatching { manager.cancel(id) }
     }
 
     fun notify(context: Context, id: Int, notification: Notification) {

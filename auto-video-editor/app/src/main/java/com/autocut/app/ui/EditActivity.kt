@@ -28,6 +28,7 @@ class EditActivity : AppCompatActivity() {
     private val viewModel: EditViewModel by viewModels()
     private lateinit var fixAdapter: FixAdapter
     private var savedUri: Uri? = null
+    private var announcedSaveOf: Uri? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,6 +36,7 @@ class EditActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         binding.toolbar.setNavigationOnClickListener { finish() }
+        binding.actionBar.padForBottomSystemBar()
 
         fixAdapter = FixAdapter { id, enabled -> viewModel.setFix(id, enabled) }
         binding.fixes.layoutManager = LinearLayoutManager(this)
@@ -85,47 +87,63 @@ class EditActivity : AppCompatActivity() {
         }
     }
 
-    private fun render(state: EditViewModel.State) = when (state) {
-        is EditViewModel.State.Idle -> showBusy(getString(R.string.edit_analyzing), null)
+    private fun render(state: EditViewModel.State) {
+        when (state) {
+            is EditViewModel.State.Idle -> showBusy(getString(R.string.edit_analyzing), null)
 
-        is EditViewModel.State.Analyzing ->
-            showBusy(getString(R.string.edit_analyzing_percent, state.percent), state.percent)
+            is EditViewModel.State.Analyzing ->
+                showBusy(getString(R.string.edit_analyzing_percent, state.percent), state.percent)
 
-        is EditViewModel.State.Ready -> {
-            savedUri = null
-            hideBusy()
-            showPlan(state.plan)
-            binding.save.setText(R.string.action_save)
-            binding.save.isEnabled = state.plan.changesAnything
-            binding.play.visibility = View.GONE
-            binding.reset.isEnabled = viewModel.hasOverrides
-        }
+            is EditViewModel.State.Ready -> {
+                savedUri = null
+                hideBusy()
+                showPlan(state.plan)
+                setPlanInteractive(true)
+                binding.save.setText(R.string.action_save)
+                binding.save.isEnabled = state.plan.changesAnything
+                binding.play.visibility = View.GONE
+                binding.reset.isEnabled = viewModel.hasOverrides
+            }
 
-        is EditViewModel.State.Exporting -> {
-            showBusy(getString(R.string.edit_exporting, state.percent), state.percent)
-            binding.save.isEnabled = false
-            binding.reset.isEnabled = false
-        }
+            is EditViewModel.State.Exporting -> {
+                // The plan has to be re-shown, not just the progress bar: on a
+                // rotation mid-export the Activity is rebuilt with content hidden,
+                // and without this the user watched an empty page for the rest of
+                // the encode.
+                showPlan(state.plan)
+                showBusy(getString(R.string.edit_exporting, state.percent), state.percent)
+                binding.save.isEnabled = false
+                binding.reset.isEnabled = false
+                setPlanInteractive(false)
+            }
 
-        is EditViewModel.State.Saved -> {
-            savedUri = state.uri
-            hideBusy()
-            showPlan(state.plan)
-            binding.save.setText(R.string.action_share)
-            binding.save.isEnabled = true
-            binding.play.visibility = View.VISIBLE
-            binding.reset.isEnabled = false
-            Snackbar.make(binding.root, R.string.edit_saved, Snackbar.LENGTH_LONG).show()
-        }
+            is EditViewModel.State.Saved -> {
+                savedUri = state.uri
+                hideBusy()
+                showPlan(state.plan)
+                setPlanInteractive(true)
+                binding.save.setText(R.string.action_share)
+                binding.save.isEnabled = true
+                binding.play.visibility = View.VISIBLE
+                binding.reset.isEnabled = false
+                // Once per save, not once per render. StateFlow replays its current
+                // value to every new collector, so coming back from the share sheet
+                // used to announce a save that had not just happened.
+                if (announcedSaveOf != state.uri) {
+                    announcedSaveOf = state.uri
+                    Snackbar.make(binding.root, R.string.edit_saved, Snackbar.LENGTH_LONG).show()
+                }
+            }
 
-        is EditViewModel.State.Failed -> {
-            hideBusy()
-            binding.save.isEnabled = false
-            Snackbar.make(
-                binding.root,
-                getString(R.string.edit_failed, state.message),
-                Snackbar.LENGTH_INDEFINITE,
-            ).setAction(android.R.string.ok) { finish() }.show()
+            is EditViewModel.State.Failed -> {
+                hideBusy()
+                binding.save.isEnabled = false
+                Snackbar.make(
+                    binding.root,
+                    getString(R.string.edit_failed, state.message),
+                    Snackbar.LENGTH_INDEFINITE,
+                ).setAction(android.R.string.ok) { finish() }.show()
+            }
         }
     }
 
@@ -146,6 +164,19 @@ class EditActivity : AppCompatActivity() {
         val hasNotes = notes.isNotBlank()
         binding.notes.visibility = if (hasNotes) View.VISIBLE else View.GONE
         binding.notesLabel.visibility = if (hasNotes) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Locks the plan while an export is running, so it cannot be edited
+     * underneath itself. The rows are locked through the adapter — isEnabled on
+     * a RecyclerView does not reach its children.
+     */
+    private fun setPlanInteractive(interactive: Boolean) {
+        fixAdapter.setInteractive(interactive)
+        for (index in 0 until binding.styleGroup.childCount) {
+            binding.styleGroup.getChildAt(index).isEnabled = interactive
+        }
+        binding.styleGroup.alpha = if (interactive) 1f else 0.5f
     }
 
     private fun showBusy(label: String, percent: Int?) {

@@ -19,6 +19,7 @@ import com.autocut.app.media.MediaReadException
 import com.autocut.app.media.SignalExtractor
 import com.autocut.engine.model.EditPlan
 import com.autocut.engine.plan.EditPlanner
+import kotlinx.coroutines.CancellationException
 import java.io.File
 
 /**
@@ -34,6 +35,20 @@ class AutoEditWorker(
     context: Context,
     params: androidx.work.WorkerParameters,
 ) : CoroutineWorker(context, params) {
+
+    /**
+     * Notification slots derived from the source, so concurrent workers do not
+     * overwrite one another.
+     *
+     * A single shared id meant four videos queued from one library scan fought
+     * over one progress notification, and every outcome without an output uri —
+     * "nothing to fix" and both failures — collapsed onto one more. Making the
+     * pair odd and even guarantees a video's progress and its result never
+     * collide either.
+     */
+    private val sourceKey: Int get() = inputData.getString(KEY_URI).hashCode()
+    private val progressNotificationId: Int get() = sourceKey or 1
+    private val resultNotificationId: Int get() = sourceKey and 1.inv()
 
     override suspend fun doWork(): Result {
         val uri = inputData.getString(KEY_URI)?.let(Uri::parse) ?: return Result.failure()
@@ -82,18 +97,31 @@ class AutoEditWorker(
                 null,
             )
             return Result.failure()
+        } catch (e: CancellationException) {
+            // The system stopping this worker is not a failure to report.
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Auto edit failed for $uri", e)
-            notifyResult(
-                context.getString(R.string.notification_failed_title),
-                context.getString(R.string.notification_failed_text),
-                null,
-            )
             // Worth one more attempt: an export can fail because the encoder was
-            // busy with the camera, which is a passing condition.
-            return if (runAttemptCount < 2) Result.retry() else Result.failure()
+            // busy with the camera, which is a passing condition. Stay quiet
+            // while retrying — announcing a failure and then succeeding left the
+            // user with a permanent "could not edit that video" notification
+            // sitting beside the finished result.
+            val retrying = runAttemptCount < 2
+            if (!retrying) {
+                notifyResult(
+                    context.getString(R.string.notification_failed_title),
+                    context.getString(R.string.notification_failed_text),
+                    null,
+                )
+            }
+            return if (retrying) Result.retry() else Result.failure()
         } finally {
             output.delete()
+            // Nothing else ever removes this: setForeground's notification is
+            // WorkManager's to cancel, but the progress updates posted directly
+            // are not.
+            Notifications.cancel(applicationContext, progressNotificationId)
         }
     }
 
@@ -139,7 +167,7 @@ class AutoEditWorker(
     private fun setProgressSafely(titleRes: Int, percent: Int) {
         Notifications.notify(
             applicationContext,
-            Notifications.PROGRESS_NOTIFICATION_ID,
+            progressNotificationId,
             Notifications.progress(
                 applicationContext,
                 applicationContext.getString(titleRes),
@@ -157,7 +185,7 @@ class AutoEditWorker(
             percent,
         )
         return ForegroundInfo(
-            Notifications.PROGRESS_NOTIFICATION_ID,
+            progressNotificationId,
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
@@ -166,7 +194,7 @@ class AutoEditWorker(
     private fun notifyResult(title: String, text: String, video: Uri?) {
         Notifications.notify(
             applicationContext,
-            RESULT_NOTIFICATION_BASE + (video?.hashCode() ?: 0),
+            resultNotificationId,
             Notifications.result(applicationContext, title, text, video),
         )
     }
@@ -174,7 +202,6 @@ class AutoEditWorker(
     companion object {
         private const val TAG = "AutoEditWorker"
         private const val KEY_URI = "uri"
-        private const val RESULT_NOTIFICATION_BASE = 100
 
         fun enqueue(context: Context, uri: Uri) {
             val request = OneTimeWorkRequestBuilder<AutoEditWorker>()
