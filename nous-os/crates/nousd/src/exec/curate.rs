@@ -404,12 +404,39 @@ fn scan(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     ))
 }
 
+/// Which finding gets to decide a file's fate when several apply to it.
+///
+/// A file can easily be both "a duplicate" and "media in the wrong folder".
+/// Filing it into Music *and* moving it to the duplicates tray are mutually
+/// exclusive, and the first move would make the second fail. Duplicate handling
+/// wins because it is the more consequential judgement: there is no point
+/// tidying a file into your library that you are about to be shown as a copy.
+fn kind_priority(kind: &str) -> u8 {
+    match kind {
+        "duplicate" => 0,
+        "misfiled_media" => 1,
+        "screenshots" => 2,
+        "stale_downloads" => 3,
+        _ => 9,
+    }
+}
+
 /// Turn findings into concrete steps. Every step is a move; the curator never
 /// proposes a delete.
 pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut n = 0;
-    for f in findings {
+    // Each source path may be moved at most once, and destinations must be
+    // unique too -- two files called `scan.pdf` from different folders would
+    // otherwise be proposed into the same destination, and the second move
+    // would refuse to clobber the first.
+    let mut claimed_sources: std::collections::HashSet<PathBuf> = Default::default();
+    let mut claimed_dests: std::collections::HashSet<PathBuf> = Default::default();
+
+    let mut ordered: Vec<&Finding> = findings.iter().collect();
+    ordered.sort_by_key(|f| kind_priority(f.kind));
+
+    for f in ordered {
         if !kinds.is_empty() && !kinds.iter().any(|k| k == f.kind) {
             continue;
         }
@@ -449,7 +476,26 @@ pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<St
             _ => Vec::new(),
         };
 
-        for (from, to) in targets {
+        for (from, mut to) in targets {
+            if !claimed_sources.insert(from.clone()) {
+                continue;
+            }
+            // Disambiguate a colliding destination rather than dropping the move.
+            if claimed_dests.contains(&to) || to.exists() {
+                let stem = to.file_stem().and_then(|s| s.to_str()).unwrap_or("item").to_string();
+                let ext = to.extension().and_then(|s| s.to_str()).map(|e| format!(".{}", e)).unwrap_or_default();
+                let parent = to.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                let mut i = 2;
+                loop {
+                    let candidate = parent.join(format!("{} ({}){}", stem, i, ext));
+                    if !claimed_dests.contains(&candidate) && !candidate.exists() {
+                        to = candidate;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            claimed_dests.insert(to.clone());
             n += 1;
             steps.push(Step::new(
                 &format!("tidy{}", n),
@@ -629,6 +675,63 @@ mod tests {
         let steps = plan_steps(&[f], &home, &[]);
         assert_eq!(steps.len(), 2, "only the extra copies move");
         assert!(steps.iter().all(|s| !s.args.str_or("from", "").ends_with("keep.bin")));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_file_is_never_proposed_for_two_destinations() {
+        // The case that showed up the first time this ran against a real home
+        // directory: a duplicate mp3 sitting in Downloads is both "a duplicate"
+        // and "misfiled media", and was proposed for both.
+        let home = scratch("conflict");
+        let dupe = home.join("Downloads/album-track-copy.mp3");
+        let misfiled = Finding {
+            kind: "misfiled_media",
+            severity: 3,
+            title: "t".into(),
+            detail: "d".into(),
+            paths: vec![home.join("Downloads/album-track.mp3"), dupe.clone()],
+            bytes: 10,
+        };
+        let duplicate = Finding {
+            kind: "duplicate",
+            severity: 3,
+            title: "t".into(),
+            detail: "d".into(),
+            paths: vec![home.join("Downloads/album-track.mp3"), dupe.clone()],
+            bytes: 10,
+        };
+
+        let steps = plan_steps(&[misfiled, duplicate], &home, &[]);
+        let moves_of_dupe: Vec<&Step> =
+            steps.iter().filter(|s| s.args.str_or("from", "").ends_with("album-track-copy.mp3")).collect();
+        assert_eq!(moves_of_dupe.len(), 1, "one file, one destination");
+        assert!(
+            moves_of_dupe[0].args.str_or("to", "").contains("Duplicates"),
+            "duplicate handling takes precedence over filing: {}",
+            moves_of_dupe[0].args.str_or("to", "")
+        );
+        // The original is still filed into the library.
+        assert!(steps.iter().any(|s| s.args.str_or("to", "").ends_with("Music/album-track.mp3")));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn colliding_destinations_are_disambiguated_not_dropped() {
+        let home = scratch("collide-dest");
+        let f = Finding {
+            kind: "screenshots",
+            severity: 2,
+            title: "t".into(),
+            detail: "d".into(),
+            paths: vec![home.join("Desktop/shot.png"), home.join("Downloads/shot.png")],
+            bytes: 2,
+        };
+        let steps = plan_steps(&[f], &home, &[]);
+        assert_eq!(steps.len(), 2, "both files should still be moved");
+        let dests: Vec<String> = steps.iter().map(|s| s.args.str_or("to", "").to_string()).collect();
+        assert_ne!(dests[0], dests[1], "two files cannot land on the same path");
+        assert!(dests[1].contains("shot (2).png"), "{}", dests[1]);
         let _ = fs::remove_dir_all(&home);
     }
 

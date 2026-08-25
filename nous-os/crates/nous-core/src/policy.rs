@@ -152,6 +152,7 @@ allow    *              net.status
 allow    *              pkg.query
 allow    *              ctx.read
 allow    *              journal.read
+allow    *              fs.index
 allow    *              model.infer
 allow    *              media.probe
 allow    *              media.search
@@ -166,6 +167,7 @@ allow    user           fs.move:/home/**
 allow    user           ui.notify
 allow    user           ui.render
 allow    user           ctx.write
+allow    user           journal.revert           # undo is never harder than the act
 allow    user           media.play
 allow    user           media.control
 allow    user           media.edit
@@ -199,6 +201,7 @@ confirm  agent:*        net.connect
 confirm  agent:*        pkg.install
 confirm  agent:*        pkg.remove
 deny     agent:*        fs.delete                # agents never delete, full stop
+deny     agent:*        journal.revert           # only the human rewrites history
 
 # --- the daemon's own housekeeping -------------------------------------------
 allow    system         fs.write:/var/lib/nous/**

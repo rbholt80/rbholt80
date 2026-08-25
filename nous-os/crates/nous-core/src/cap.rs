@@ -94,6 +94,11 @@ impl Capability {
             ("fs", "write") | ("fs", "mkdir") | ("fs", "move") => Risk::Write,
             ("ctx", "write") | ("ui", "notify") | ("ui", "render") => Risk::Write,
             ("svc", "start") | ("svc", "stop") | ("svc", "restart") => Risk::Write,
+            // Undo changes state, so it is a write -- but see the policy: it is
+            // allowed outright, because undo must never be harder to reach than
+            // the action it reverses.
+            ("journal", "revert") => Risk::Write,
+            ("fs", "index") => Risk::Write,
             ("model", "infer") => Risk::Write,
             // Playback and edit-graph authoring touch nothing on disk; rendering
             // writes a new file and never overwrites its source.
@@ -157,6 +162,7 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "shell.exec",
     "model.infer",
     "ctx.read", "ctx.write",
+    "journal.revert",
     "ui.notify", "ui.render",
     "journal.read",
     "media.probe", "media.search", "media.thumbnail", "media.play", "media.control",
