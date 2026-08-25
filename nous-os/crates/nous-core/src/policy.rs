@@ -139,7 +139,7 @@ deny     agent:*        sys.firmware
 deny     agent:*        sys.power                # only the human powers down
 
 # --- observation is free -----------------------------------------------------
-allow    *              fs.read:/home/**
+allow    *              fs.read:~/**
 allow    *              fs.read:/tmp/**
 allow    *              fs.list
 allow    *              fs.stat
@@ -161,9 +161,9 @@ allow    *              curate.scan
 allow    *              curate.propose
 
 # --- the user's own machine, for the user ------------------------------------
-allow    user           fs.write:/home/**
-allow    user           fs.mkdir:/home/**
-allow    user           fs.move:/home/**
+allow    user           fs.write:~/**
+allow    user           fs.mkdir:~/**
+allow    user           fs.move:~/**
 allow    user           ui.notify
 allow    user           ui.render
 allow    user           ctx.write
@@ -172,7 +172,7 @@ allow    user           media.play
 allow    user           media.control
 allow    user           media.edit
 allow    user           media.index
-allow    user           media.render:/home/**
+allow    user           media.render:~/**
 confirm  user           curate.apply             # tidying always shows its plan first
 confirm  user           fs.delete:/**            # deletion always asks
 confirm  user           shell.exec               # so does running arbitrary code
@@ -190,11 +190,11 @@ confirm  user           sys.mount
 allow    agent:*        ui.notify
 allow    agent:*        ctx.write
 allow    agent:*        media.index
-confirm  agent:*        media.render:/home/**
+confirm  agent:*        media.render:~/**
 confirm  agent:*        curate.apply
-confirm  agent:*        fs.write:/home/**
-confirm  agent:*        fs.mkdir:/home/**
-confirm  agent:*        fs.move:/home/**
+confirm  agent:*        fs.write:~/**
+confirm  agent:*        fs.mkdir:~/**
+confirm  agent:*        fs.move:~/**
 deny     agent:*        fs.write:/etc/**         # config edits go through the user
 confirm  agent:*        shell.exec
 confirm  agent:*        net.connect
@@ -281,6 +281,9 @@ allow    system         proc.spawn
 
     pub fn evaluate(&self, subject: &Subject, cap: &Capability) -> Verdict {
         let risk = cap.risk();
+        // Both the request and the rules are resolved against the real home
+        // directory before they are compared.
+        let cap = &cap.expand_home();
 
         // 1. The immutable floor. Nothing below can reach past this.
         if let Some(pattern) = protected_violation(cap) {
@@ -296,7 +299,7 @@ allow    system         proc.spawn
 
         // 2. Ordered rules, first match wins.
         for rule in &self.rules {
-            if subject.matches(&rule.subject) && rule.capability.covers(cap) {
+            if subject.matches(&rule.subject) && rule.capability.expand_home().covers(cap) {
                 let matched = format!("{}:{}", rule.source, rule.line);
                 // An `allow` rule cannot lift an agent past its risk ceiling; it
                 // is downgraded to a confirmation instead of being honoured.
@@ -345,13 +348,28 @@ mod tests {
 
     #[test]
     fn defaults_permit_reading_your_own_files() {
+        std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
         let v = p.evaluate(&Subject::User, &cap("fs.read:/home/joey/notes.md"));
         assert_eq!(v.decision, Decision::Allow, "{}", v.explain());
     }
 
     #[test]
+    fn the_defaults_work_for_a_home_outside_slash_home() {
+        // A user provisioned under /export/home, or on a system that puts homes
+        // elsewhere, must get the same defaults as everybody else.
+        std::env::set_var("HOME", "/export/home/joey");
+        let p = Policy::builtin();
+        assert!(p.evaluate(&Subject::User, &cap("fs.write:/export/home/joey/notes.md")).decision.is_allow());
+        assert!(p.evaluate(&Subject::User, &cap("fs.move:/export/home/joey/a.mp3")).decision.is_allow());
+        // And still not into someone else's.
+        assert!(!p.evaluate(&Subject::User, &cap("fs.write:/export/home/other/x")).decision.is_allow());
+        std::env::set_var("HOME", "/home/joey");
+    }
+
+    #[test]
     fn deletion_always_asks_even_for_the_user() {
+        std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
         let v = p.evaluate(&Subject::User, &cap("fs.delete:/home/joey/old.txt"));
         assert!(matches!(v.decision, Decision::Confirm(_)), "{}", v.explain());
@@ -385,6 +403,7 @@ mod tests {
 
     #[test]
     fn secrets_never_reach_context() {
+        std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
         for path in ["/etc/shadow", "/home/joey/.ssh/id_ed25519", "/home/joey/.aws/credentials"] {
             let v = p.evaluate(&Subject::User, &cap(&format!("fs.read:{}", path)));

@@ -543,49 +543,16 @@ fn propose(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     ))
 }
 
-/// Execute a proposal. Each move is journalled individually, so a partial
-/// failure leaves a coherent, fully reversible trail rather than an unknown
-/// half-state.
-fn apply(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
-    let steps: Vec<Step> = step.args.arr_or_empty("steps").iter().map(Step::from_json).collect();
-    if steps.is_empty() {
-        return Err("this proposal has no steps to apply".to_string());
-    }
-
-    let mut done = 0usize;
-    let mut failed: Vec<Json> = Vec::new();
-    let mut undos: Vec<Json> = Vec::new();
-
-    for s in &steps {
-        match super::fsops::execute(&Capability::parse(&s.capability)?, s, ctx) {
-            Ok(effect) => {
-                done += 1;
-                undos.push(effect.undo.to_json());
-            }
-            Err(e) => failed.push(json_obj([
-                ("step", s.id.clone().into()),
-                ("summary", s.summary.clone().into()),
-                ("error", e.into()),
-            ])),
-        }
-    }
-
-    Ok(Effect::with_undo(
-        json_obj([
-            ("applied", done.into()),
-            ("failed", Json::Arr(failed.clone())),
-            ("undos", Json::Arr(undos)),
-        ]),
-        nous_core::journal::Undo::Manual {
-            note: format!("{} moves were applied; revert them individually from the ledger", done),
-        },
-        format!(
-            "tidied {} of {} items{}",
-            done,
-            steps.len(),
-            if failed.is_empty() { String::new() } else { format!(" ({} failed)", failed.len()) }
-        ),
-    ))
+/// Applying a proposal is **not** done here.
+///
+/// The first live run of this code moved nine files and left them unreversible,
+/// because executing the moves inside the executor bypassed the broker: no
+/// policy check per move, and no journal entry per move, so there was nothing
+/// for undo to reverse. The curator's job ends at proposing. The broker expands
+/// a proposal and runs each move through the ordinary governed path, which is
+/// what makes every one of them individually undoable.
+fn apply(_step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
+    Err("curate.apply is expanded by the broker, not executed here".to_string())
 }
 
 #[cfg(test)]

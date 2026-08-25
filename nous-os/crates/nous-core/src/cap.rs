@@ -124,6 +124,28 @@ impl Capability {
         }
     }
 
+    /// Resolve `~` in the scope against the current home directory.
+    ///
+    /// Policy is written with `~/**` rather than `/home/**` because a home
+    /// directory is not always under `/home` -- it differs on macOS, on systems
+    /// with `/export/home`, for the root account, and for anyone whose account
+    /// was provisioned somewhere else. Both grants and requests are normalised
+    /// before they are compared, so the two sides always agree.
+    pub fn expand_home(&self) -> Capability {
+        let home = match std::env::var("HOME") {
+            Ok(h) if !h.is_empty() => h,
+            _ => return self.clone(),
+        };
+        let scope = if self.scope == "~" {
+            home
+        } else if let Some(rest) = self.scope.strip_prefix("~/") {
+            format!("{}/{}", home.trim_end_matches('/'), rest)
+        } else {
+            return self.clone();
+        };
+        Capability { domain: self.domain.clone(), action: self.action.clone(), scope }
+    }
+
     /// Does this capability (as *granted*) cover `req` (as *requested*)?
     ///
     /// Grants may use `*` as a wildcard for domain or action, and glob syntax in
@@ -351,6 +373,32 @@ mod tests {
 
         let wide = Capability::parse("fs.*:/tmp/**").unwrap();
         assert!(wide.covers(&Capability::parse("fs.delete:/tmp/x").unwrap()));
+    }
+
+    #[test]
+    fn home_relative_scopes_expand_for_both_sides() {
+        std::env::set_var("HOME", "/export/home/joey");
+        let grant = Capability::parse("fs.write:~/**").unwrap().expand_home();
+        assert_eq!(grant.scope, "/export/home/joey/**");
+
+        let request = Capability::parse("fs.write:~/notes.md").unwrap().expand_home();
+        assert_eq!(request.scope, "/export/home/joey/notes.md");
+        assert!(grant.covers(&request));
+
+        // An absolute request under the same home is covered too.
+        let absolute = Capability::parse("fs.write:/export/home/joey/a/b.txt").unwrap();
+        assert!(grant.covers(&absolute.expand_home()));
+
+        // Someone else's home is not.
+        assert!(!grant.covers(&Capability::parse("fs.write:/export/home/other/x").unwrap()));
+    }
+
+    #[test]
+    fn expanding_leaves_absolute_scopes_alone() {
+        std::env::set_var("HOME", "/home/joey");
+        let c = Capability::parse("fs.read:/etc/hosts").unwrap();
+        assert_eq!(c.expand_home().scope, "/etc/hosts");
+        assert_eq!(Capability::parse("proc.list").unwrap().expand_home().scope, "*");
     }
 
     #[test]

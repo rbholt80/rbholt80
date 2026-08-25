@@ -234,7 +234,7 @@ impl Broker {
             };
 
             let ctx = ExecCtx::new(&self.cfg, &self.journal, opts.dry_run);
-            let effect = match self.dispatch(&cap, &resolved, &ctx) {
+            let effect = match self.dispatch(&cap, &resolved, &ctx, plan, opts) {
                 Ok(e) => e,
                 Err(e) => {
                     self.record(&cap, verdict.decision.kind(), Outcome::Failed, plan, &e, Undo::None);
@@ -295,8 +295,11 @@ impl Broker {
         cap: &Capability,
         step: &Step,
         ctx: &ExecCtx,
+        plan: &Plan,
+        opts: &RunOptions,
     ) -> Result<exec::Effect, String> {
         match (cap.domain.as_str(), cap.action.as_str()) {
+            ("curate", "apply") => self.apply_proposal(step, ctx, plan, opts),
             ("journal", "read") => {
                 let n = step.args.get("limit").and_then(|v| v.as_u64()).unwrap_or(25) as usize;
                 let records = self.journal.tail(n)?;
@@ -330,6 +333,127 @@ impl Broker {
             }
             _ => exec::execute(step, ctx),
         }
+    }
+
+    /// Expand a curator proposal into individually governed moves.
+    ///
+    /// Each move is adjudicated and journalled on its own, so the ledger shows
+    /// nine entries rather than one, and each can be reversed independently.
+    /// A partial failure therefore leaves a coherent trail instead of an
+    /// unknown half-state.
+    fn apply_proposal(
+        &self,
+        step: &Step,
+        ctx: &ExecCtx,
+        plan: &Plan,
+        opts: &RunOptions,
+    ) -> Result<exec::Effect, String> {
+        let steps: Vec<Step> =
+            step.args.arr_or_empty("steps").iter().map(Step::from_json).collect();
+        if steps.is_empty() {
+            return Err("this proposal has no steps to apply".to_string());
+        }
+
+        let mut applied = 0usize;
+        let mut seqs: Vec<Json> = Vec::new();
+        let mut failed: Vec<Json> = Vec::new();
+
+        for s in &steps {
+            let sub = match Capability::parse(&s.capability) {
+                Ok(c) => c,
+                Err(e) => {
+                    failed.push(json_obj([("step", s.id.clone().into()), ("error", e.into())]));
+                    continue;
+                }
+            };
+            let verdict = self.policy.evaluate(&opts.subject, &sub);
+            match &verdict.decision {
+                Decision::Deny(reason) => {
+                    let _ = self.record(&sub, "deny", Outcome::Refused, plan, reason, Undo::None);
+                    failed.push(json_obj([
+                        ("step", s.id.clone().into()),
+                        ("summary", s.summary.clone().into()),
+                        ("error", reason.clone().into()),
+                    ]));
+                    continue;
+                }
+                // Approving the tidy-up approves the moves it is made of; it
+                // would be theatre to ask again nine times.
+                Decision::Confirm(reason) if !opts.approved && !opts.dry_run => {
+                    failed.push(json_obj([
+                        ("step", s.id.clone().into()),
+                        ("error", format!("needs approval: {}", reason).into()),
+                    ]));
+                    continue;
+                }
+                _ => {}
+            }
+
+            match exec::execute(s, ctx) {
+                Ok(effect) => {
+                    let outcome = if ctx.dry_run {
+                        Outcome::DryRun
+                    } else if matches!(verdict.decision, Decision::Confirm(_)) {
+                        Outcome::Confirmed
+                    } else {
+                        Outcome::Executed
+                    };
+                    match self.record(
+                        &sub,
+                        verdict.decision.kind(),
+                        outcome,
+                        plan,
+                        &effect.detail,
+                        effect.undo,
+                    ) {
+                        Ok(seq) => {
+                            seqs.push(seq.into());
+                            applied += 1;
+                        }
+                        Err(e) => failed.push(json_obj([
+                            ("step", s.id.clone().into()),
+                            ("error", e.into()),
+                        ])),
+                    }
+                }
+                Err(e) => {
+                    let _ = self.record(
+                        &sub,
+                        verdict.decision.kind(),
+                        Outcome::Failed,
+                        plan,
+                        &e,
+                        Undo::None,
+                    );
+                    failed.push(json_obj([
+                        ("step", s.id.clone().into()),
+                        ("summary", s.summary.clone().into()),
+                        ("error", e.into()),
+                    ]));
+                }
+            }
+        }
+
+        Ok(exec::Effect::with_undo(
+            json_obj([
+                ("applied", applied.into()),
+                ("entries", Json::Arr(seqs)),
+                ("failed", Json::Arr(failed.clone())),
+            ]),
+            // The aggregate itself has nothing extra to reverse: the individual
+            // moves each carry their own undo.
+            Undo::None,
+            format!(
+                "tidied {} of {} items{}",
+                applied,
+                steps.len(),
+                if failed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({} could not be moved)", failed.len())
+                }
+            ),
+        ))
     }
 
     /// Reverse a journalled action.
@@ -516,9 +640,8 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let mut policy = Policy::parse(
             &format!(
-                "allow user fs.write:{}\nallow user fs.mkdir:{}",
-                work.join("**").display(),
-                work.join("**").display()
+                "allow user fs.write:{w}\nallow user fs.mkdir:{w}\nallow user fs.move:{w}",
+                w = work.join("**").display()
             ),
             "test",
         )
@@ -742,6 +865,110 @@ mod tests {
         // Truthiness with no operator.
         assert!(evaluate_gate(&json_obj([("left", Json::Bool(true))])));
         assert!(!evaluate_gate(&json_obj([("left", Json::Null)])));
+    }
+
+    #[test]
+    fn applying_a_proposal_journals_every_move_individually() {
+        // The regression this was written for: applying a tidy-up used to run
+        // its moves inside the executor, so nine files moved and none of them
+        // could be undone.
+        let f = fixture("proposal-undo");
+        let work = f.root.join("work");
+        std::fs::create_dir_all(work.join("Downloads")).unwrap();
+        let mut sub_steps = Vec::new();
+        for name in ["a.mp3", "b.mp3", "c.mp4"] {
+            let from = work.join("Downloads").join(name);
+            std::fs::write(&from, b"x").unwrap();
+            let to = work.join("Library").join(name);
+            sub_steps.push(
+                Step::new(
+                    "m",
+                    &format!("fs.move:{}", from.display()),
+                    "fs",
+                    &format!("move {}", name),
+                    json_obj([
+                        ("from", from.to_string_lossy().to_string().into()),
+                        ("to", to.to_string_lossy().to_string().into()),
+                    ]),
+                )
+                .to_json(),
+            );
+        }
+
+        let apply = Step::new(
+            "s1",
+            "curate.apply",
+            "curate",
+            "apply the tidy-up",
+            json_obj([("steps", Json::Arr(sub_steps))]),
+        );
+        let out = f.broker.run(
+            &plan_of(vec![apply]),
+            &RunOptions { approved: true, ..Default::default() },
+        );
+        assert_eq!(out.str_or("status", ""), "completed", "{}", out.to_string_pretty());
+        assert!(!work.join("Downloads/a.mp3").exists());
+        assert!(work.join("Library/a.mp3").exists());
+
+        // Three governed moves, each with its own undo, plus the aggregate.
+        let moves: Vec<_> = f
+            .broker
+            .journal
+            .read_all()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.capability.starts_with("fs.move"))
+            .collect();
+        assert_eq!(moves.len(), 3, "each move must be journalled on its own");
+        assert!(moves.iter().all(|m| m.is_revertible()), "and each must be reversible");
+
+        // Undoing three times puts every file back.
+        for _ in 0..3 {
+            let undo = Step::new("u", "journal.revert", "journal", "undo", Json::obj());
+            let r = f.broker.run(&plan_of(vec![undo]), &RunOptions { approved: true, ..Default::default() });
+            assert_eq!(r.str_or("status", ""), "completed", "{}", r.to_string_pretty());
+        }
+        for name in ["a.mp3", "b.mp3", "c.mp4"] {
+            assert!(work.join("Downloads").join(name).exists(), "{} should be back", name);
+        }
+    }
+
+    #[test]
+    fn a_denied_move_inside_a_proposal_does_not_stop_the_others() {
+        let f = fixture("proposal-partial");
+        let work = f.root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let good_from = work.join("ok.txt");
+        std::fs::write(&good_from, b"x").unwrap();
+
+        let sub = vec![
+            Step::new(
+                "m1",
+                "fs.move:/boot/vmlinuz",
+                "fs",
+                "move something protected",
+                json_obj([("from", "/boot/vmlinuz".into()), ("to", "/tmp/x".into())]),
+            )
+            .to_json(),
+            Step::new(
+                "m2",
+                &format!("fs.move:{}", good_from.display()),
+                "fs",
+                "move an ordinary file",
+                json_obj([
+                    ("from", good_from.to_string_lossy().to_string().into()),
+                    ("to", work.join("moved.txt").to_string_lossy().to_string().into()),
+                ]),
+            )
+            .to_json(),
+        ];
+        let apply = Step::new("s1", "curate.apply", "curate", "apply", json_obj([("steps", Json::Arr(sub))]));
+        let out = f.broker.run(&plan_of(vec![apply]), &RunOptions { approved: true, ..Default::default() });
+
+        let value = &out.arr_or_empty("results")[0];
+        assert_eq!(value.path("value.applied").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(value.path("value.failed").and_then(|v| v.as_arr()).map(|a| a.len()), Some(1));
+        assert!(work.join("moved.txt").exists(), "the permitted move should still happen");
     }
 
     #[test]
