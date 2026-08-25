@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Where an export lives between the encoder finishing and it being
+         published to the media library. -->
+    <cache-path name="exports" path="." />
+</paths>

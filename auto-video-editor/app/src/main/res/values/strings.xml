@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoCut</string>
+    <string name="title_edit">Edit</string>
+    <string name="title_settings">Settings</string>
+
+    <!-- Home -->
+    <string name="home_tagline">Pick a video. It gets trimmed, levelled and colour-corrected on its own. Change anything you disagree with.</string>
+    <string name="action_pick_video">Choose a video</string>
+    <string name="action_settings">Settings</string>
+    <string name="auto_mode_title">Edit new recordings automatically</string>
+    <string name="auto_mode_summary">When you record something new, AutoCut edits it in the background and saves the result to Movies/AutoCut. The original is never touched.</string>
+    <string name="auto_mode_needs_permission">Access to your videos is needed to notice new recordings.</string>
+    <string name="auto_mode_permission_denied">Automatic mode stays off without access to your videos.</string>
+    <string name="home_how_title">What it changes</string>
+    <string name="home_how_body">• Dead air at the start and end, and the long pauses in between\n• The recording level, brought to a consistent loudness\n• Exposure, colour cast, contrast and washed-out colour\n• Handheld shake, cancelled frame by frame\n• Out-of-focus takes, dropped\n\nEverything happens on your phone. Nothing is uploaded, and the original file is never modified.</string>
+
+    <!-- Edit -->
+    <string name="edit_analyzing">Watching the whole video…</string>
+    <string name="edit_analyzing_percent">Watching the whole video… %1$d%%</string>
+    <string name="edit_exporting">Saving… %1$d%%</string>
+    <string name="edit_style_label">How hard should it cut?</string>
+    <string name="edit_fixes_label">What it decided</string>
+    <string name="edit_notes_label">Worth knowing</string>
+    <string name="edit_no_fixes">Nothing needed fixing. This one is already in good shape.</string>
+    <string name="action_save">Save video</string>
+    <string name="action_reset">Undo my changes</string>
+    <string name="action_play">Play</string>
+    <string name="action_share">Share</string>
+    <string name="edit_saved">Saved to Movies/AutoCut</string>
+    <string name="edit_failed">%1$s</string>
+    <string name="edit_saves_time">saves %1$s</string>
+
+    <!-- Settings -->
+    <string name="settings_style_title">Default editing style</string>
+    <string name="settings_stabilize_title">Steady shaky footage</string>
+    <string name="settings_stabilize_summary">Cancels handheld wobble by moving each frame against it. Costs a small crop and some extra time to export.</string>
+    <string name="settings_loudness_title">Target loudness</string>
+    <string name="settings_loudness_value">%1$.0f dBFS</string>
+    <string name="settings_loudness_summary">Where the level is aimed. Quieter suits headphones, louder suits phone speakers.</string>
+    <string name="settings_about">AutoCut works entirely on your phone. No account, no upload, no analytics. Your originals are never modified — every edit is written as a new file.</string>
+
+    <!-- Notifications -->
+    <string name="channel_progress">Editing in progress</string>
+    <string name="channel_progress_description">Shown while a video is being analysed or saved.</string>
+    <string name="channel_results">Finished edits</string>
+    <string name="channel_results_description">Shown when an automatic edit is ready.</string>
+    <string name="notification_analyzing">Watching your video</string>
+    <string name="notification_exporting">Saving your edit</string>
+    <string name="notification_working">Working…</string>
+    <string name="notification_progress_text">%1$d%%</string>
+    <string name="notification_done_title">Edit ready</string>
+    <string name="notification_nothing_to_fix_title">Nothing to fix</string>
+    <string name="notification_nothing_to_fix_text">%1$s was already in good shape, so it was left alone.</string>
+    <string name="notification_failed_title">Could not edit that video</string>
+    <string name="notification_failed_text">Something went wrong while editing. The original is untouched.</string>
+
+    <plurals name="notification_done_text">
+        <item quantity="one">%1$d fix applied. %2$s</item>
+        <item quantity="other">%1$d fixes applied. %2$s</item>
+    </plurals>
+</resources>

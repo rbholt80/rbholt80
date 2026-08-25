@@ -1,0 +1,171 @@
+package com.autocut.app.work
+
+import android.content.Context
+import android.content.pm.ServiceInfo
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.Log
+import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.autocut.app.R
+import com.autocut.app.data.OutputStore
+import com.autocut.app.data.Settings
+import com.autocut.app.media.AutoCutRenderer
+import com.autocut.app.media.MediaReadException
+import com.autocut.app.media.SignalExtractor
+import com.autocut.engine.model.EditPlan
+import com.autocut.engine.plan.EditPlanner
+import java.io.File
+
+/**
+ * Edits one video end to end without anyone watching.
+ *
+ * This is the "does it by itself" path: analyse, decide, render, publish,
+ * notify. It runs the same engine and the same renderer as the interactive
+ * screen — the automatic mode is not a reduced version of the app, it is the
+ * app with nobody overruling it.
+ */
+class AutoEditWorker(
+    context: Context,
+    params: androidx.work.WorkerParameters,
+) : CoroutineWorker(context, params) {
+
+    override suspend fun doWork(): Result {
+        val uri = inputData.getString(KEY_URI)?.let(Uri::parse) ?: return Result.failure()
+        val context = applicationContext
+        val settings = Settings(context)
+
+        setProgressForeground(R.string.notification_analyzing, null)
+
+        val output = File(context.cacheDir, "autocut_${System.currentTimeMillis()}.mp4")
+        try {
+            val analysis = SignalExtractor(context).analyze(uri) { fraction ->
+                setProgressSafely(R.string.notification_analyzing, (fraction * 100).toInt())
+            }
+            val plan = EditPlanner.plan(analysis, settings.editPreferences())
+
+            if (!plan.changesAnything) {
+                notifyResult(
+                    context.getString(R.string.notification_nothing_to_fix_title),
+                    context.getString(R.string.notification_nothing_to_fix_text, displayName(uri)),
+                    null,
+                )
+                return Result.success()
+            }
+
+            setProgressForeground(R.string.notification_exporting, 0)
+            AutoCutRenderer(context).render(uri, plan, output) { percent ->
+                setProgressSafely(R.string.notification_exporting, percent)
+            }
+
+            val saved = OutputStore.publish(
+                context,
+                output,
+                OutputStore.nameFor(displayName(uri), System.currentTimeMillis()),
+            )
+            notifyResult(
+                context.getString(R.string.notification_done_title),
+                summaryOf(plan),
+                saved,
+            )
+            return Result.success()
+        } catch (e: MediaReadException) {
+            Log.w(TAG, "Could not read $uri", e)
+            notifyResult(
+                context.getString(R.string.notification_failed_title),
+                e.message ?: context.getString(R.string.notification_failed_text),
+                null,
+            )
+            return Result.failure()
+        } catch (e: Exception) {
+            Log.e(TAG, "Auto edit failed for $uri", e)
+            notifyResult(
+                context.getString(R.string.notification_failed_title),
+                context.getString(R.string.notification_failed_text),
+                null,
+            )
+            // Worth one more attempt: an export can fail because the encoder was
+            // busy with the camera, which is a passing condition.
+            return if (runAttemptCount < 2) Result.retry() else Result.failure()
+        } finally {
+            output.delete()
+        }
+    }
+
+    private fun summaryOf(plan: EditPlan): String {
+        val fixes = plan.enabledFixes.size
+        return applicationContext.resources.getQuantityString(
+            R.plurals.notification_done_text,
+            fixes,
+            fixes,
+            plan.summary(),
+        )
+    }
+
+    private fun displayName(uri: Uri): String? = runCatching {
+        applicationContext.contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+    }.getOrNull()
+
+    private suspend fun setProgressForeground(titleRes: Int, percent: Int?) {
+        runCatching { setForeground(foregroundInfo(titleRes, percent)) }
+    }
+
+    private fun setProgressSafely(titleRes: Int, percent: Int) {
+        Notifications.notify(
+            applicationContext,
+            Notifications.PROGRESS_NOTIFICATION_ID,
+            Notifications.progress(
+                applicationContext,
+                applicationContext.getString(titleRes),
+                applicationContext.getString(R.string.notification_progress_text, percent),
+                percent,
+            ),
+        )
+    }
+
+    private fun foregroundInfo(titleRes: Int, percent: Int?): ForegroundInfo {
+        val notification = Notifications.progress(
+            applicationContext,
+            applicationContext.getString(titleRes),
+            applicationContext.getString(R.string.notification_working),
+            percent,
+        )
+        return ForegroundInfo(
+            Notifications.PROGRESS_NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+    }
+
+    private fun notifyResult(title: String, text: String, video: Uri?) {
+        Notifications.notify(
+            applicationContext,
+            RESULT_NOTIFICATION_BASE + (video?.hashCode() ?: 0),
+            Notifications.result(applicationContext, title, text, video),
+        )
+    }
+
+    companion object {
+        private const val TAG = "AutoEditWorker"
+        private const val KEY_URI = "uri"
+        private const val RESULT_NOTIFICATION_BASE = 100
+
+        fun enqueue(context: Context, uri: Uri) {
+            val request = OneTimeWorkRequestBuilder<AutoEditWorker>()
+                .setInputData(workDataOf(KEY_URI to uri.toString()))
+                .build()
+            // Keyed on the source so a library scan that reports the same video
+            // twice does not edit it twice.
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "autocut:$uri",
+                androidx.work.ExistingWorkPolicy.KEEP,
+                request,
+            )
+        }
+    }
+}

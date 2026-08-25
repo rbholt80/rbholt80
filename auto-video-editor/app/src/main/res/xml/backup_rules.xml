@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Only the handful of user choices. Cached exports are large and
+         reproducible, so backing them up would waste the user's quota. -->
+    <include domain="sharedpref" path="autocut.xml" />
+    <exclude domain="external" path="." />
+</full-backup-content>

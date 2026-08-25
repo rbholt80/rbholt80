@@ -1,0 +1,111 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Release signing comes from an untracked keystore.properties or from CI
+// environment variables. When neither is present the release build is left
+// unsigned rather than failing, so a fresh clone still compiles.
+def keystorePropsFile = rootProject.file("keystore.properties")
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def signingStorePassword = keystoreProps['storePassword'] ?: System.getenv('AUTOCUT_STORE_PASSWORD')
+def signingKeyAlias = keystoreProps['keyAlias'] ?: System.getenv('AUTOCUT_KEY_ALIAS')
+def signingKeyPassword = keystoreProps['keyPassword'] ?: System.getenv('AUTOCUT_KEY_PASSWORD')
+def signingStorePath = keystoreProps['storeFile'] ?: 'keystore/autocut-release.jks'
+def canSignRelease = signingStorePassword && signingKeyAlias && signingKeyPassword &&
+        rootProject.file(signingStorePath).exists()
+
+android {
+    namespace 'com.autocut.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.autocut.app"
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        release {
+            if (canSignRelease) {
+                storeFile rootProject.file(signingStorePath)
+                storePassword signingStorePassword
+                keyAlias signingKeyAlias
+                keyPassword signingKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig canSignRelease ? signingConfigs.release : null
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    buildFeatures {
+        viewBinding true
+        buildConfig true
+    }
+
+    testOptions {
+        unitTests { returnDefaultValues = true }
+    }
+
+    lint {
+        // Every Transformer and effect class this app is built on is marked
+        // @UnstableApi, so the opt-in check would flag most of the media
+        // package. The mitigation that actually matters is the pinned Media3
+        // version above, not an annotation on each call site.
+        disable 'UnsafeOptInUsageError'
+        checkReleaseBuilds true
+        abortOnError true
+    }
+}
+
+dependencies {
+    // The editorial decisions live here and are tested on the JVM.
+    implementation project(':engine')
+
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity-ktx:1.9.3'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.0'
+    implementation 'androidx.recyclerview:recyclerview:1.4.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.annotation:annotation-experimental:1.4.1'
+
+    // Background auto-editing of newly recorded videos.
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+
+    // Media3 does the actual re-encode. Pinned deliberately: Transformer's
+    // composition API changed shape across 1.4 -> 1.5 (varargs builders,
+    // EditedMediaItemSequence.Builder), so the version and the call sites here
+    // move together or not at all.
+    implementation 'androidx.media3:media3-common:1.4.1'
+    implementation 'androidx.media3:media3-transformer:1.4.1'
+    implementation 'androidx.media3:media3-effect:1.4.1'
+
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

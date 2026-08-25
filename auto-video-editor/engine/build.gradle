@@ -1,0 +1,23 @@
+// AutoCut engine — the whole editorial brain as a plain JVM library.
+//
+// Nothing in here imports an Android class. Signal extraction and rendering are
+// platform work and live in :app; deciding *what the edit should be* is pure
+// arithmetic over a list of samples, so it lives here where it can be unit
+// tested on a laptop in milliseconds instead of on a device.
+plugins {
+    id 'org.jetbrains.kotlin.jvm'
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+
+tasks.withType(Test).configureEach {
+    testLogging {
+        events "passed", "failed", "skipped"
+    }
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#B7C4FF</color>
+    <color name="brand_container">#1B2A7A</color>
+    <color name="on_brand_container">#DDE3FF</color>
+    <color name="surface">#121318</color>
+    <color name="surface_container">#1E1F25</color>
+    <color name="on_surface">#E4E2E9</color>
+    <color name="on_surface_variant">#C5C6D0</color>
+    <color name="outline">#8F909A</color>
+    <color name="severity_important">#F2B8B5</color>
+    <color name="severity_suggested">#B7C4FF</color>
+    <color name="severity_info">#C5C6D0</color>
+</resources>
