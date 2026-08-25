@@ -315,11 +315,7 @@ fn print_plan(preflight: &Json) {
     println!(
         "  {}{}{}\n",
         colour(DIM),
-        if origin.starts_with("model") {
-            format!("resolved by {}", origin)
-        } else {
-            "understood locally".to_string()
-        },
+        describe_origin(origin),
         colour(RESET)
     );
     for s in preflight.arr_or_empty("steps") {
@@ -348,6 +344,17 @@ fn print_plan(preflight: &Json) {
             println!("           {}{}{}", colour(DIM), reason, colour(RESET));
         }
     }
+}
+
+/// How the plan was arrived at, in the user's terms.
+fn describe_origin(origin: &str) -> String {
+    if let Some(name) = origin.strip_prefix("addressed:") {
+        return format!("addressed to {}", name);
+    }
+    if origin.starts_with("model") {
+        return format!("resolved by {}", origin);
+    }
+    "understood locally".to_string()
 }
 
 fn cmd_intent(text: &str, execute: bool) -> Result<(), String> {

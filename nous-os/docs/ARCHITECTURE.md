@@ -99,6 +99,29 @@ folder, tidying a directory, asking what is using memory, undoing. It is fast,
 private, free, and it comes *first* rather than being a fallback. Opening a
 folder should not require an inference.
 
+### Named assistants
+
+Type a name first — `claude`, `chatgpt`, `local` — and the rest of what you
+typed becomes a question for it, addressed in the resolver before any other
+reading is considered: `claude open my downloads` asks Claude, it does not open
+a folder. The registry is configuration (`[assist.NAME]` sections), not code,
+because the point is that adding one is three lines in a file.
+
+Two decisions:
+
+- **`assist.ask` is `elevated`, always**, whatever the default policy says about
+  running it without a prompt. Configuring a key is the consent; the risk label
+  says so anyway, because "this leaves the machine" should be visible on every
+  plan, not just the first time.
+- **Agents are denied `assist.ask` outright.** An agent that could ask an
+  assistant on your behalf could put anything it had read into the question —
+  a file's contents, a clipboard, a conversation — and that is an exfiltration
+  channel wearing a friendly hat. Only you can address one directly.
+
+Asking one goes through the broker exactly like a file write: journalled,
+undoable in the sense that matters (the ledger shows what was asked and where
+it went), and visible in the plan before it runs.
+
 ### Keeping itself in check
 
 NOUS stores a lot on your behalf: a journal of everything it did, a snapshot of
@@ -145,7 +168,7 @@ CSP does not restrict.
 
 ## Testing
 
-308 Rust tests and 24 shell tests, and the ones that matter most are the adversarial ones: that a
+319 Rust tests and 24 shell tests, and the ones that matter most are the adversarial ones: that a
 protected path beats an explicit `allow`, that an undone action cannot be undone
 twice, that a corrupt journal line does not poison the log, that a hung
 subprocess is killed rather than wedging the daemon, that a slow event subscriber

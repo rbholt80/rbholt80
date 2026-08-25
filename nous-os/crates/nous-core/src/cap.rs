@@ -130,6 +130,11 @@ impl Capability {
             // private message, or someone else's data, and it would be crossing
             // an inference boundary. Neither is a "read" in the harmless sense.
             ("desk", "clipboard") | ("desk", "screenshot") => Risk::Elevated,
+            // Asking a hosted assistant sends what you typed to a third party.
+            // That is elevated whatever the convenience, and the label says so
+            // even though the default policy lets it run without a prompt --
+            // configuring a key is the consent, but it should still be visible.
+            ("assist", "ask") | ("assist", "list") => Risk::Elevated,
             // Launching an arbitrary application, closing a window that may
             // hold unsaved work, and changing desktop settings.
             ("desk", "launch") | ("desk", "close") | ("desk", "setting") => Risk::Elevated,
@@ -156,10 +161,19 @@ impl Capability {
     /// was provisioned somewhere else. Both grants and requests are normalised
     /// before they are compared, so the two sides always agree.
     pub fn expand_home(&self) -> Capability {
-        let home = match std::env::var("HOME") {
-            Ok(h) if !h.is_empty() => h,
-            _ => return self.clone(),
-        };
+        match std::env::var("HOME") {
+            Ok(h) if !h.is_empty() => self.expand_home_with(&h),
+            _ => self.clone(),
+        }
+    }
+
+    /// Same, against an explicit home directory.
+    ///
+    /// Separate from `expand_home` so callers that already know the home -- and
+    /// tests, which must not race each other over a process-global environment
+    /// variable -- can say so.
+    pub fn expand_home_with(&self, home: &str) -> Capability {
+        let home = home.to_string();
         let scope = if self.scope == "~" {
             home
         } else if let Some(rest) = self.scope.strip_prefix("~/") {
@@ -462,19 +476,23 @@ mod tests {
 
     #[test]
     fn home_relative_scopes_expand_for_both_sides() {
-        std::env::set_var("HOME", "/export/home/joey");
-        let grant = Capability::parse("fs.write:~/**").unwrap().expand_home();
+        // An explicit home rather than the environment: these tests run in
+        // parallel in one process, and HOME is shared state.
+        let home = "/export/home/joey";
+        let grant = Capability::parse("fs.write:~/**")
+            .unwrap()
+            .expand_home_with(home);
         assert_eq!(grant.scope, "/export/home/joey/**");
 
         let request = Capability::parse("fs.write:~/notes.md")
             .unwrap()
-            .expand_home();
+            .expand_home_with(home);
         assert_eq!(request.scope, "/export/home/joey/notes.md");
         assert!(grant.covers(&request));
 
         // An absolute request under the same home is covered too.
         let absolute = Capability::parse("fs.write:/export/home/joey/a/b.txt").unwrap();
-        assert!(grant.covers(&absolute.expand_home()));
+        assert!(grant.covers(&absolute.expand_home_with(home)));
 
         // Someone else's home is not.
         assert!(!grant.covers(&Capability::parse("fs.write:/export/home/other/x").unwrap()));
@@ -482,11 +500,13 @@ mod tests {
 
     #[test]
     fn expanding_leaves_absolute_scopes_alone() {
-        std::env::set_var("HOME", "/home/joey");
         let c = Capability::parse("fs.read:/etc/hosts").unwrap();
-        assert_eq!(c.expand_home().scope, "/etc/hosts");
+        assert_eq!(c.expand_home_with("/home/joey").scope, "/etc/hosts");
         assert_eq!(
-            Capability::parse("proc.list").unwrap().expand_home().scope,
+            Capability::parse("proc.list")
+                .unwrap()
+                .expand_home_with("/home/joey")
+                .scope,
             "*"
         );
     }

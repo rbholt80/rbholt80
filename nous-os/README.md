@@ -195,7 +195,7 @@ Build the image yourself with `sudo dist/build-iso.sh`.
 git clone <this repository>
 cd nous-os
 cargo build --release        # no network needed: there are no dependencies
-cargo test                   # 308 tests
+cargo test                   # 319 tests
 dist/mint/selftest.sh        # 24 more, for the desktop shell scripts
 
 ./target/release/nousd &     # the daemon
@@ -206,6 +206,35 @@ Then open <http://127.0.0.1:7666> for the graphical shell, or run
 `nous-session` to launch it as a desktop.
 
 ---
+
+## Talking to a specific assistant
+
+Type the name first, then your question, in the same box as everything else:
+
+```
+claude what does this error mean
+chatgpt rewrite this paragraph
+local summarise this file
+```
+
+`local` reaches whatever Ollama model you have installed and never leaves the
+machine. `claude` and `chatgpt` are configured out of the box; add your own —
+anything speaking the OpenAI chat-completions shape — with a few lines in
+`nous.conf`:
+
+```ini
+[assist.mistral]
+backend = openai
+model = mistral-large-latest
+aliases = mistral,mi
+```
+
+The plan you are shown says exactly where the question goes: "addressed to
+chatgpt", plus the honest cost — asking a hosted assistant is `elevated` risk,
+the same tier as reading your clipboard, because it sends what you typed
+somewhere else. Agents cannot use this at all; one that could "ask an
+assistant" could put anything it had read into the question, which is
+exfiltration wearing a friendly hat.
 
 ## Adding a model
 
@@ -250,7 +279,7 @@ denied — '/boot/grub/grub.cfg' is on the protected list (/boot/**) [protected-
 
 ## Where it stands
 
-This is `0.1.0`: a real system you can run, install and dual-boot, with 308 Rust tests and 24 shell tests. It is not a finished consumer OS. Honest gaps:
+This is `0.1.0`: a real system you can run, install and dual-boot, with 319 Rust tests and 24 shell tests. It is not a finished consumer OS. Honest gaps:
 
 - The media Studio's edit graph compiles and renders; its UI is a timeline view,
   not a full editor yet.

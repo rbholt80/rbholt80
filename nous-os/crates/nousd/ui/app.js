@@ -114,7 +114,9 @@ function renderPlan(preflight) {
     return;
   }
 
-  const originIsModel = (preflight.origin || '').startsWith('model');
+  const origin = preflight.origin || '';
+  const addressed = origin.startsWith('addressed:');
+  const originIsModel = origin.startsWith('model') || addressed;
   const rows = steps.map((s) => `
     <div class="step" data-risk="${esc(s.risk)}" data-id="${esc(s.id)}">
       <i class="rail-dot"></i>
@@ -134,7 +136,11 @@ function renderPlan(preflight) {
         <span class="title">${esc(preflight.utterance)}</span>
         <span class="grow"></span>
         <span class="origin ${originIsModel ? 'model' : ''}">
-          <i class="dot"></i>${originIsModel ? esc(preflight.origin) : 'understood locally'}
+          <i class="dot"></i>${
+            addressed ? `addressed to ${esc(origin.slice('addressed:'.length))}`
+            : originIsModel ? esc(origin)
+            : 'understood locally'
+          }
         </span>
       </div>
       ${rows}
@@ -204,10 +210,35 @@ function renderRun(run, wasDryRun) {
   if (run.status === 'blocked') toast(run.message, 'bad');
   else if (run.status === 'stopped') toast(run.message || 'Nothing to do.', 'warn');
 
+  // An assistant's answer is prose and gets rendered as prose.
+  const answered = (run.results || []).find((r) => r.value && r.value.answer);
+  if (answered) showAnswer(answered.value);
+
   // A proposal is the one result the shell renders specially: it is the
   // curator's suggestion, and it deserves its own decision.
   const proposal = (run.results || []).find((r) => r.value && Array.isArray(r.value.steps));
   if (proposal) showProposal(proposal.value);
+}
+
+/* Where an answer came from is part of the answer. "local" means the question
+ * never left this machine; anything else means it did, and that is worth one
+ * word rather than a footnote. */
+function showAnswer(value) {
+  const local = !!value.local;
+  $('#plan-host').insertAdjacentHTML('beforeend', `
+    <div class="plan">
+      <div class="answer">
+        <div class="who">
+          answered by <b>${esc(value.assistant)}</b>
+          <span class="where ${local ? 'local' : 'remote'}">
+            ${local ? 'on this machine' : esc(value.backend || 'sent off this machine')}
+          </span>
+          <span class="grow"></span>
+          <span>${esc(value.model || '')}</span>
+        </div>
+        <div class="body">${esc(value.answer)}</div>
+      </div>
+    </div>`);
 }
 
 function showProposal(value) {

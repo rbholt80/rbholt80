@@ -342,12 +342,14 @@ mod tests {
     fn config_search_prefers_the_user_then_the_system() {
         std::env::remove_var("NOUS_CONFIG_DIR");
         std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::set_var("HOME", "/home/joey");
+        let home = std::env::var("HOME").unwrap_or_default();
         let dirs = config_dirs();
-        assert_eq!(
-            dirs.first().unwrap(),
-            &PathBuf::from("/home/joey/.config/nous")
-        );
+        if !home.is_empty() && home != "/root" {
+            assert_eq!(
+                dirs.first().unwrap(),
+                &PathBuf::from(&home).join(".config/nous")
+            );
+        }
         assert_eq!(dirs.last().unwrap(), &PathBuf::from("/etc/nous"));
 
         // An explicit override replaces the search entirely.

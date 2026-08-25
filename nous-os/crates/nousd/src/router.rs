@@ -450,6 +450,31 @@ impl Router {
         })
     }
 
+    /// Ask one named backend, bypassing the route.
+    ///
+    /// This is what a named assistant uses: when you type `claude`, you meant
+    /// Claude, and falling through to whatever else happened to be reachable
+    /// would be answering a question you did not ask.
+    pub fn complete_from(
+        &self,
+        backend: &str,
+        model: Option<&str>,
+        c: &Completion,
+    ) -> Result<Served, String> {
+        let b = self
+            .find(backend)
+            .ok_or_else(|| format!("'{}' is not a model backend on this system", backend))?;
+        if !b.available() {
+            return Err(format!("{} is not configured or not reachable", backend));
+        }
+        let text = b.complete(c)?;
+        Ok(Served {
+            backend: b.name().to_string(),
+            model: model.unwrap_or(&b.model()).to_string(),
+            text,
+        })
+    }
+
     pub fn status(&self) -> Json {
         let list: Vec<Json> = self
             .backends
@@ -651,6 +676,40 @@ mod tests {
         );
         assert!(r.complete(&Completion::small("s", "p")).is_err());
         assert_eq!(cloud_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_named_backend_is_asked_directly_not_routed() {
+        let (a, a_calls) = fake("ollama", true, Ok("local".into()));
+        let (b, b_calls) = fake("anthropic", true, Ok("from anthropic".into()));
+        let r = Router::with_backends(vec![a, b], vec!["ollama".into(), "anthropic".into()]);
+
+        // The route would have chosen ollama; naming anthropic must win.
+        let served = r
+            .complete_from("anthropic", None, &Completion::new("s", "p"))
+            .unwrap();
+        assert_eq!(served.text, "from anthropic");
+        assert_eq!(
+            a_calls.load(Ordering::Relaxed),
+            0,
+            "naming one must not fall through"
+        );
+        assert_eq!(b_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn naming_an_unreachable_backend_says_so_rather_than_substituting() {
+        let (a, _) = fake("ollama", true, Ok("local".into()));
+        let (b, _) = fake("anthropic", false, Ok("cloud".into()));
+        let r = Router::with_backends(vec![a, b], vec!["ollama".into(), "anthropic".into()]);
+
+        let err = r
+            .complete_from("anthropic", None, &Completion::new("s", "p"))
+            .unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+        assert!(r
+            .complete_from("nosuch", None, &Completion::new("s", "p"))
+            .is_err());
     }
 
     #[test]

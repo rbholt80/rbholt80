@@ -190,6 +190,8 @@ allow    user           media.edit
 allow    user           media.index
 allow    user           media.render:~/**
 confirm  user           curate.apply             # tidying always shows its plan first
+allow    user           assist.ask               # you configured the key; that was the consent
+allow    user           assist.list
 confirm  user           fs.delete:/**            # deletion always asks
 confirm  user           shell.exec               # so does running arbitrary code
 confirm  user           pkg.install
@@ -224,6 +226,9 @@ confirm  agent:*        pkg.install
 confirm  agent:*        pkg.remove
 deny     agent:*        fs.delete                # agents never delete, full stop
 deny     agent:*        journal.revert           # only the human rewrites history
+# An agent that could "ask an assistant" could put anything it had read into
+# the question. That is an exfiltration channel wearing a friendly hat.
+deny     agent:*        assist.ask
 
 # --- the daemon's own housekeeping -------------------------------------------
 allow    system         fs.write:/var/lib/nous/**
@@ -317,10 +322,17 @@ allow    system         proc.spawn
     }
 
     pub fn evaluate(&self, subject: &Subject, cap: &Capability) -> Verdict {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        self.evaluate_for_home(subject, cap, &home)
+    }
+
+    /// Same, against an explicit home directory. Callers that already know it
+    /// should say so; tests must, so they do not race over the environment.
+    pub fn evaluate_for_home(&self, subject: &Subject, cap: &Capability, home: &str) -> Verdict {
         let risk = cap.risk();
-        // Both the request and the rules are resolved against the real home
-        // directory before they are compared.
-        let cap = &cap.expand_home();
+        // Both the request and the rules are resolved against the same home
+        // before they are compared.
+        let cap = &cap.expand_home_with(home);
 
         // 1. The immutable floor. Nothing below can reach past this.
         if let Some(pattern) = protected_violation(cap) {
@@ -336,7 +348,8 @@ allow    system         proc.spawn
 
         // 2. Ordered rules, first match wins.
         for rule in &self.rules {
-            if subject.matches(&rule.subject) && rule.capability.expand_home().covers(cap) {
+            if subject.matches(&rule.subject) && rule.capability.expand_home_with(home).covers(cap)
+            {
                 let matched = format!("{}:{}", rule.source, rule.line);
                 // An `allow` rule cannot lift an agent past its risk ceiling; it
                 // is downgraded to a confirmation instead of being honoured.
@@ -387,9 +400,12 @@ mod tests {
 
     #[test]
     fn defaults_permit_reading_your_own_files() {
-        std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
-        let v = p.evaluate(&Subject::User, &cap("fs.read:/home/joey/notes.md"));
+        let v = p.evaluate_for_home(
+            &Subject::User,
+            &cap("fs.read:/home/joey/notes.md"),
+            "/home/joey",
+        );
         assert_eq!(v.decision, Decision::Allow, "{}", v.explain());
     }
 
@@ -397,29 +413,28 @@ mod tests {
     fn the_defaults_work_for_a_home_outside_slash_home() {
         // A user provisioned under /export/home, or on a system that puts homes
         // elsewhere, must get the same defaults as everybody else.
-        std::env::set_var("HOME", "/export/home/joey");
+        let home = "/export/home/joey";
         let p = Policy::builtin();
-        assert!(p
-            .evaluate(&Subject::User, &cap("fs.write:/export/home/joey/notes.md"))
-            .decision
-            .is_allow());
-        assert!(p
-            .evaluate(&Subject::User, &cap("fs.move:/export/home/joey/a.mp3"))
-            .decision
-            .is_allow());
+        let ok = |c: &str| {
+            p.evaluate_for_home(&Subject::User, &cap(c), home)
+                .decision
+                .is_allow()
+        };
+
+        assert!(ok("fs.write:/export/home/joey/notes.md"));
+        assert!(ok("fs.move:/export/home/joey/a.mp3"));
         // And still not into someone else's.
-        assert!(!p
-            .evaluate(&Subject::User, &cap("fs.write:/export/home/other/x"))
-            .decision
-            .is_allow());
-        std::env::set_var("HOME", "/home/joey");
+        assert!(!ok("fs.write:/export/home/other/x"));
     }
 
     #[test]
     fn deletion_always_asks_even_for_the_user() {
-        std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
-        let v = p.evaluate(&Subject::User, &cap("fs.delete:/home/joey/old.txt"));
+        let v = p.evaluate_for_home(
+            &Subject::User,
+            &cap("fs.delete:/home/joey/old.txt"),
+            "/home/joey",
+        );
         assert!(
             matches!(v.decision, Decision::Confirm(_)),
             "{}",
@@ -461,7 +476,6 @@ mod tests {
 
     #[test]
     fn secrets_never_reach_context() {
-        std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
         for path in [
             "/etc/shadow",

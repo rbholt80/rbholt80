@@ -12,6 +12,7 @@
 //!    single step runs, so a hallucinated command is a syntax error rather than
 //!    an incident.
 
+use crate::assist::{self, Assistant};
 use crate::router::{Completion, Router};
 use nous_core::cap::KNOWN_CAPABILITIES;
 use nous_core::glyph::{self, ast, Flow, Stmt, Value};
@@ -925,6 +926,8 @@ pub struct Resolver {
     pub grammar_threshold: f64,
     pub home: PathBuf,
     pub max_steps: usize,
+    /// Assistants reachable by name from the same box as everything else.
+    pub assistants: Vec<Assistant>,
 }
 
 impl Resolver {
@@ -935,6 +938,7 @@ impl Resolver {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/")),
             max_steps: cfg.u64_or("plan.max_steps", 12) as usize,
+            assistants: assist::registry(cfg),
         }
     }
 
@@ -951,6 +955,31 @@ impl Resolver {
         router: &Router,
         context: &Context,
     ) -> Plan {
+        // Addressing an assistant by name comes before every other reading.
+        // "claude open my downloads" is a question for Claude, not an
+        // instruction to open a folder, and guessing otherwise would be the
+        // system talking over you.
+        if let Some((assistant, question)) = assist::address(utterance, &self.assistants) {
+            let step = Step::new(
+                "s1",
+                &format!("assist.ask:{}", assistant.name),
+                "assist",
+                &format!("ask {}", assistant.name),
+                json_obj([
+                    ("assistant", assistant.name.clone().into()),
+                    ("question", question.into()),
+                ]),
+            );
+            return Plan {
+                intent_id: intent_id.to_string(),
+                utterance: utterance.to_string(),
+                steps: vec![step],
+                origin: format!("addressed:{}", assistant.name),
+                confidence: 1.0,
+                clarification: None,
+            };
+        }
+
         let ctx = grammar::Ctx {
             home: self.home.clone(),
             context: context.clone(),
@@ -1334,6 +1363,25 @@ mod tests {
         assert!(d.contains("/home/joey/Pictures"), "{d}");
         assert!(d.contains("a.png"), "{d}");
         assert!(Context::default().is_empty());
+    }
+
+    #[test]
+    fn addressing_an_assistant_beats_every_other_reading() {
+        let cfg = nous_core::Config::with_defaults();
+        let resolver = Resolver::from_config(&cfg);
+        let router = Router::from_config(&cfg);
+
+        // Without the name this is a folder listing. With it, it is a question.
+        let plain = resolver.resolve("i1", "open my downloads", &router);
+        assert!(plain.steps[0].capability.starts_with("fs.list:"));
+
+        let addressed = resolver.resolve("i2", "claude open my downloads", &router);
+        assert_eq!(addressed.steps[0].capability, "assist.ask:claude");
+        assert_eq!(
+            addressed.steps[0].args.str_or("question", ""),
+            "open my downloads"
+        );
+        assert_eq!(addressed.origin, "addressed:claude");
     }
 
     #[test]

@@ -271,16 +271,14 @@ fn handle_intent(
     }
 
     let origin = preflight.str_or("origin", "");
-    println!(
-        "{}{}{}",
-        c(DIM),
-        if origin.starts_with("model") {
-            format!("  resolved by {}", origin)
-        } else {
-            "  understood locally".to_string()
-        },
-        c(RESET)
-    );
+    let how = if let Some(name) = origin.strip_prefix("addressed:") {
+        format!("  addressed to {}", name)
+    } else if origin.starts_with("model") {
+        format!("  resolved by {}", origin)
+    } else {
+        "  understood locally".to_string()
+    };
+    println!("{}{}{}", c(DIM), how, c(RESET));
     for s in &steps {
         let decision = s.str_or("decision", "");
         let tint = match decision {
@@ -351,6 +349,26 @@ fn handle_intent(
 /// Render the shapes the executors return, so a listing looks like a listing
 /// rather than a wall of JSON.
 fn render_value(v: &Json) {
+    // An assistant's answer is prose; print it as prose, and say where it came
+    // from, because "did that leave my machine?" is part of the answer.
+    if let Some(answer) = v.get("answer").and_then(|a| a.as_str()) {
+        let where_ = if v.bool_or("local", false) {
+            "on this machine".to_string()
+        } else {
+            format!("via {}", v.str_or("backend", "?"))
+        };
+        println!(
+            "      {}{} — {}{}",
+            c(DIM),
+            v.str_or("assistant", "assistant"),
+            where_,
+            c(RESET)
+        );
+        for line in answer.lines() {
+            println!("      {}", line);
+        }
+        return;
+    }
     if let Some(entries) = v.get("entries").and_then(|e| e.as_arr()) {
         for e in entries.iter().take(40) {
             println!(

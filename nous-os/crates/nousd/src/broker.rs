@@ -70,15 +70,25 @@ pub struct Broker {
     pub policy: Policy,
     pub journal: Journal,
     pub bus: Arc<Bus>,
+    /// Needed because asking a named assistant is an ordinary capability, and
+    /// ordinary capabilities are executed here like everything else.
+    pub router: Arc<crate::router::Router>,
 }
 
 impl Broker {
-    pub fn new(cfg: Config, policy: Policy, journal: Journal, bus: Arc<Bus>) -> Broker {
+    pub fn new(
+        cfg: Config,
+        policy: Policy,
+        journal: Journal,
+        bus: Arc<Bus>,
+        router: Arc<crate::router::Router>,
+    ) -> Broker {
         Broker {
             cfg,
             policy,
             journal,
             bus,
+            router,
         }
     }
 
@@ -343,6 +353,55 @@ impl Broker {
     ) -> Result<exec::Effect, String> {
         match (cap.domain.as_str(), cap.action.as_str()) {
             ("curate", "apply") => self.apply_proposal(step, ctx, plan, opts),
+            ("assist", "ask") => {
+                let name = step
+                    .args
+                    .str_or("assistant", cap.scope.as_str())
+                    .to_string();
+                let question = step.args.str_or("question", "");
+                if question.trim().is_empty() {
+                    return Err("there is no question to ask".to_string());
+                }
+                let registry = crate::assist::registry(&self.cfg);
+                let assistant = registry
+                    .iter()
+                    .find(|a| a.name == name)
+                    .ok_or_else(|| format!("there is no assistant called '{}'", name))?;
+                if ctx.dry_run {
+                    return Ok(exec::Effect::read_only(
+                        json_obj([("assistant", name.clone().into())]),
+                        format!("would ask {}", name),
+                    ));
+                }
+                let result = crate::assist::ask(assistant, question, &self.router, &self.cfg)?;
+                let detail = if assistant.is_local() {
+                    format!("{} answered, on this machine", name)
+                } else {
+                    format!("{} answered", name)
+                };
+                Ok(exec::Effect::read_only(result, detail))
+            }
+            ("assist", "list") => {
+                let registry = crate::assist::registry(&self.cfg);
+                let items: Vec<Json> =
+                    registry
+                        .iter()
+                        .map(|a| {
+                            let up = self.router.status().arr_or_empty("backends").iter().any(
+                                |b: &Json| {
+                                    b.str_or("name", "") == a.backend
+                                        && b.bool_or("available", false)
+                                },
+                            );
+                            a.to_json(up)
+                        })
+                        .collect();
+                let n = items.len();
+                Ok(exec::Effect::read_only(
+                    json_obj([("assistants", Json::Arr(items))]),
+                    format!("{} assistant(s) configured", n),
+                ))
+            }
             ("journal", "read") => {
                 let n = step
                     .args
@@ -721,12 +780,9 @@ mod tests {
         .unwrap();
         policy.extend(Policy::builtin());
         let journal = Journal::open(&root.join("journal")).unwrap();
-        let broker = Broker::new(
-            Config::with_defaults(),
-            policy,
-            journal,
-            Arc::new(Bus::new()),
-        );
+        let cfg = Config::with_defaults();
+        let router = Arc::new(crate::router::Router::from_config(&cfg));
+        let broker = Broker::new(cfg, policy, journal, Arc::new(Bus::new()), router);
         Fixture { root, broker }
     }
 

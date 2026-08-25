@@ -9,6 +9,7 @@
 //! makes the guarantees hold: there is exactly one policy engine, exactly one
 //! journal, and no way to reach an executor except through the broker.
 
+mod assist;
 mod broker;
 mod bus;
 mod exec;
@@ -576,7 +577,13 @@ fn main() {
     let bus = Arc::new(Bus::new());
     let router = Arc::new(Router::from_config(&cfg));
     let resolver = Arc::new(Resolver::from_config(&cfg));
-    let broker = Arc::new(Broker::new(cfg.clone(), policy, journal, bus.clone()));
+    let broker = Arc::new(Broker::new(
+        cfg.clone(),
+        policy,
+        journal,
+        bus.clone(),
+        router.clone(),
+    ));
     let daemon = Arc::new(Daemon {
         cfg: cfg.clone(),
         bus: bus.clone(),
@@ -677,17 +684,19 @@ mod tests {
         let cfg = Config::with_defaults();
         let bus = Arc::new(Bus::new());
         let journal = Journal::open(&root.join("journal")).unwrap();
+        let router = Arc::new(Router::from_config(&cfg));
         let broker = Arc::new(Broker::new(
             cfg.clone(),
             Policy::builtin(),
             journal,
             bus.clone(),
+            router.clone(),
         ));
         let d = Arc::new(Daemon {
             cfg: cfg.clone(),
             bus,
             broker,
-            router: Arc::new(Router::from_config(&cfg)),
+            router,
             resolver: Arc::new(Resolver::from_config(&cfg)),
             started: now_secs(),
             intents: AtomicU64::new(1),

@@ -66,6 +66,21 @@ impl Config {
         // The resolver prefers the grammar when it is confident; below this it
         // escalates to a model, and below `plan.show_threshold` it shows you the
         // plan before doing anything.
+        // Named assistants, reachable by typing their name first: "claude what
+        // is this error", "chatgpt rewrite this". Add your own by adding a
+        // section -- any OpenAI-compatible endpoint works.
+        set("assist.claude.backend", "anthropic");
+        set("assist.claude.model", "claude-sonnet-5");
+        set("assist.claude.aliases", "claude,cl");
+
+        set("assist.chatgpt.backend", "openai");
+        set("assist.chatgpt.model", "gpt-4o");
+        set("assist.chatgpt.aliases", "chatgpt,gpt,openai");
+
+        set("assist.local.backend", "ollama");
+        set("assist.local.model", "");
+        set("assist.local.aliases", "local,ollama,llama");
+
         set("plan.grammar_threshold", "0.72");
         set("plan.show_threshold", "0.55");
         set("plan.max_steps", "12");
@@ -247,6 +262,17 @@ mod tests {
     }
 
     #[test]
+    fn the_named_assistants_are_configured() {
+        let c = Config::with_defaults();
+        assert_eq!(c.get("assist.claude.backend"), Some("anthropic"));
+        assert!(c
+            .list("assist.chatgpt.aliases")
+            .contains(&"gpt".to_string()));
+        // The local one is named too, so "keep this on my machine" is one word.
+        assert_eq!(c.get("assist.local.backend"), Some("ollama"));
+    }
+
+    #[test]
     fn everything_kept_has_a_bound() {
         // Every store NOUS writes to needs a limit, or it is an unbounded copy
         // of the user's disk.
@@ -296,11 +322,14 @@ mod tests {
 
     #[test]
     fn tilde_expands_against_home() {
-        std::env::set_var("HOME", "/home/testuser");
-        assert_eq!(
-            expand_tilde("~/Documents"),
-            PathBuf::from("/home/testuser/Documents")
-        );
+        // Reads HOME rather than setting it: tests share one process.
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            assert_eq!(
+                expand_tilde("~/Documents"),
+                PathBuf::from(&home).join("Documents")
+            );
+        }
         assert_eq!(expand_tilde("/etc/nous"), PathBuf::from("/etc/nous"));
     }
 
