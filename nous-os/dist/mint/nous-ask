@@ -56,12 +56,18 @@ if [[ -z "$CWD" && -n "$PATHS" ]]; then
 fi
 
 urlencode() {
+  # Byte semantics, deliberately. In a UTF-8 locale bash slices strings by
+  # character, so "café.png" would encode as %E9 -- the code point -- where a
+  # URL needs the UTF-8 bytes %C3%A9. Every Mint desktop runs a UTF-8 locale,
+  # so that is the common case, not the exotic one, and it silently corrupts
+  # every non-ASCII filename passed in from the file manager.
+  local LC_ALL=C
   local s="$1" out="" i c
   for (( i = 0; i < ${#s}; i++ )); do
     c="${s:i:1}"
     case "$c" in
       [a-zA-Z0-9.~_-]) out+="$c" ;;
-      *) out+="$(printf '%%%02X' "'$c")" ;;
+      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
     esac
   done
   printf '%s' "$out"
@@ -76,6 +82,22 @@ if [[ -n "$CWD"   ]]; then URL+="&cwd=$(urlencode "$CWD")"; fi
 if [[ -n "$ASK"   ]]; then URL+="&ask=$(urlencode "$ASK")"; fi
 if [[ -n "$PATHS" ]]; then URL+="&paths=$(urlencode "${PATHS%$'\n'}")"; fi
 
+WIN_W=780
+WIN_H=420
+
+# Chromium's --window-position wants x,y. There is no "center": that string
+# parses as zero and drops the window in the top-left corner. Work out the
+# real coordinates, and sit a third of the way down rather than dead centre --
+# where a command palette belongs.
+POS=()
+if command -v xdotool >/dev/null 2>&1; then
+  GEO="$(xdotool getdisplaygeometry 2>/dev/null || true)"
+  SW="${GEO%% *}"; SH="${GEO##* }"
+  if [[ "$SW" =~ ^[0-9]+$ && "$SH" =~ ^[0-9]+$ ]]; then
+    POS=("--window-position=$(( (SW - WIN_W) / 2 )),$(( (SH - WIN_H) / 3 ))")
+  fi
+fi
+
 for candidate in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome \
                  /usr/bin/brave-browser /usr/bin/microsoft-edge; do
   if [[ -x "$candidate" ]]; then BROWSER="$candidate"; break; fi
@@ -89,8 +111,8 @@ fi
 # window you already had open.
 "$BROWSER" \
   --app="$URL" \
-  --window-size=780,420 \
-  --window-position=center \
+  --window-size="${WIN_W},${WIN_H}" \
+  "${POS[@]}" \
   --no-first-run \
   --no-default-browser-check \
   --disable-background-networking \

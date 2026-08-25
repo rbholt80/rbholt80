@@ -25,8 +25,10 @@ systemctl --user disable --now nousd.service 2>/dev/null || true
 rm -f "${HOME}/.config/systemd/user/nousd.service"
 systemctl --user daemon-reload 2>/dev/null || true
 
+# Escalate only if the prefix actually needs it, matching how it was installed.
+if [[ -w "${PREFIX}/bin" ]]; then RM=(rm -f); else RM=(sudo rm -f); fi
 for b in nousd nsh nousctl nous-ask nous-shell nous-uninstall; do
-  sudo rm -f "${PREFIX}/bin/${b}"
+  "${RM[@]}" "${PREFIX}/bin/${b}"
 done
 
 rm -f "${HOME}/.local/share/applications/nous.desktop" \

@@ -195,7 +195,8 @@ Build the image yourself with `sudo dist/build-iso.sh`.
 git clone <this repository>
 cd nous-os
 cargo build --release        # no network needed: there are no dependencies
-cargo test                   # 267 tests
+cargo test                   # 290 tests
+dist/mint/selftest.sh        # 24 more, for the desktop shell scripts
 
 ./target/release/nousd &     # the daemon
 ./target/release/nsh         # the shell
@@ -245,8 +246,7 @@ denied — '/boot/grub/grub.cfg' is on the protected list (/boot/**) [protected-
 
 ## Where it stands
 
-This is `0.1.0`: a real system you can run, install and dual-boot, with 267
-tests. It is not a finished consumer OS. Honest gaps:
+This is `0.1.0`: a real system you can run, install and dual-boot, with 290 Rust tests and 24 shell tests. It is not a finished consumer OS. Honest gaps:
 
 - The media Studio's edit graph compiles and renders; its UI is a timeline view,
   not a full editor yet.

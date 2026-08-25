@@ -4,7 +4,7 @@ CARGO ?= cargo
 PREFIX ?= /usr
 DESTDIR ?=
 
-.PHONY: all build release test check clean install uninstall run iso fmt lint
+.PHONY: all build release test check clean install uninstall run iso fmt lint shelltest
 
 all: build
 
@@ -17,8 +17,13 @@ release:
 test:
 	$(CARGO) test
 
+# The shell parts of the desktop integration. The Rust suite cannot reach them,
+# and every bug found there so far only showed up on a real desktop.
+shelltest:
+	./dist/mint/selftest.sh
+
 # What CI runs, and what you should run before pushing.
-check: fmt lint test
+check: fmt lint test shelltest
 	./target/debug/nousd --check
 
 fmt:

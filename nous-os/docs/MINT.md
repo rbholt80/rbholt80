@@ -30,7 +30,8 @@ Useful options:
 --hotkey "<Super>space"    a different summon key (default: Ctrl+Alt+Space)
 --local-model              also install ollama and pull a model that fits
 --no-media                 skip mpv and ffmpeg
---prefix ~/.local          install without sudo at all
+--prefix ~/.local          put the binaries in your home, so only
+                           the package install needs sudo
 ```
 
 ### What lands where
@@ -201,3 +202,13 @@ nousctl undo                      # take back the last thing
 
 If the summon key does nothing, check the daemon is running and that
 `nous-ask` works from a terminal — it will tell you what is missing.
+
+The shell parts of this integration have their own tests, because the Rust
+suite cannot reach them and every bug found here so far has been one that only
+appears on a real desktop — a locale that slices strings differently, a flag
+that parses to zero instead of failing:
+
+```console
+$ dist/mint/selftest.sh
+24 passed
+```

@@ -32,9 +32,17 @@ die()  { printf '%s error:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 do_() {
   if (( COMMIT )); then "$@"; else printf '   %swould run:%s %s\n' "$DIM" "$RESET" "$*"; fi
 }
-# Same, but through sudo, and only for the few things that need it.
-sudo_() {
+# Always root. Package installation needs it wherever the binaries end up.
+root_() {
   if (( COMMIT )); then sudo "$@"; else printf '   %swould run:%s sudo %s\n' "$DIM" "$RESET" "$*"; fi
+}
+
+# Root only where the destination genuinely needs it. A prefix inside your own
+# home does not, and asking for a password you did not need is how people learn
+# to type one without reading the prompt.
+NEEDS_SUDO=1
+prefix_() {
+  if (( NEEDS_SUDO )); then root_ "$@"; else do_ "$@"; fi
 }
 
 usage() {
@@ -95,6 +103,15 @@ preflight() {
   say "   system        ${distro}"
   say "   desktop       ${XDG_CURRENT_DESKTOP:-unknown} on ${XDG_SESSION_TYPE:-unknown}"
   say "   user          ${USER}"
+
+  # Decide up front whether anything here needs root, and say so.
+  mkdir -p "${PREFIX}/bin" 2>/dev/null || true
+  if [[ -w "${PREFIX}/bin" ]]; then
+    NEEDS_SUDO=0
+    say "   install       ${PREFIX}/bin ${DIM}(writable — no sudo needed)${RESET}"
+  else
+    say "   install       ${PREFIX}/bin ${DIM}(needs sudo)${RESET}"
+  fi
   say "   memory        $(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 )) MB"
 
   if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
@@ -127,8 +144,8 @@ install_dependencies() {
     return
   fi
   say "   ${DIM}missing: ${missing[*]}${RESET}"
-  sudo_ apt-get update
-  sudo_ apt-get install -y "${missing[@]}"
+  root_ apt-get update
+  root_ apt-get install -y "${missing[@]}"
 }
 
 build_binaries() {
@@ -144,11 +161,11 @@ build_binaries() {
 install_binaries() {
   step "Installing to ${PREFIX}/bin"
   for binary in nousd nsh nousctl; do
-    sudo_ install -Dm755 "${ROOT}/target/release/${binary}" "${PREFIX}/bin/${binary}"
+    prefix_ install -Dm755 "${ROOT}/target/release/${binary}" "${PREFIX}/bin/${binary}"
   done
-  sudo_ install -Dm755 "${HERE}/nous-ask" "${PREFIX}/bin/nous-ask"
-  sudo_ install -Dm755 "${ROOT}/dist/overlay/usr/bin/nous-session" "${PREFIX}/bin/nous-shell"
-  sudo_ install -Dm755 "${HERE}/uninstall.sh" "${PREFIX}/bin/nous-uninstall"
+  prefix_ install -Dm755 "${HERE}/nous-ask" "${PREFIX}/bin/nous-ask"
+  prefix_ install -Dm755 "${ROOT}/dist/overlay/usr/bin/nous-session" "${PREFIX}/bin/nous-shell"
+  prefix_ install -Dm755 "${HERE}/uninstall.sh" "${PREFIX}/bin/nous-uninstall"
 }
 
 install_desktop_integration() {
@@ -262,6 +279,16 @@ install_local_model() {
 finish() {
   say ""
   step "Done"
+
+  case ":${PATH}:" in
+    *":${PREFIX}/bin:"*) ;;
+    *)
+      warn "${PREFIX}/bin is not on your PATH. Add this to ~/.profile and log back in:"
+      say "           export PATH=\"${PREFIX}/bin:\$PATH\""
+      say ""
+      ;;
+  esac
+
   if (( ! COMMIT )); then
     say "   ${YELLOW}That was a preview. Re-run with --commit to install.${RESET}"
     return

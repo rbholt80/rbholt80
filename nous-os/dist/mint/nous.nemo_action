@@ -1,5 +1,5 @@
 [Nemo Action]
-Name=Ask NOUS about %N
+Name=Ask NOUS about this
 Comment=Summon NOUS with this selection attached
 Exec=/usr/local/bin/nous-ask --paths %F
 Icon-Name=nous
