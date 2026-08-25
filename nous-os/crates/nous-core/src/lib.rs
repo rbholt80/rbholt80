@@ -14,6 +14,7 @@ pub mod ipc;
 pub mod journal;
 pub mod json;
 pub mod log;
+pub mod glyph;
 pub mod policy;
 pub mod proto;
 

@@ -140,6 +140,36 @@ impl fmt::Display for Capability {
     }
 }
 
+/// Every capability the system knows how to adjudicate and execute.
+///
+/// A name absent from this list is not merely unusual — it is unimplementable,
+/// and the GLYPH checker rejects it before anything runs. Keeping the list
+/// explicit is what makes "what can this program possibly do?" an answerable
+/// question.
+pub const KNOWN_CAPABILITIES: &[&str] = &[
+    "fs.read", "fs.stat", "fs.list", "fs.write", "fs.mkdir", "fs.move", "fs.delete",
+    "fs.chmod", "fs.chown",
+    "proc.list", "proc.signal", "proc.spawn",
+    "sys.info", "sys.metrics", "sys.power", "sys.mount", "sys.firmware",
+    "svc.status", "svc.start", "svc.stop", "svc.restart",
+    "pkg.query", "pkg.install", "pkg.remove",
+    "net.status", "net.connect", "net.listen",
+    "shell.exec",
+    "model.infer",
+    "ctx.read", "ctx.write",
+    "ui.notify", "ui.render",
+    "journal.read",
+    "media.probe", "media.search", "media.thumbnail", "media.play", "media.control",
+    "media.edit", "media.render", "media.index",
+    "curate.scan", "curate.propose", "curate.apply",
+    "policy.amend", "secret.read", "user.admin",
+];
+
+/// Is `name` (a bare `domain.action`) something the system implements?
+pub fn is_known(name: &str) -> bool {
+    KNOWN_CAPABILITIES.contains(&name)
+}
+
 fn wild_eq(pattern: &str, actual: &str) -> bool {
     pattern == "*" || pattern == actual
 }
@@ -264,6 +294,25 @@ mod tests {
         assert!(Capability::parse("fs").is_err());
         assert!(Capability::parse("").is_err());
         assert!(Capability::parse(".write").is_err());
+    }
+
+    #[test]
+    fn every_known_capability_has_a_deliberate_risk() {
+        // A name in the known list that still falls through to the catch-all is
+        // a table the author forgot to extend.
+        for name in KNOWN_CAPABILITIES {
+            let c = Capability::parse(name).unwrap();
+            let deliberate = matches!(
+                (c.domain.as_str(), c.action.as_str()),
+                ("policy", "amend") | ("secret", "read") | ("user", "admin")
+                    | ("sys", "power") | ("sys", "mount") | ("sys", "firmware")
+            );
+            assert!(
+                c.risk() != Risk::Critical || deliberate,
+                "{} falls through to the unknown-capability catch-all",
+                name
+            );
+        }
     }
 
     #[test]
