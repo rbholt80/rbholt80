@@ -1,0 +1,14 @@
+# A read-only look at the machine. Safe to run on a timer.
+#
+# Everything here is `allow` in the default policy, so it never interrupts you.
+
+flow morning-check {
+  meta description "How is this machine doing?"
+
+  metrics = sys.metrics
+  procs   = proc.list limit: 10
+  clutter = curate.scan
+
+  gate clutter.reclaimable_bytes > 1GB
+  ui.notify message: "There is ${clutter.reclaimable} worth of tidying to do."
+}

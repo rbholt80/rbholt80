@@ -1,0 +1,15 @@
+# Reaching software that has never heard of NOUS.
+#
+# `use foreign` compiles to a governed shell.exec: the tool shows up in the
+# capability manifest and is policed like anything else. It is a bridge, not a
+# hole.
+
+flow transcode {
+  meta description "Transcode a video with HandBrake, wherever it lives"
+
+  use foreign handbrake cmd: "HandBrakeCLI"     on: [linux, macos]
+  use foreign handbrake cmd: "HandBrakeCLI.exe" on: [windows]
+
+  ask "Transcode holiday.mkv? This runs an external program."
+  handbrake args: [-i, ~/Videos/holiday.mkv, -o, ~/Videos/holiday.mp4, --preset, "Fast 1080p30"]
+}

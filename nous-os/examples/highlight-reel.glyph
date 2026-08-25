@@ -1,0 +1,19 @@
+# Build a short reel from two clips, without touching either source file.
+#
+# media.edit writes to an edit graph -- a description of the result. Nothing is
+# encoded until media.render, and render only ever creates a new file.
+
+flow highlight-reel {
+  meta description "Cut a 30-second reel from two holiday clips"
+
+  media.edit project: reel, op: append, path: ~/Videos/holiday-beach.mp4
+  media.edit project: reel, op: trim,   clip: c1, in: 12s, out: 30s
+  media.edit project: reel, op: fade_out, clip: c1, value: 1.5
+
+  media.edit project: reel, op: append, path: ~/Videos/holiday-hike.mp4
+  media.edit project: reel, op: trim,   clip: c2, in: 4s, out: 16s
+  media.edit project: reel, op: speed,  clip: c2, value: 1.5
+
+  ask "Render the reel to ~/Videos/reel.mp4?"
+  media.render project: reel, output: ~/Videos/reel.mp4
+}
