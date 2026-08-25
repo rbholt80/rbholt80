@@ -152,6 +152,11 @@ allow    *              pkg.query
 allow    *              ctx.read
 allow    *              journal.read
 allow    *              model.infer
+allow    *              media.probe
+allow    *              media.search
+allow    *              media.thumbnail
+allow    *              curate.scan
+allow    *              curate.propose
 
 # --- the user's own machine, for the user ------------------------------------
 allow    user           fs.write:/home/**
@@ -160,6 +165,12 @@ allow    user           fs.move:/home/**
 allow    user           ui.notify
 allow    user           ui.render
 allow    user           ctx.write
+allow    user           media.play
+allow    user           media.control
+allow    user           media.edit
+allow    user           media.index
+allow    user           media.render:/home/**
+confirm  user           curate.apply             # tidying always shows its plan first
 confirm  user           fs.delete:/**            # deletion always asks
 confirm  user           shell.exec               # so does running arbitrary code
 confirm  user           pkg.install
@@ -175,6 +186,9 @@ confirm  user           sys.mount
 # --- agents get a narrower world ---------------------------------------------
 allow    agent:*        ui.notify
 allow    agent:*        ctx.write
+allow    agent:*        media.index
+confirm  agent:*        media.render:/home/**
+confirm  agent:*        curate.apply
 confirm  agent:*        fs.write:/home/**
 confirm  agent:*        fs.mkdir:/home/**
 confirm  agent:*        fs.move:/home/**

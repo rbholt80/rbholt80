@@ -88,12 +88,20 @@ impl Capability {
             ("proc", "list") | ("sys", "info") | ("sys", "metrics") => Risk::Read,
             ("svc", "status") | ("net", "status") | ("pkg", "query") => Risk::Read,
             ("ctx", "read") | ("journal", "read") => Risk::Read,
+            ("media", "probe") | ("media", "search") | ("media", "thumbnail") => Risk::Read,
 
             // Local, reversible mutation
             ("fs", "write") | ("fs", "mkdir") | ("fs", "move") => Risk::Write,
             ("ctx", "write") | ("ui", "notify") | ("ui", "render") => Risk::Write,
             ("svc", "start") | ("svc", "stop") | ("svc", "restart") => Risk::Write,
             ("model", "infer") => Risk::Write,
+            // Playback and edit-graph authoring touch nothing on disk; rendering
+            // writes a new file and never overwrites its source.
+            ("media", "play") | ("media", "control") | ("media", "edit") => Risk::Write,
+            ("media", "render") | ("media", "index") => Risk::Write,
+            // The curator proposes; applying its proposal is an ordinary write.
+            ("curate", "scan") | ("curate", "propose") => Risk::Read,
+            ("curate", "apply") => Risk::Write,
 
             // Hard to undo, or leaves the machine
             ("fs", "delete") | ("fs", "chmod") | ("fs", "chown") => Risk::Elevated,
