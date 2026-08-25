@@ -48,6 +48,19 @@ object MediaWatchScheduler {
      * and is then dropped by the system, so it has to be put back after every
      * firing and after every reboot.
      */
+    /**
+     * Arms the trigger only if it is not already armed or running.
+     *
+     * Calling [schedule] for an id that is currently executing makes
+     * JobScheduler tear down that execution — which, from inside the job's own
+     * service, means cancelling the scan it was woken up to perform.
+     */
+    fun scheduleIfAbsent(context: Context) {
+        val scheduler = context.getSystemService<JobScheduler>() ?: return
+        if (scheduler.getPendingJob(JOB_ID) != null) return
+        schedule(context)
+    }
+
     fun schedule(context: Context) {
         val scheduler = context.getSystemService<JobScheduler>() ?: return
         val job = JobInfo.Builder(JOB_ID, ComponentName(context, MediaWatchJobService::class.java))
@@ -63,6 +76,16 @@ object MediaWatchScheduler {
         runCatching { scheduler.schedule(job) }
     }
 
+    /**
+     * The highest id currently in the library, or 0 if it cannot be read.
+     *
+     * Deliberately no "LIMIT 1" on the sort order. That trick is rejected by
+     * MediaProvider from Android 11 onward, and the failure here is not loud:
+     * the exception would be swallowed, this would return 0, and the automatic
+     * mode would then treat every video ever taken as new and start re-editing
+     * the whole library four at a time. Reading the first row of a descending
+     * cursor works on every version.
+     */
     private fun highestVideoId(context: Context): Long {
         val projection = arrayOf(MediaStore.Video.Media._ID)
         return runCatching {
@@ -71,7 +94,7 @@ object MediaWatchScheduler {
                 projection,
                 null,
                 null,
-                "${MediaStore.Video.Media._ID} DESC LIMIT 1",
+                "${MediaStore.Video.Media._ID} DESC",
             )?.use { if (it.moveToFirst()) it.getLong(0) else 0L } ?: 0L
         }.getOrDefault(0L)
     }

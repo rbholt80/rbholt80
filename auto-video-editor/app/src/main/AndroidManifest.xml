@@ -7,8 +7,11 @@
       recordings automatically" mode. Picking a single video by hand goes
       through the system photo picker, which needs no permission at all.
     -->
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"
-        android:minSdkVersion="33" />
+    <!-- Android 13 replaced the storage read permission with a media-typed one.
+         Which of the two is actually requested is decided at runtime; there is
+         no minSdkVersion attribute on uses-permission, and putting one here
+         would read as a guard while doing nothing. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <!-- Writing goes through MediaStore into the app's own collection, which
@@ -16,6 +19,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Hardware video encoding is what makes an export take a minute and not an hour. -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -68,6 +72,14 @@
             android:name=".work.MediaWatchJobService"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <receiver
+            android:name=".work.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

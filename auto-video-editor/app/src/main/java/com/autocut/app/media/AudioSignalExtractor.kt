@@ -7,7 +7,10 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import com.autocut.engine.model.AudioSample
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import java.nio.ByteOrder
+import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -27,7 +30,11 @@ class AudioSignalExtractor(
      * @param onProgress called with 0f..1f as decoding advances
      * @return one sample per window, or an empty list when the file has no audio
      */
-    fun extract(uri: Uri, durationUs: Long, onProgress: (Float) -> Unit = {}): List<AudioSample> {
+    suspend fun extract(
+        uri: Uri,
+        durationUs: Long,
+        onProgress: (Float) -> Unit = {},
+    ): List<AudioSample> {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -44,6 +51,10 @@ class AudioSignalExtractor(
             return decode(extractor, codec, durationUs, onProgress)
         } catch (e: MediaReadException) {
             throw e
+        } catch (e: CancellationException) {
+            // Cancellation is not a decode failure; the catch below would
+            // otherwise rewrite it into "the soundtrack could not be decoded".
+            throw e
         } catch (e: Exception) {
             // A missing or undecodable soundtrack is not a reason to give up on
             // the video: the planner simply works without sound.
@@ -55,7 +66,7 @@ class AudioSignalExtractor(
         }
     }
 
-    private fun decode(
+    private suspend fun decode(
         extractor: MediaExtractor,
         codec: MediaCodec,
         durationUs: Long,
@@ -98,9 +109,13 @@ class AudioSignalExtractor(
         }
 
         while (!outputDone) {
+            coroutineContext.ensureActive()
+
+            var progressed = false
             if (!inputDone) {
                 val inputIndex = codec.dequeueInputBuffer(TIMEOUT_US)
                 if (inputIndex >= 0) {
+                    progressed = true
                     val buffer = codec.getInputBuffer(inputIndex)!!
                     val size = extractor.readSampleData(buffer, 0)
                     if (size < 0) {
@@ -115,6 +130,7 @@ class AudioSignalExtractor(
 
             when (val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)) {
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    progressed = true
                     val format = codec.outputFormat
                     sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                     channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
@@ -125,15 +141,18 @@ class AudioSignalExtractor(
                 }
 
                 MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    // A decoder that has been fed everything and still produces
-                    // nothing is wedged; without this the loop spins forever.
-                    if (inputDone && ++idleWaits > MAX_IDLE_WAITS) {
+                    // Counts iterations that made no progress on either side.
+                    // Keying this off "input is finished" missed the common
+                    // hardware stall where the codec holds every input buffer,
+                    // so input never finishes and the guard never armed.
+                    if (!progressed && ++idleWaits > MAX_IDLE_WAITS) {
                         throw MediaReadException("The audio decoder stopped responding.")
                     }
                 }
 
                 else -> {
                     if (outputIndex < 0) continue
+                    progressed = true
                     idleWaits = 0
                     val buffer = codec.getOutputBuffer(outputIndex)
                     if (buffer != null && bufferInfo.size > 0 && sampleRate > 0) {

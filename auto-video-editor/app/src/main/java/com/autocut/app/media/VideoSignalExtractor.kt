@@ -1,7 +1,6 @@
 package com.autocut.app.media
 
 import android.content.Context
-import android.graphics.ImageFormat
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -10,6 +9,9 @@ import android.media.MediaFormat
 import android.net.Uri
 import com.autocut.engine.analysis.FrameProfiler
 import com.autocut.engine.model.VideoSample
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -27,7 +29,11 @@ import kotlin.math.max
  */
 class VideoSignalExtractor(private val context: Context) {
 
-    fun extract(uri: Uri, durationUs: Long, onProgress: (Float) -> Unit = {}): List<VideoSample> {
+    suspend fun extract(
+        uri: Uri,
+        durationUs: Long,
+        onProgress: (Float) -> Unit = {},
+    ): List<VideoSample> {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -54,6 +60,10 @@ class VideoSignalExtractor(private val context: Context) {
             return decode(extractor, codec, durationUs, onProgress)
         } catch (e: MediaReadException) {
             throw e
+        } catch (e: CancellationException) {
+            // Backing out of the screen is not a decode failure. Without this the
+            // catch below would rewrite it into one and report it to the user.
+            throw e
         } catch (e: Exception) {
             throw MediaReadException("The video could not be decoded.", e)
         } finally {
@@ -63,7 +73,7 @@ class VideoSignalExtractor(private val context: Context) {
         }
     }
 
-    private fun decode(
+    private suspend fun decode(
         extractor: MediaExtractor,
         codec: MediaCodec,
         durationUs: Long,
@@ -84,9 +94,16 @@ class VideoSignalExtractor(private val context: Context) {
         var idleWaits = 0
 
         while (!outputDone) {
+            // Decoding a long clip takes minutes. Without this, leaving the
+            // screen or WorkManager stopping the job leaves a hardware decoder
+            // and a worker thread running to the end of the file regardless.
+            coroutineContext.ensureActive()
+
+            var progressed = false
             if (!inputDone) {
                 val inputIndex = codec.dequeueInputBuffer(TIMEOUT_US)
                 if (inputIndex >= 0) {
+                    progressed = true
                     val buffer = codec.getInputBuffer(inputIndex)!!
                     val size = extractor.readSampleData(buffer, 0)
                     if (size < 0) {
@@ -101,10 +118,12 @@ class VideoSignalExtractor(private val context: Context) {
 
             val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
             if (outputIndex < 0) {
-                // A decoder that has been fed everything and still produces
-                // nothing is wedged. Without this the loop spins forever on a
-                // file the hardware cannot handle.
-                if (inputDone && ++idleWaits > MAX_IDLE_WAITS) {
+                // Count iterations that made no progress at all, on either side.
+                // Keying this off "input is finished" missed the usual hardware
+                // stall, where the codec holds every input buffer and returns
+                // nothing: dequeueInputBuffer keeps failing so input never
+                // finishes, the guard never arms, and the loop spins forever.
+                if (!progressed && ++idleWaits > MAX_IDLE_WAITS) {
                     throw MediaReadException("The video decoder stopped responding.")
                 }
             } else {
@@ -114,8 +133,13 @@ class VideoSignalExtractor(private val context: Context) {
                     val image = runCatching { codec.getOutputImage(outputIndex) }.getOrNull()
                     if (image != null) {
                         try {
-                            readLuma(image, luma)
-                            val chroma = readChroma(image)
+                            // COLOR_FormatYUV420Flexible is a request, not a
+                            // promise. HDR sources — now the camera default on a
+                            // lot of phones — commonly come back as 10-bit P010
+                            // instead, where every sample is two bytes.
+                            val highByte = if (image.planes[0].pixelStride >= 2) 1 else 0
+                            readLuma(image, luma, highByte)
+                            val chroma = readChroma(image, highByte)
                             samples.add(
                                 profiler.profile(
                                     timeUs = bufferInfo.presentationTimeUs,
@@ -152,8 +176,14 @@ class VideoSignalExtractor(private val context: Context) {
      * Nearest-neighbour rather than an averaging downscale: averaging would cost
      * a full read of every pixel in a 4K frame, and it would also smooth away
      * exactly the high-frequency detail the sharpness measure is looking for.
+     *
+     * [byteOffset] is 1 for 10-bit output. P010 stores each sample in the top
+     * bits of a little-endian 16-bit word, so the high byte is an 8-bit version
+     * of it; reading the low byte would return padding, and every measurement
+     * downstream — exposure, sharpness, motion, the whole camera path — would be
+     * computed from noise while looking perfectly plausible.
      */
-    private fun readLuma(image: Image, out: IntArray) {
+    private fun readLuma(image: Image, out: IntArray, byteOffset: Int) {
         val crop = image.cropRect
         val plane = image.planes[0]
         val buffer = plane.buffer
@@ -166,7 +196,8 @@ class VideoSignalExtractor(private val context: Context) {
             val outOffset = y * ANALYSIS_WIDTH
             for (x in 0 until ANALYSIS_WIDTH) {
                 val sourceX = crop.left + x * crop.width() / ANALYSIS_WIDTH
-                out[outOffset + x] = buffer.get(rowOffset + sourceX * pixelStride).toInt() and 0xFF
+                out[outOffset + x] =
+                    buffer.get(rowOffset + sourceX * pixelStride + byteOffset).toInt() and 0xFF
             }
         }
     }
@@ -181,8 +212,8 @@ class VideoSignalExtractor(private val context: Context) {
      * is not washed out, and it is the washed-out case saturation decisions care
      * about.
      */
-    private fun readChroma(image: Image): Chroma {
-        if (image.format != ImageFormat.YUV_420_888 || image.planes.size < 3) {
+    private fun readChroma(image: Image, byteOffset: Int): Chroma {
+        if (image.planes.size < 3) {
             return Chroma(VideoSample.NEUTRAL_CHROMA, VideoSample.NEUTRAL_CHROMA, 0f)
         }
         val crop = image.cropRect
@@ -204,9 +235,11 @@ class VideoSignalExtractor(private val context: Context) {
             for (x in 0 until CHROMA_GRID_WIDTH) {
                 val sourceX = crop.left / 2 + x * chromaWidth / CHROMA_GRID_WIDTH
                 val u = uPlane.buffer
-                    .get(sourceY * uPlane.rowStride + sourceX * uPlane.pixelStride).toInt() and 0xFF
+                    .get(sourceY * uPlane.rowStride + sourceX * uPlane.pixelStride + byteOffset)
+                    .toInt() and 0xFF
                 val v = vPlane.buffer
-                    .get(sourceY * vPlane.rowStride + sourceX * vPlane.pixelStride).toInt() and 0xFF
+                    .get(sourceY * vPlane.rowStride + sourceX * vPlane.pixelStride + byteOffset)
+                    .toInt() and 0xFF
                 sumU += u
                 sumV += v
                 sumChroma += max(abs(u - 128), abs(v - 128)).toLong()

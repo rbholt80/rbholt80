@@ -28,12 +28,12 @@ class MediaWatchJobService : JobService() {
     private var work: Job? = null
 
     override fun onStartJob(params: JobParameters?): Boolean {
-        // Re-arm first. A content trigger is consumed when it fires, and if this
-        // job crashes before re-arming, the automatic mode silently stops
-        // working until the next app launch.
-        MediaWatchScheduler.schedule(applicationContext)
-
+        // Re-arming happens in the finally below, not here. A content trigger is
+        // consumed when it fires and has to be put back — but rescheduling this
+        // job's own id while it is executing makes JobScheduler tear the
+        // execution down, losing the scan. finally still covers the crash case.
         if (!Settings(this).autoEditNewVideos) {
+            MediaWatchScheduler.schedule(applicationContext)
             return false
         }
 
@@ -48,6 +48,7 @@ class MediaWatchJobService : JobService() {
             } catch (e: Exception) {
                 Log.e(TAG, "Could not scan for new videos", e)
             } finally {
+                MediaWatchScheduler.schedule(applicationContext)
                 jobFinished(params, false)
             }
         }

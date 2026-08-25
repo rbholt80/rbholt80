@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.autocut.app.R
@@ -111,8 +112,27 @@ class AutoEditWorker(
             ?.use { if (it.moveToFirst()) it.getString(0) else null }
     }.getOrNull()
 
+    /**
+     * Used by the expedited path to put the work in the foreground up front.
+     *
+     * Overriding this rather than relying only on ad-hoc setForeground calls is
+     * what gets the job an exemption from the background foreground-service
+     * restriction on Android 12+ — without it, a job started from the library
+     * watcher while the app is closed cannot promote itself, loses its progress
+     * notification, and is killed at JobScheduler's ten-minute ceiling partway
+     * through a long export.
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo =
+        foregroundInfo(R.string.notification_analyzing, null)
+
     private suspend fun setProgressForeground(titleRes: Int, percent: Int?) {
-        runCatching { setForeground(foregroundInfo(titleRes, percent)) }
+        try {
+            setForeground(foregroundInfo(titleRes, percent))
+        } catch (e: Exception) {
+            // Never fatal — the edit itself still works — but silence here used
+            // to make "the export stopped after ten minutes" undiagnosable.
+            Log.w(TAG, "Could not move the edit into the foreground", e)
+        }
     }
 
     private fun setProgressSafely(titleRes: Int, percent: Int) {
@@ -158,6 +178,10 @@ class AutoEditWorker(
         fun enqueue(context: Context, uri: Uri) {
             val request = OneTimeWorkRequestBuilder<AutoEditWorker>()
                 .setInputData(workDataOf(KEY_URI to uri.toString()))
+                // Expedited so it may start a foreground service from the
+                // background; falls back to ordinary work rather than failing
+                // when the app's expedited quota is spent.
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build()
             // Keyed on the source so a library scan that reports the same video
             // twice does not edit it twice.
