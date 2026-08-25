@@ -26,12 +26,13 @@ import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.autocut.engine.model.Clip
 import com.autocut.engine.model.EditPlan
-import com.google.common.collect.ImmutableList
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -143,7 +144,7 @@ class AutoCutRenderer(private val context: Context) {
             .build()
     }
 
-    private fun videoEffectsFor(plan: EditPlan, clip: Clip): ImmutableList<Effect> {
+    private fun videoEffectsFor(plan: EditPlan, clip: Clip): List<Effect> {
         val effects = ArrayList<Effect>(5)
         val video = plan.video
 
@@ -170,13 +171,11 @@ class AutoCutRenderer(private val context: Context) {
         if (video.saturationPercent != 0f) {
             effects.add(HslAdjustment.Builder().adjustSaturation(video.saturationPercent).build())
         }
-        if (video.maxShortSidePx > 0) {
-            effects.add(Presentation.createForShortSide(video.maxShortSidePx))
-        }
-        return ImmutableList.copyOf(effects)
+        presentationFor(plan, video.maxShortSidePx)?.let(effects::add)
+        return effects
     }
 
-    private fun audioProcessorsFor(plan: EditPlan, clip: Clip): ImmutableList<AudioProcessor> {
+    private fun audioProcessorsFor(plan: EditPlan, clip: Clip): List<AudioProcessor> {
         val processors = ArrayList<AudioProcessor>(2)
         // Sound has to be stretched by the same factor as the picture or the
         // clip drifts out of sync with itself.
@@ -184,8 +183,38 @@ class AutoCutRenderer(private val context: Context) {
             processors.add(SpeedChangingAudioProcessor(ConstantSpeedProvider(clip.speed)))
         }
         if (!plan.audio.isIdentity) processors.add(LoudnessAudioProcessor(plan.audio))
-        return ImmutableList.copyOf(processors)
+        return processors
     }
+
+    /**
+     * Caps the output's short edge while keeping the shape of the frame.
+     *
+     * Media3 1.4.1 has no "short side" presentation, only width-and-height, so
+     * both dimensions are worked out here. The basis is the source's *display*
+     * size rather than its encoded size: the decoder has already applied the
+     * container's rotation by the time effects run, so a portrait clip recorded
+     * as 1920x1080-rotated-90 arrives as 1080x1920. Using the encoded size would
+     * pillarbox every portrait video.
+     *
+     * Dimensions are rounded to even numbers because hardware encoders reject
+     * odd ones on chroma-subsampled formats.
+     */
+    private fun presentationFor(plan: EditPlan, maxShortSidePx: Int): Presentation? {
+        if (maxShortSidePx <= 0) return null
+        val source = plan.source
+        val shortSide = min(source.displayWidth, source.displayHeight)
+        if (shortSide <= maxShortSidePx || shortSide <= 0) return null
+
+        val scale = maxShortSidePx.toDouble() / shortSide
+        return Presentation.createForWidthAndHeight(
+            evenPixels(source.displayWidth * scale),
+            evenPixels(source.displayHeight * scale),
+            Presentation.LAYOUT_SCALE_TO_FIT,
+        )
+    }
+
+    private fun evenPixels(value: Double): Int =
+        (value.roundToInt() / 2 * 2).coerceAtLeast(2)
 
     /** One speed for the whole clip, because the planner ramps whole gaps. */
     @UnstableApi
