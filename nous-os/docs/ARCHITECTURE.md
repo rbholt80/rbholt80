@@ -123,7 +123,7 @@ CSP does not restrict.
 
 ## Testing
 
-262 tests, and the ones that matter most are the adversarial ones: that a
+267 tests, and the ones that matter most are the adversarial ones: that a
 protected path beats an explicit `allow`, that an undone action cannot be undone
 twice, that a corrupt journal line does not poison the log, that a hung
 subprocess is killed rather than wedging the daemon, that a slow event subscriber
