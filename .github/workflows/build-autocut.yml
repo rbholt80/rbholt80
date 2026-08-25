@@ -1,0 +1,60 @@
+# Builds AutoCut on a runner that has the Android SDK and unrestricted network,
+# and publishes the APK as a downloadable artifact.
+name: Build AutoCut
+
+on:
+  push:
+    branches:
+      - 'claude/auto-video-editor-android-**'
+    paths:
+      - 'auto-video-editor/**'
+      - '.github/workflows/build-autocut.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Engine tests and debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install SDK platform 35
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+      # Runs first and on its own: this is the part with real assertions, and a
+      # failure here is a logic failure rather than a toolchain one.
+      - name: Engine tests
+        working-directory: auto-video-editor
+        run: ./gradlew :engine:test --no-daemon --stacktrace
+
+      - name: Build debug APK
+        working-directory: auto-video-editor
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: autocut-debug-apk
+          path: auto-video-editor/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-test-report
+          path: auto-video-editor/engine/build/reports/tests/test
+          if-no-files-found: ignore
