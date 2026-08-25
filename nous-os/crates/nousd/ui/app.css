@@ -1,1 +1,590 @@
-/* placeholder */
+/* NOUS Shell — the graphical surface of the OS.
+ *
+ * The design brief, and the reason it does not look like a desktop: there is no
+ * taskbar, no start menu, and no overlapping windows. Those exist to manage
+ * *applications*, and NOUS is not organised around applications. It is
+ * organised around what you are trying to do, so the primary surface is a place
+ * to say it, and the second surface is a record of what the system did about it.
+ */
+
+:root {
+  --bg:            #070809;
+  --bg-raise:      #0c0e11;
+  --surface:       rgba(255, 255, 255, 0.032);
+  --surface-hover: rgba(255, 255, 255, 0.058);
+  --surface-active:rgba(255, 255, 255, 0.085);
+  --line:          rgba(255, 255, 255, 0.075);
+  --line-strong:   rgba(255, 255, 255, 0.14);
+
+  --text:          #eef1f6;
+  --text-dim:      #9aa3b2;
+  --text-faint:    #626b7a;
+
+  --accent:        #7dd3fc;
+  --accent-2:      #a78bfa;
+  --accent-glow:   rgba(125, 211, 252, 0.16);
+
+  /* Risk is a first-class visual dimension: the colour of an action tells you
+   * what it can do before you read a word of it. */
+  --risk-read:     #64748b;
+  --risk-write:    #38bdf8;
+  --risk-elevated: #fbbf24;
+  --risk-critical: #fb7185;
+  --ok:            #4ade80;
+
+  --r-sm: 8px;
+  --r:    13px;
+  --r-lg: 20px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --fast: 150ms var(--ease);
+  --med:  240ms var(--ease);
+
+  --rail: 74px;
+  --font: ui-sans-serif, -apple-system, "Inter", "Segoe UI", Roboto, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Two very soft light sources. The room has depth without any object in it
+ * having to draw a shadow. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 600px at 18% -8%,  rgba(125, 211, 252, 0.10), transparent 60%),
+    radial-gradient(800px 700px at 92% 108%, rgba(167, 139, 250, 0.09), transparent 62%);
+  z-index: 0;
+}
+
+button, input, select { font: inherit; color: inherit; }
+button { background: none; border: none; cursor: pointer; }
+::selection { background: var(--accent-glow); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.24); background-clip: content-box; }
+
+/* ------------------------------------------------------------------ layout */
+
+.shell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  height: 100vh;
+}
+
+/* The rail lists *contexts*, not applications. You are never launching a
+ * program; you are changing what the surface is about. */
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 0;
+  border-right: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.mark {
+  width: 34px; height: 34px;
+  margin-bottom: 18px;
+  border-radius: 11px;
+  display: grid; place-items: center;
+  background: linear-gradient(145deg, var(--accent), var(--accent-2));
+  color: #05070a;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.04em;
+  box-shadow: 0 0 26px var(--accent-glow);
+}
+
+.ctx {
+  position: relative;
+  width: 46px; height: 44px;
+  border-radius: var(--r);
+  display: grid; place-items: center;
+  color: var(--text-faint);
+  transition: color var(--fast), background var(--fast);
+}
+.ctx:hover { color: var(--text-dim); background: var(--surface); }
+.ctx[aria-selected="true"] { color: var(--text); background: var(--surface-active); }
+.ctx[aria-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: -18px; top: 50%;
+  width: 3px; height: 20px;
+  transform: translateY(-50%);
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(var(--accent), var(--accent-2));
+}
+.ctx svg { width: 20px; height: 20px; }
+.ctx .label {
+  position: absolute; left: 56px;
+  padding: 5px 10px;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-size: 12px; white-space: nowrap;
+  opacity: 0; transform: translateX(-4px);
+  transition: opacity var(--fast), transform var(--fast);
+  pointer-events: none;
+  z-index: 40;
+}
+.ctx:hover .label { opacity: 1; transform: none; }
+.rail .spacer { flex: 1; }
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------- the intent bar */
+
+.intent-zone { padding: 22px 30px 8px; }
+
+.intent {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 54px;
+  padding: 0 16px 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(14, 16, 20, 0.72);
+  backdrop-filter: blur(22px) saturate(150%);
+  transition: border-color var(--med), box-shadow var(--med), background var(--med);
+}
+.intent:focus-within {
+  border-color: rgba(125, 211, 252, 0.42);
+  box-shadow: 0 0 0 4px var(--accent-glow), 0 18px 50px -18px rgba(0,0,0,0.9);
+  background: rgba(16, 19, 24, 0.88);
+}
+.intent .glyph { color: var(--accent); display: grid; place-items: center; }
+.intent .glyph svg { width: 19px; height: 19px; }
+.intent input {
+  flex: 1;
+  border: none; outline: none; background: none;
+  font-size: 15.5px;
+  letter-spacing: -0.006em;
+}
+.intent input::placeholder { color: var(--text-faint); }
+.kbd {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* The origin badge is a small honesty: it says whether the machine understood
+ * you by itself or had to ask a model. */
+.origin {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.origin .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
+.origin.model .dot { background: var(--accent-2); }
+
+/* ---------------------------------------------------------------- content */
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 30px 30px;
+  scroll-behavior: smooth;
+}
+
+.view { display: none; animation: rise var(--med) both; }
+.view.active { display: block; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.head {
+  display: flex; align-items: baseline; gap: 14px;
+  margin: 14px 2px 16px;
+}
+.head h1 {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+}
+.head .sub { color: var(--text-faint); font-size: 13px; }
+.head .grow { flex: 1; }
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  overflow: hidden;
+}
+.card + .card { margin-top: 16px; }
+.card-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+}
+.card-head .grow { flex: 1; }
+.card-body { padding: 16px 18px; }
+
+.muted { color: var(--text-dim); }
+.faint { color: var(--text-faint); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.btn {
+  padding: 8px 15px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background var(--fast), border-color var(--fast), transform var(--fast);
+}
+.btn:hover { background: var(--surface-hover); border-color: var(--line-strong); }
+.btn:active { transform: translateY(1px); }
+.btn.primary {
+  background: linear-gradient(145deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #05070a;
+  font-weight: 600;
+}
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { border-color: transparent; background: none; color: var(--text-dim); }
+.btn.ghost:hover { background: var(--surface); color: var(--text); }
+.btn.small { padding: 5px 11px; font-size: 12px; border-radius: 8px; }
+
+/* --------------------------------------------------------- the plan card */
+
+/* Nothing runs until this has been seen. It is deliberately the most
+ * prominent thing the shell ever draws. */
+.plan {
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, rgba(125,211,252,0.055), rgba(255,255,255,0.02));
+  margin: 6px 0 18px;
+  overflow: hidden;
+  animation: rise var(--med) both;
+}
+.plan-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.plan-head .title { font-weight: 550; letter-spacing: -0.012em; }
+.plan-head .grow { flex: 1; }
+
+.step {
+  display: flex; align-items: flex-start; gap: 13px;
+  padding: 12px 18px;
+}
+.step + .step { border-top: 1px solid rgba(255,255,255,0.045); }
+.step .rail-dot {
+  margin-top: 5px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--risk-read);
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.04);
+}
+.step[data-risk="write"]    .rail-dot { background: var(--risk-write); }
+.step[data-risk="elevated"] .rail-dot { background: var(--risk-elevated); }
+.step[data-risk="critical"] .rail-dot { background: var(--risk-critical); }
+.step .body { flex: 1; min-width: 0; }
+.step .what { font-size: 13.5px; }
+.step .cap {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin-top: 2px;
+  word-break: break-all;
+}
+.step .verdict {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.step .verdict.confirm { color: var(--risk-elevated); border-color: rgba(251,191,36,0.32); }
+.step .verdict.deny    { color: var(--risk-critical); border-color: rgba(251,113,133,0.34); }
+.step .verdict.allow   { color: var(--ok); border-color: rgba(74,222,128,0.26); }
+.step.done .what { color: var(--text-dim); }
+.step.running .rail-dot { animation: pulse 1.1s ease-in-out infinite; }
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(125,211,252,0.10); }
+  50%      { box-shadow: 0 0 0 7px rgba(125,211,252,0.02); }
+}
+
+.plan-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 18px;
+  border-top: 1px solid var(--line);
+  background: rgba(0,0,0,0.2);
+}
+.plan-foot .grow { flex: 1; }
+
+/* ------------------------------------------------------------- the files */
+
+.crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+.crumbs button {
+  padding: 4px 8px;
+  border-radius: 7px;
+  color: var(--text-dim);
+  font-size: 13px;
+  transition: background var(--fast), color var(--fast);
+}
+.crumbs button:hover { background: var(--surface); color: var(--text); }
+.crumbs .sep { color: var(--text-faint); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  gap: 10px;
+}
+
+.tile {
+  padding: 14px;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  background: var(--surface);
+  text-align: left;
+  transition: background var(--fast), border-color var(--fast), transform var(--fast);
+}
+.tile:hover { background: var(--surface-hover); border-color: var(--line); transform: translateY(-2px); }
+.tile .ico { font-size: 22px; line-height: 1; margin-bottom: 10px; display: block; }
+.tile .name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tile .meta { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; }
+
+.rows { display: flex; flex-direction: column; }
+.row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  text-align: left;
+  width: 100%;
+  transition: background var(--fast);
+}
+.row:hover { background: var(--surface); }
+.row .ico { font-size: 16px; width: 22px; flex: none; }
+.row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
+.row .meta { color: var(--text-faint); font-size: 12px; flex: none; }
+
+/* ------------------------------------------------------------- the ledger */
+
+/* The surface that no other desktop has, because no other desktop records
+ * enough to draw it: everything the system did, and a way to take it back. */
+.ledger { position: relative; padding-left: 26px; }
+.ledger::before {
+  content: "";
+  position: absolute;
+  left: 7px; top: 8px; bottom: 8px;
+  width: 1px;
+  background: linear-gradient(var(--line-strong), transparent);
+}
+.entry { position: relative; padding: 11px 0; }
+.entry + .entry { border-top: 1px solid rgba(255,255,255,0.04); }
+.entry::before {
+  content: "";
+  position: absolute;
+  left: -23px; top: 18px;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--risk-read);
+  border: 2px solid var(--bg);
+}
+.entry[data-risk="write"]::before    { background: var(--risk-write); }
+.entry[data-risk="elevated"]::before { background: var(--risk-elevated); }
+.entry[data-risk="critical"]::before { background: var(--risk-critical); }
+.entry[data-outcome="refused"]::before { background: var(--risk-critical); }
+.entry .line { display: flex; align-items: center; gap: 10px; }
+.entry .detail { flex: 1; font-size: 13.5px; }
+.entry .when { font-size: 11.5px; color: var(--text-faint); font-family: var(--mono); }
+.entry .cap { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+.entry.undone { opacity: 0.44; }
+.entry.undone .detail { text-decoration: line-through; }
+
+.tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  color: var(--text-faint);
+}
+.tag.refused { color: var(--risk-critical); border-color: rgba(251,113,133,0.3); }
+.tag.dry     { color: var(--accent-2); border-color: rgba(167,139,250,0.3); }
+
+/* -------------------------------------------------------------- the meters */
+
+.meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.meter { padding: 15px 16px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+.meter .k { font-size: 11.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.meter .v { font-size: 25px; font-weight: 300; letter-spacing: -0.03em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.meter .v small { font-size: 13px; color: var(--text-faint); margin-left: 3px; }
+.bar { height: 3px; border-radius: 999px; background: rgba(255,255,255,0.07); margin-top: 11px; overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 700ms var(--ease); }
+.bar.warn i { background: linear-gradient(90deg, var(--risk-elevated), var(--risk-critical)); }
+
+/* -------------------------------------------------------------- the studio */
+
+.timeline {
+  display: flex; gap: 3px;
+  padding: 14px;
+  border-radius: var(--r);
+  background: rgba(0,0,0,0.32);
+  border: 1px solid var(--line);
+  min-height: 84px;
+  align-items: stretch;
+  overflow-x: auto;
+}
+.clip {
+  flex: none;
+  min-width: 88px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: linear-gradient(160deg, rgba(125,211,252,0.20), rgba(167,139,250,0.14));
+  border: 1px solid rgba(125,211,252,0.26);
+  transition: transform var(--fast), border-color var(--fast);
+}
+.clip:hover { transform: translateY(-2px); border-color: rgba(125,211,252,0.5); }
+.clip .n { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip .t { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.timeline .empty { margin: auto; color: var(--text-faint); font-size: 13px; }
+
+.player { display: flex; align-items: center; gap: 14px; }
+.player .art {
+  width: 52px; height: 52px;
+  border-radius: 11px;
+  display: grid; place-items: center;
+  font-size: 21px;
+  background: linear-gradient(150deg, rgba(125,211,252,0.20), rgba(167,139,250,0.16));
+  border: 1px solid var(--line);
+}
+.player .now { flex: 1; min-width: 0; }
+.player .now .t { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player .now .s { font-size: 12px; color: var(--text-faint); }
+.transport { display: flex; gap: 6px; }
+.transport button {
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  transition: background var(--fast), transform var(--fast);
+}
+.transport button:hover { background: var(--surface-hover); }
+.transport button:active { transform: scale(0.94); }
+.transport svg { width: 15px; height: 15px; }
+
+/* ------------------------------------------------------------ status strip */
+
+.status {
+  display: flex; align-items: center; gap: 16px;
+  padding: 8px 30px;
+  border-top: 1px solid var(--line);
+  background: rgba(255,255,255,0.012);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.status .grow { flex: 1; }
+.status .pip { display: inline-flex; align-items: center; gap: 6px; }
+.status .pip b { font-weight: 500; color: var(--text-dim); }
+.live { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px rgba(74,222,128,0.7); }
+.live.off { background: var(--risk-critical); box-shadow: none; }
+
+/* ----------------------------------------------------------------- toasts */
+
+.toasts {
+  position: fixed;
+  right: 22px; bottom: 22px;
+  display: flex; flex-direction: column; gap: 9px;
+  z-index: 60;
+  max-width: 380px;
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: rgba(14,16,20,0.94);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 20px 50px -18px rgba(0,0,0,0.95);
+  animation: slide-in var(--med) both;
+  font-size: 13px;
+}
+.toast .mark-dot { margin-top: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.toast.warn .mark-dot { background: var(--risk-elevated); }
+.toast.bad  .mark-dot { background: var(--risk-critical); }
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(18px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.empty-state { padding: 44px 20px; text-align: center; color: var(--text-faint); }
+.empty-state .big { font-size: 30px; margin-bottom: 12px; opacity: 0.5; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* Utilities.
+ *
+ * These exist because the shell ships a strict Content-Security-Policy with no
+ * 'unsafe-inline' for styles, so a `style="..."` attribute is refused by the
+ * browser. Anything genuinely dynamic (a meter's width) is set through the
+ * CSSOM, which CSP does not restrict; everything else is a class.
+ */
+.mt-8  { margin-top: 8px; }
+.mt-10 { margin-top: 10px; }
+.mt-12 { margin-top: 12px; }
+.mt-14 { margin-top: 14px; }
+.mt-16 { margin-top: 16px; }
+.fs-12 { font-size: 12px; }
+.fs-125 { font-size: 12.5px; }
+.fs-13 { font-size: 13px; }
+.kv-key { flex: 0 0 132px; }
+.bar i { width: 0; }
+.ok-text { color: var(--ok); }
