@@ -45,7 +45,10 @@ impl Config {
         // classification and naming, and it runs on a laptop with no GPU.
         set("model.ollama.small_model", "qwen2.5:1.5b-instruct");
 
-        set("model.anthropic.url", "https://api.anthropic.com/v1/messages");
+        set(
+            "model.anthropic.url",
+            "https://api.anthropic.com/v1/messages",
+        );
         set("model.anthropic.model", "claude-sonnet-5");
         set("model.anthropic.max_tokens", "2048");
         // Read from the environment by default so the key is never in a file.
@@ -53,7 +56,10 @@ impl Config {
 
         // Any OpenAI-compatible endpoint: OpenAI itself, OpenRouter, Groq, a
         // local llama.cpp or LM Studio server. Bring whichever key you hold.
-        set("model.openai.url", "https://api.openai.com/v1/chat/completions");
+        set(
+            "model.openai.url",
+            "https://api.openai.com/v1/chat/completions",
+        );
         set("model.openai.model", "gpt-4o-mini");
         set("model.openai.provider", "openai");
 
@@ -67,8 +73,21 @@ impl Config {
         // What the semantic index is allowed to look at.
         set("index.roots", "~/Documents,~/Downloads,~/Projects,~/notes");
         set("index.max_file_bytes", "1048576");
-        set("index.exclude", "node_modules,.git,target,__pycache__,.venv,dist,build");
+        set(
+            "index.exclude",
+            "node_modules,.git,target,__pycache__,.venv,dist,build",
+        );
         set("index.interval_secs", "900");
+
+        // What NOUS keeps on your behalf, and for how long. A system that
+        // warns you about disk space must not be the reason you run out.
+        set("retain.journal_records", "20000");
+        set("retain.journal_archives", "4");
+        set("retain.backup_mb", "2048");
+        set("retain.trash_days", "30");
+        set("retain.thumbnail_days", "60");
+        set("retain.screenshot_days", "14");
+        set("retain.interval_secs", "21600");
 
         set("sensor.interval_secs", "20");
         set("sensor.load_alert", "4.0");
@@ -143,11 +162,15 @@ impl Config {
     }
 
     pub fn f64_or(&self, key: &str, default: f64) -> f64 {
-        self.get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+        self.get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 
     pub fn u64_or(&self, key: &str, default: u64) -> u64 {
-        self.get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+        self.get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 
     pub fn bool_or(&self, key: &str, default: bool) -> bool {
@@ -161,7 +184,10 @@ impl Config {
     pub fn list(&self, key: &str) -> Vec<String> {
         self.get(key)
             .map(|v| {
-                v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -221,6 +247,23 @@ mod tests {
     }
 
     #[test]
+    fn everything_kept_has_a_bound() {
+        // Every store NOUS writes to needs a limit, or it is an unbounded copy
+        // of the user's disk.
+        let c = Config::with_defaults();
+        for key in [
+            "retain.journal_records",
+            "retain.journal_archives",
+            "retain.backup_mb",
+            "retain.trash_days",
+            "retain.thumbnail_days",
+            "retain.screenshot_days",
+        ] {
+            assert!(c.u64_or(key, 0) > 0, "{} has no bound", key);
+        }
+    }
+
+    #[test]
     fn sections_become_dotted_keys() {
         let c = Config::parse("[model]\nroute = offline\n\n[index]\nroots = ~/a,~/b\n").unwrap();
         assert_eq!(c.get("model.route"), Some("offline"));
@@ -239,7 +282,11 @@ mod tests {
         let before = c.str_or("model.ollama.model", "").to_string();
         c.merge(Config::parse("[model]\nroute = offline\n").unwrap());
         assert_eq!(c.get("model.route"), Some("offline"));
-        assert_eq!(c.str_or("model.ollama.model", ""), before, "untouched keys must survive");
+        assert_eq!(
+            c.str_or("model.ollama.model", ""),
+            before,
+            "untouched keys must survive"
+        );
     }
 
     #[test]
@@ -250,7 +297,10 @@ mod tests {
     #[test]
     fn tilde_expands_against_home() {
         std::env::set_var("HOME", "/home/testuser");
-        assert_eq!(expand_tilde("~/Documents"), PathBuf::from("/home/testuser/Documents"));
+        assert_eq!(
+            expand_tilde("~/Documents"),
+            PathBuf::from("/home/testuser/Documents")
+        );
         assert_eq!(expand_tilde("/etc/nous"), PathBuf::from("/etc/nous"));
     }
 
@@ -260,6 +310,9 @@ mod tests {
         assert!(c.bool_or("a", false));
         assert!(!c.bool_or("b", true));
         assert!(c.bool_or("c", false));
-        assert!(c.bool_or("missing", true), "absent keys fall back to the default");
+        assert!(
+            c.bool_or("missing", true),
+            "absent keys fall back to the default"
+        );
     }
 }

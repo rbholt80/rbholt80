@@ -66,12 +66,19 @@ pub fn config_dirs() -> Vec<PathBuf> {
 
 /// The directory configuration is written to, and the first one read.
 pub fn config_dir() -> PathBuf {
-    config_dirs().into_iter().next().unwrap_or_else(|| PathBuf::from("/etc/nous"))
+    config_dirs()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("/etc/nous"))
 }
 
 fn next_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
-    format!("{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Read one newline-delimited frame. `Ok(None)` means the peer hung up.
@@ -106,13 +113,16 @@ pub fn read_frame<R: BufRead>(r: &mut R) -> Result<Option<Json>, String> {
         return read_frame(r);
     }
     let text = String::from_utf8(line).map_err(|_| "frame is not valid UTF-8".to_string())?;
-    parse(&text).map(Some).map_err(|e| format!("malformed frame: {}", e))
+    parse(&text)
+        .map(Some)
+        .map_err(|e| format!("malformed frame: {}", e))
 }
 
 pub fn write_frame<W: Write>(w: &mut W, v: &Json) -> Result<(), String> {
     let mut s = v.to_string();
     s.push('\n');
-    w.write_all(s.as_bytes()).map_err(|e| format!("write error: {}", e))?;
+    w.write_all(s.as_bytes())
+        .map_err(|e| format!("write error: {}", e))?;
     w.flush().map_err(|e| format!("flush error: {}", e))
 }
 
@@ -135,19 +145,31 @@ impl Client {
                 e
             )
         })?;
-        let reader =
-            BufReader::new(stream.try_clone().map_err(|e| format!("cannot clone socket: {}", e))?);
+        let reader = BufReader::new(
+            stream
+                .try_clone()
+                .map_err(|e| format!("cannot clone socket: {}", e))?,
+        );
         Ok(Client { stream, reader })
     }
 
     pub fn set_timeout(&self, d: Option<Duration>) -> Result<(), String> {
-        self.stream.set_read_timeout(d).map_err(|e| format!("cannot set timeout: {}", e))?;
-        self.stream.set_write_timeout(d).map_err(|e| format!("cannot set timeout: {}", e))
+        self.stream
+            .set_read_timeout(d)
+            .map_err(|e| format!("cannot set timeout: {}", e))?;
+        self.stream
+            .set_write_timeout(d)
+            .map_err(|e| format!("cannot set timeout: {}", e))
     }
 
     /// Send a request and wait for the matching response, forwarding any events
     /// that arrive in the meantime to `on_event`.
-    pub fn call_with<F>(&mut self, method: &str, params: Json, mut on_event: F) -> Result<Json, String>
+    pub fn call_with<F>(
+        &mut self,
+        method: &str,
+        params: Json,
+        mut on_event: F,
+    ) -> Result<Json, String>
     where
         F: FnMut(&crate::proto::Event),
     {
@@ -160,7 +182,9 @@ impl Client {
             match Frame::parse(&frame)? {
                 Frame::Evt(e) => on_event(&e),
                 Frame::Res(res) if res.id() == id => {
-                    return res.into_result().map_err(|(code, msg)| format!("[{}] {}", code, msg));
+                    return res
+                        .into_result()
+                        .map_err(|(code, msg)| format!("[{}] {}", code, msg));
                 }
                 // A response to somebody else's request; ignore it.
                 Frame::Res(_) | Frame::Req(_) => continue,
@@ -207,8 +231,8 @@ pub fn bind(path: &Path) -> Result<UnixListener, String> {
         std::fs::remove_file(path)
             .map_err(|e| format!("cannot remove stale socket {}: {}", path.display(), e))?;
     }
-    let listener = UnixListener::bind(path)
-        .map_err(|e| format!("cannot bind {}: {}", path.display(), e))?;
+    let listener =
+        UnixListener::bind(path).map_err(|e| format!("cannot bind {}: {}", path.display(), e))?;
     // The socket is the door to every capability on the machine. Owner only.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("cannot secure socket: {}", e))?;
@@ -282,7 +306,9 @@ mod tests {
 
         let mut client = Client::connect_to(&path).unwrap();
         let mut seen = 0;
-        let out = client.call_with(method::PING, Json::obj(), |_| seen += 1).unwrap();
+        let out = client
+            .call_with(method::PING, Json::obj(), |_| seen += 1)
+            .unwrap();
         assert!(out.bool_or("pong", false));
         assert_eq!(seen, 1, "the interleaved event should have been delivered");
         server.join().unwrap();
@@ -301,10 +327,14 @@ mod tests {
 
     #[test]
     fn stale_socket_files_are_reclaimed() {
-        let path = std::env::temp_dir().join(format!("nous-stale-test-{}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("nous-stale-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, b"not a socket").unwrap();
-        assert!(bind(&path).is_ok(), "a leftover file must not block startup");
+        assert!(
+            bind(&path).is_ok(),
+            "a leftover file must not block startup"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -314,7 +344,10 @@ mod tests {
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::set_var("HOME", "/home/joey");
         let dirs = config_dirs();
-        assert_eq!(dirs.first().unwrap(), &PathBuf::from("/home/joey/.config/nous"));
+        assert_eq!(
+            dirs.first().unwrap(),
+            &PathBuf::from("/home/joey/.config/nous")
+        );
         assert_eq!(dirs.last().unwrap(), &PathBuf::from("/etc/nous"));
 
         // An explicit override replaces the search entirely.

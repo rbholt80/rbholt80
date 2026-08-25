@@ -13,7 +13,7 @@ use crate::Daemon;
 use nous_core::json::{json_obj, parse, Json};
 use nous_core::proto::Request;
 use nous_core::{log_info, log_warn};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,7 +59,10 @@ struct HttpRequest {
 impl HttpRequest {
     fn header(&self, name: &str) -> Option<&str> {
         let lower = name.to_ascii_lowercase();
-        self.headers.iter().find(|(k, _)| *k == lower).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| *k == lower)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -125,21 +128,35 @@ fn handle(daemon: Arc<Daemon>, stream: TcpStream) -> Result<(), String> {
     // able to talk to the shell just because it is listening on localhost.
     if let Some(origin) = req.header("origin") {
         if !origin.contains("127.0.0.1") && !origin.contains("localhost") {
-            return respond(&mut writer, 403, "text/plain", b"cross-origin requests are refused");
+            return respond(
+                &mut writer,
+                403,
+                "text/plain",
+                b"cross-origin requests are refused",
+            );
         }
     }
 
     let path = req.path.split('?').next().unwrap_or("/");
     match (req.method.as_str(), path) {
-        ("GET", "/") | ("GET", "/index.html") => {
-            respond(&mut writer, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes())
-        }
-        ("GET", "/app.css") => {
-            respond(&mut writer, 200, "text/css; charset=utf-8", APP_CSS.as_bytes())
-        }
-        ("GET", "/app.js") => {
-            respond(&mut writer, 200, "application/javascript; charset=utf-8", APP_JS.as_bytes())
-        }
+        ("GET", "/") | ("GET", "/index.html") => respond(
+            &mut writer,
+            200,
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes(),
+        ),
+        ("GET", "/app.css") => respond(
+            &mut writer,
+            200,
+            "text/css; charset=utf-8",
+            APP_CSS.as_bytes(),
+        ),
+        ("GET", "/app.js") => respond(
+            &mut writer,
+            200,
+            "application/javascript; charset=utf-8",
+            APP_JS.as_bytes(),
+        ),
         ("GET", "/events") => serve_events(daemon, &req, writer),
         ("POST", "/api") => {
             let body = parse(&req.body).unwrap_or_else(|_| Json::obj());
@@ -179,10 +196,21 @@ fn respond(w: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> R
 
 // ------------------------------------------------------------------ websocket
 
-fn serve_events(daemon: Arc<Daemon>, req: &HttpRequest, mut writer: TcpStream) -> Result<(), String> {
+fn serve_events(
+    daemon: Arc<Daemon>,
+    req: &HttpRequest,
+    mut writer: TcpStream,
+) -> Result<(), String> {
     let key = match req.header("sec-websocket-key") {
         Some(k) => k,
-        None => return respond(&mut writer, 400, "text/plain", b"expected a websocket upgrade"),
+        None => {
+            return respond(
+                &mut writer,
+                400,
+                "text/plain",
+                b"expected a websocket upgrade",
+            )
+        }
     };
     let accept = websocket_accept(key);
     let head = format!(
@@ -190,7 +218,9 @@ fn serve_events(daemon: Arc<Daemon>, req: &HttpRequest, mut writer: TcpStream) -
          Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
         accept
     );
-    writer.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
+    writer
+        .write_all(head.as_bytes())
+        .map_err(|e| e.to_string())?;
     writer.flush().ok();
 
     let (id, rx) = daemon.bus.subscribe(vec!["*".to_string()]);
@@ -299,12 +329,24 @@ pub fn base64(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -331,9 +373,9 @@ mod tests {
     #[test]
     fn sha1_handles_input_spanning_several_blocks() {
         // 1000 'a's crosses the 64-byte block boundary many times.
-        assert_eq!(base64(&sha1(&vec![b'a'; 1000])), "KR6abGaZSUm1e6XmUDYemPw2sbo=");
+        assert_eq!(base64(&sha1(&[b'a'; 1000])), "KR6abGaZSUm1e6XmUDYemPw2sbo=");
         // Exactly one block: the padding path that needs a whole extra block.
-        assert_eq!(base64(&sha1(&vec![b'a'; 64])), "AJi6gktcFkJ716ESKlpEKiXsZE0=");
+        assert_eq!(base64(&sha1(&[b'a'; 64])), "AJi6gktcFkJ716ESKlpEKiXsZE0=");
     }
 
     #[test]
@@ -347,7 +389,10 @@ mod tests {
     #[test]
     fn websocket_handshake_matches_the_rfc_example() {
         // RFC 6455 section 1.3.
-        assert_eq!(websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 
     #[test]
@@ -372,7 +417,10 @@ mod tests {
 
     #[test]
     fn an_oversized_body_is_refused_before_it_is_read() {
-        let raw = format!("POST /api HTTP/1.1\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1);
+        let raw = format!(
+            "POST /api HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
         let mut cur = Cursor::new(raw);
         assert!(read_request(&mut cur).is_err());
     }

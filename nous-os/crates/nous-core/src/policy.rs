@@ -108,7 +108,10 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn explain(&self) -> String {
-        let src = self.matched.clone().unwrap_or_else(|| "default".to_string());
+        let src = self
+            .matched
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         match &self.decision {
             Decision::Allow => format!("allowed by {} (risk: {})", src, self.risk),
             Decision::Confirm(r) => format!("needs confirmation — {} [{}]", r, src),
@@ -234,7 +237,10 @@ allow    system         proc.spawn
     }
 
     pub fn empty() -> Policy {
-        Policy { rules: Vec::new(), agent_risk_ceiling: Risk::Write }
+        Policy {
+            rules: Vec::new(),
+            agent_risk_ceiling: Risk::Write,
+        }
     }
 
     /// Parse a policy document. Unparseable lines are an error rather than a
@@ -247,14 +253,23 @@ allow    system         proc.spawn
             if line.trim().is_empty() {
                 continue;
             }
-            let comment = raw.find('#').map(|i| raw[i + 1..].trim().to_string()).unwrap_or_default();
+            let comment = raw
+                .find('#')
+                .map(|i| raw[i + 1..].trim().to_string())
+                .unwrap_or_default();
             let mut f = line.split_whitespace();
             let decision_word = f.next().unwrap_or("");
             let subject = f.next().ok_or_else(|| {
-                format!("{}:{}: expected a subject after '{}'", source, line_no, decision_word)
+                format!(
+                    "{}:{}: expected a subject after '{}'",
+                    source, line_no, decision_word
+                )
             })?;
             let cap_str = f.next().ok_or_else(|| {
-                format!("{}:{}: expected a capability after '{}'", source, line_no, subject)
+                format!(
+                    "{}:{}: expected a capability after '{}'",
+                    source, line_no, subject
+                )
             })?;
             if let Some(extra) = f.next() {
                 return Err(format!(
@@ -278,8 +293,8 @@ allow    system         proc.spawn
                     ))
                 }
             };
-            let capability = Capability::parse(cap_str)
-                .map_err(|e| format!("{}:{}: {}", source, line_no, e))?;
+            let capability =
+                Capability::parse(cap_str).map_err(|e| format!("{}:{}: {}", source, line_no, e))?;
             rules.push(Rule {
                 decision,
                 subject: subject.to_string(),
@@ -288,7 +303,10 @@ allow    system         proc.spawn
                 line: line_no,
             });
         }
-        Ok(Policy { rules, agent_risk_ceiling: Risk::Write })
+        Ok(Policy {
+            rules,
+            agent_risk_ceiling: Risk::Write,
+        })
     }
 
     /// Append rules from another document. Later documents take *lower*
@@ -329,15 +347,17 @@ allow    system         proc.spawn
                     return Verdict {
                         decision: Decision::Confirm(format!(
                             "{} is {} risk, above the agent ceiling of {}",
-                            cap,
-                            risk,
-                            self.agent_risk_ceiling
+                            cap, risk, self.agent_risk_ceiling
                         )),
                         matched: Some(matched),
                         risk,
                     };
                 }
-                return Verdict { decision: rule.decision.clone(), matched: Some(matched), risk };
+                return Verdict {
+                    decision: rule.decision.clone(),
+                    matched: Some(matched),
+                    risk,
+                };
             }
         }
 
@@ -379,10 +399,19 @@ mod tests {
         // elsewhere, must get the same defaults as everybody else.
         std::env::set_var("HOME", "/export/home/joey");
         let p = Policy::builtin();
-        assert!(p.evaluate(&Subject::User, &cap("fs.write:/export/home/joey/notes.md")).decision.is_allow());
-        assert!(p.evaluate(&Subject::User, &cap("fs.move:/export/home/joey/a.mp3")).decision.is_allow());
+        assert!(p
+            .evaluate(&Subject::User, &cap("fs.write:/export/home/joey/notes.md"))
+            .decision
+            .is_allow());
+        assert!(p
+            .evaluate(&Subject::User, &cap("fs.move:/export/home/joey/a.mp3"))
+            .decision
+            .is_allow());
         // And still not into someone else's.
-        assert!(!p.evaluate(&Subject::User, &cap("fs.write:/export/home/other/x")).decision.is_allow());
+        assert!(!p
+            .evaluate(&Subject::User, &cap("fs.write:/export/home/other/x"))
+            .decision
+            .is_allow());
         std::env::set_var("HOME", "/home/joey");
     }
 
@@ -391,13 +420,20 @@ mod tests {
         std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
         let v = p.evaluate(&Subject::User, &cap("fs.delete:/home/joey/old.txt"));
-        assert!(matches!(v.decision, Decision::Confirm(_)), "{}", v.explain());
+        assert!(
+            matches!(v.decision, Decision::Confirm(_)),
+            "{}",
+            v.explain()
+        );
     }
 
     #[test]
     fn agents_may_never_delete() {
         let p = Policy::builtin();
-        let v = p.evaluate(&Subject::Agent("fs-agent".into()), &cap("fs.delete:/home/joey/x"));
+        let v = p.evaluate(
+            &Subject::Agent("fs-agent".into()),
+            &cap("fs.delete:/home/joey/x"),
+        );
         assert!(matches!(v.decision, Decision::Deny(_)), "{}", v.explain());
     }
 
@@ -417,16 +453,27 @@ mod tests {
         assert!(matches!(v.decision, Decision::Deny(_)), "{}", v.explain());
         assert_eq!(v.matched.as_deref(), Some("protected-paths"));
         // ...but an ordinary path under the same rule is fine.
-        assert!(p.evaluate(&Subject::User, &cap("fs.write:/srv/data")).decision.is_allow());
+        assert!(p
+            .evaluate(&Subject::User, &cap("fs.write:/srv/data"))
+            .decision
+            .is_allow());
     }
 
     #[test]
     fn secrets_never_reach_context() {
         std::env::set_var("HOME", "/home/joey");
         let p = Policy::builtin();
-        for path in ["/etc/shadow", "/home/joey/.ssh/id_ed25519", "/home/joey/.aws/credentials"] {
+        for path in [
+            "/etc/shadow",
+            "/home/joey/.ssh/id_ed25519",
+            "/home/joey/.aws/credentials",
+        ] {
             let v = p.evaluate(&Subject::User, &cap(&format!("fs.read:{}", path)));
-            assert!(matches!(v.decision, Decision::Deny(_)), "{} should be denied", path);
+            assert!(
+                matches!(v.decision, Decision::Deny(_)),
+                "{} should be denied",
+                path
+            );
         }
     }
 
@@ -436,7 +483,11 @@ mod tests {
         p.agent_risk_ceiling = Risk::Write;
         // pkg.install is Elevated, above the ceiling, so the agent must ask...
         let v = p.evaluate(&Subject::Agent("sys-agent".into()), &cap("pkg.install:vim"));
-        assert!(matches!(v.decision, Decision::Confirm(_)), "{}", v.explain());
+        assert!(
+            matches!(v.decision, Decision::Confirm(_)),
+            "{}",
+            v.explain()
+        );
         // ...while the same rule is honoured as written for the human.
         let u = p.evaluate(&Subject::User, &cap("pkg.install:vim"));
         assert!(u.decision.is_allow(), "{}", u.explain());
@@ -450,10 +501,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            p.evaluate(&Subject::User, &cap("fs.write:/home/joey/locked/a")).decision,
+            p.evaluate(&Subject::User, &cap("fs.write:/home/joey/locked/a"))
+                .decision,
             Decision::Deny(_)
         ));
-        assert!(p.evaluate(&Subject::User, &cap("fs.write:/home/joey/free/a")).decision.is_allow());
+        assert!(p
+            .evaluate(&Subject::User, &cap("fs.write:/home/joey/free/a"))
+            .decision
+            .is_allow());
     }
 
     #[test]

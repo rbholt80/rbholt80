@@ -15,17 +15,17 @@ mod exec;
 mod httpc;
 mod hwprofile;
 mod index;
+mod maintenance;
 mod resolve;
 mod router;
-mod secrets;
 mod sensorium;
 mod webui;
 
 use broker::{Broker, RunOptions};
 use bus::Bus;
 use nous_core::ipc::{self, read_frame, write_frame};
-use nous_core::json::{json_obj, Json};
 use nous_core::journal::now_secs;
+use nous_core::json::{json_obj, Json};
 use nous_core::proto::{errcode, method, Frame, Request, Response};
 use nous_core::{log_error, log_info, log_warn};
 use nous_core::{Config, Journal, Plan, Policy, Step, Subject};
@@ -36,6 +36,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 const MODULE: &str = "nousd";
 
@@ -59,7 +60,10 @@ impl Daemon {
         match req.method.as_str() {
             method::PING => Response::ok(
                 &req.id,
-                json_obj([("pong", true.into()), ("version", nous_core::NOUS_VERSION.into())]),
+                json_obj([
+                    ("pong", true.into()),
+                    ("version", nous_core::NOUS_VERSION.into()),
+                ]),
             ),
 
             method::SYS_STATUS => Response::ok(&req.id, self.status()),
@@ -137,7 +141,10 @@ impl Daemon {
                 if !opts.approved {
                     return Response::ok(
                         &req.id,
-                        json_obj([("status", "declined".into()), ("intent_id", plan.intent_id.clone().into())]),
+                        json_obj([
+                            ("status", "declined".into()),
+                            ("intent_id", plan.intent_id.clone().into()),
+                        ]),
                     );
                 }
                 Response::ok(&req.id, self.broker.run(&plan, &opts))
@@ -195,7 +202,10 @@ impl Daemon {
                     Ok(records) => Response::ok(
                         &req.id,
                         json_obj([
-                            ("records", Json::Arr(records.iter().map(|r| r.to_json()).collect())),
+                            (
+                                "records",
+                                Json::Arr(records.iter().map(|r| r.to_json()).collect()),
+                            ),
                             ("count", records.len().into()),
                         ]),
                     ),
@@ -219,7 +229,13 @@ impl Daemon {
                 };
                 Response::ok(
                     &req.id,
-                    self.broker.run(&plan, &RunOptions { approved: true, ..Default::default() }),
+                    self.broker.run(
+                        &plan,
+                        &RunOptions {
+                            approved: true,
+                            ..Default::default()
+                        },
+                    ),
                 )
             }
 
@@ -251,7 +267,8 @@ impl Daemon {
                     return Response::err(&req.id, errcode::BAD_REQUEST, "no prompt");
                 }
                 let mut c = router::Completion::new(
-                    req.param_str("system").unwrap_or("You are a helpful assistant."),
+                    req.param_str("system")
+                        .unwrap_or("You are a helpful assistant."),
                     prompt,
                 );
                 if req.param_str("tier") == Some("small") {
@@ -268,6 +285,18 @@ impl Daemon {
                     ),
                     Err(e) => Response::err(&req.id, errcode::BACKEND_UNAVAILABLE, e),
                 }
+            }
+
+            // What is being kept, and a way to reclaim it. Read-only unless
+            // `apply` is set, so you see the cost before agreeing to lose it.
+            "sys.maintenance" => {
+                let state = maintenance::state_root();
+                let apply = req.param_bool("apply", false);
+                let report = maintenance::run(&self.broker.journal, &self.cfg, &state, !apply);
+                let mut out = report.to_json();
+                out.set("applied", apply.into());
+                out.set("usage", maintenance::usage(&self.broker.journal, &state));
+                Response::ok(&req.id, out)
             }
 
             method::SYS_SHUTDOWN => Response::ok(&req.id, json_obj([("stopping", true.into())])),
@@ -292,8 +321,9 @@ impl Daemon {
         // did not do that gets whatever is focused now, which is better than
         // nothing for a terminal or a script.
         if ctx.focus.is_none() {
-            if let Some(title) =
-                exec::desktop::focus_context().get("focused_window").and_then(|v| v.as_str())
+            if let Some(title) = exec::desktop::focus_context()
+                .get("focused_window")
+                .and_then(|v| v.as_str())
             {
                 ctx.focus = Some(title.to_string());
             }
@@ -307,13 +337,20 @@ impl Daemon {
         json_obj([
             ("name", nous_core::NOUS_NAME.into()),
             ("version", nous_core::NOUS_VERSION.into()),
-            ("uptime_secs", (now_secs().saturating_sub(self.started)).into()),
+            (
+                "uptime_secs",
+                (now_secs().saturating_sub(self.started)).into(),
+            ),
             ("system", exec::sysops::sys_info()),
             ("metrics", exec::sysops::sys_metrics()),
             ("hardware", hw.to_json()),
             ("models", self.router.status()),
             ("policy_rules", self.broker.policy.rules.len().into()),
             ("desktop", exec::desktop::session_info()),
+            (
+                "storage",
+                maintenance::usage(&self.broker.journal, &maintenance::state_root()),
+            ),
             ("journal_entries", journal_len.into()),
             (
                 "bus",
@@ -510,14 +547,20 @@ fn main() {
     }
 
     let cfg = Config::load();
-    nous_core::log::set_level(nous_core::log::Level::parse(cfg.str_or("log.level", "info")));
+    nous_core::log::set_level(nous_core::log::Level::parse(
+        cfg.str_or("log.level", "info"),
+    ));
 
     let policy = load_policy_from(&ipc::config_dirs());
     let journal_dir = cfg.journal_dir();
     let journal = match Journal::open(&journal_dir) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("nousd: cannot open journal at {}: {}", journal_dir.display(), e);
+            eprintln!(
+                "nousd: cannot open journal at {}: {}",
+                journal_dir.display(),
+                e
+            );
             std::process::exit(1);
         }
     };
@@ -554,8 +597,18 @@ fn main() {
     };
 
     let hw = hwprofile::detect();
-    log_info!(MODULE, "NOUS {} listening on {}", nous_core::NOUS_VERSION, socket.display());
-    log_info!(MODULE, "hardware profile: {} — {}", hw.profile.as_str(), hw.profile.explain());
+    log_info!(
+        MODULE,
+        "NOUS {} listening on {}",
+        nous_core::NOUS_VERSION,
+        socket.display()
+    );
+    log_info!(
+        MODULE,
+        "hardware profile: {} — {}",
+        hw.profile.as_str(),
+        hw.profile.explain()
+    );
     if !daemon.router.has_model() {
         log_info!(
             MODULE,
@@ -566,6 +619,30 @@ fn main() {
     // The sensorium samples the machine in the background.
     let sensor = sensorium::Sensorium::new(bus.clone(), cfg.clone());
     std::thread::spawn(move || sensor.run());
+
+    // And the system tidies up after itself, on a much slower timer. Running
+    // once at startup matters: a machine that is only on for an hour a day
+    // would otherwise never reach the interval.
+    {
+        let broker = daemon.broker.clone();
+        let cfg = cfg.clone();
+        let bus = bus.clone();
+        std::thread::spawn(move || {
+            let every = Duration::from_secs(cfg.u64_or("retain.interval_secs", 21_600).max(60));
+            loop {
+                let state = maintenance::state_root();
+                let report = maintenance::run(&broker.journal, &cfg, &state, false);
+                if !report.is_empty() {
+                    log_info!(MODULE, "housekeeping: {}", report.describe());
+                    bus.publish(nous_core::Event::new(
+                        nous_core::proto::topic::SENSOR,
+                        json_obj([("kind", "maintenance".into()), ("report", report.to_json())]),
+                    ));
+                }
+                std::thread::sleep(every);
+            }
+        });
+    }
 
     // The graphical shell is served over HTTP on loopback.
     let port = http_port.unwrap_or_else(|| cfg.u64_or("ui.port", 7666) as u16);
@@ -600,7 +677,12 @@ mod tests {
         let cfg = Config::with_defaults();
         let bus = Arc::new(Bus::new());
         let journal = Journal::open(&root.join("journal")).unwrap();
-        let broker = Arc::new(Broker::new(cfg.clone(), Policy::builtin(), journal, bus.clone()));
+        let broker = Arc::new(Broker::new(
+            cfg.clone(),
+            Policy::builtin(),
+            journal,
+            bus.clone(),
+        ));
         let d = Arc::new(Daemon {
             cfg: cfg.clone(),
             bus,
@@ -639,7 +721,9 @@ mod tests {
     #[test]
     fn status_describes_the_running_system() {
         let (root, d) = daemon("status");
-        let s = call(&d, method::SYS_STATUS, Json::obj()).into_result().unwrap();
+        let s = call(&d, method::SYS_STATUS, Json::obj())
+            .into_result()
+            .unwrap();
         assert_eq!(s.str_or("name", ""), "NOUS");
         assert!(s.get("hardware").is_some());
         assert!(s.get("models").is_some());
@@ -650,9 +734,13 @@ mod tests {
     #[test]
     fn planning_shows_the_steps_without_running_them() {
         let (root, d) = daemon("plan");
-        let out = call(&d, method::INTENT_PLAN, json_obj([("text", "show my downloads".into())]))
-            .into_result()
-            .unwrap();
+        let out = call(
+            &d,
+            method::INTENT_PLAN,
+            json_obj([("text", "show my downloads".into())]),
+        )
+        .into_result()
+        .unwrap();
         let steps = out.arr_or_empty("steps");
         assert_eq!(steps.len(), 1);
         assert!(steps[0].str_or("capability", "").starts_with("fs.list:"));
@@ -687,20 +775,32 @@ mod tests {
     #[test]
     fn cap_check_explains_a_decision_without_acting() {
         let (root, d) = daemon("capcheck");
-        let out = call(&d, method::CAP_CHECK, json_obj([("capability", "fs.write:/boot/x".into())]))
-            .into_result()
-            .unwrap();
+        let out = call(
+            &d,
+            method::CAP_CHECK,
+            json_obj([("capability", "fs.write:/boot/x".into())]),
+        )
+        .into_result()
+        .unwrap();
         assert_eq!(out.str_or("decision", ""), "deny");
-        assert!(out.str_or("explain", "").contains("protected"), "{}", out.str_or("explain", ""));
+        assert!(
+            out.str_or("explain", "").contains("protected"),
+            "{}",
+            out.str_or("explain", "")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn invoking_a_read_capability_returns_its_result() {
         let (root, d) = daemon("invoke");
-        let out = call(&d, "cap.invoke", json_obj([("capability", "sys.metrics".into())]))
-            .into_result()
-            .unwrap();
+        let out = call(
+            &d,
+            "cap.invoke",
+            json_obj([("capability", "sys.metrics".into())]),
+        )
+        .into_result()
+        .unwrap();
         assert_eq!(out.str_or("status", ""), "completed");
         let results = out.arr_or_empty("results");
         assert!(results[0].path("value.cpus").is_some());
@@ -718,7 +818,7 @@ mod tests {
         )
         .unwrap();
 
-        let policy = load_policy_from(&[dir.clone()]);
+        let policy = load_policy_from(std::slice::from_ref(&dir));
         let cap = nous_core::Capability::parse("fs.read:/home/joey/notes.md").unwrap();
         let v = policy.evaluate(&Subject::User, &cap);
         assert!(
@@ -739,8 +839,16 @@ mod tests {
         std::fs::create_dir_all(user.join("policy.d")).unwrap();
         std::fs::create_dir_all(system.join("policy.d")).unwrap();
 
-        std::fs::write(system.join("policy.d/50-site.conf"), "deny  user  shell.exec  # site says no\n").unwrap();
-        std::fs::write(user.join("policy.d/10-mine.conf"), "allow user  shell.exec  # my machine\n").unwrap();
+        std::fs::write(
+            system.join("policy.d/50-site.conf"),
+            "deny  user  shell.exec  # site says no\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("policy.d/10-mine.conf"),
+            "allow user  shell.exec  # my machine\n",
+        )
+        .unwrap();
 
         let policy = load_policy_from(&[user.clone(), system.clone()]);
         let cap = nous_core::Capability::parse("shell.exec:ls").unwrap();
@@ -763,12 +871,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nous-badpolicy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("policy.d")).unwrap();
-        std::fs::write(dir.join("policy.d/10-bad.conf"), "permit everyone everything\n").unwrap();
+        std::fs::write(
+            dir.join("policy.d/10-bad.conf"),
+            "permit everyone everything\n",
+        )
+        .unwrap();
 
-        let policy = load_policy_from(&[dir.clone()]);
+        let policy = load_policy_from(std::slice::from_ref(&dir));
         // The bad file is skipped, but the builtin floor is still in place.
         let cap = nous_core::Capability::parse("fs.write:/boot/x").unwrap();
-        assert!(matches!(policy.evaluate(&Subject::User, &cap).decision, nous_core::Decision::Deny(_)));
+        assert!(matches!(
+            policy.evaluate(&Subject::User, &cap).decision,
+            nous_core::Decision::Deny(_)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

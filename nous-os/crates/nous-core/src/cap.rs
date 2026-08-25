@@ -54,7 +54,11 @@ impl Capability {
         Capability {
             domain: domain.to_string(),
             action: action.to_string(),
-            scope: if scope.is_empty() { "*".to_string() } else { scope.to_string() },
+            scope: if scope.is_empty() {
+                "*".to_string()
+            } else {
+                scope.to_string()
+            },
         }
     }
 
@@ -68,7 +72,10 @@ impl Capability {
         let domain = parts.next().unwrap_or("").trim();
         let action = parts.next().unwrap_or("").trim();
         if domain.is_empty() || action.is_empty() {
-            return Err(format!("malformed capability '{}': want domain.action[:scope]", s));
+            return Err(format!(
+                "malformed capability '{}': want domain.action[:scope]",
+                s
+            ));
         }
         Ok(Capability::new(domain, action, scope.trim()))
     }
@@ -160,7 +167,11 @@ impl Capability {
         } else {
             return self.clone();
         };
-        Capability { domain: self.domain.clone(), action: self.action.clone(), scope }
+        Capability {
+            domain: self.domain.clone(),
+            action: self.action.clone(),
+            scope,
+        }
     }
 
     /// Does this capability (as *granted*) cover `req` (as *requested*)?
@@ -191,26 +202,69 @@ impl fmt::Display for Capability {
 /// explicit is what makes "what can this program possibly do?" an answerable
 /// question.
 pub const KNOWN_CAPABILITIES: &[&str] = &[
-    "fs.read", "fs.stat", "fs.list", "fs.search", "fs.write", "fs.mkdir", "fs.move", "fs.delete",
-    "fs.chmod", "fs.chown",
-    "proc.list", "proc.signal", "proc.spawn",
-    "sys.info", "sys.metrics", "sys.power", "sys.mount", "sys.firmware",
-    "svc.status", "svc.start", "svc.stop", "svc.restart",
-    "pkg.query", "pkg.install", "pkg.remove",
-    "net.status", "net.connect", "net.listen",
+    "fs.read",
+    "fs.stat",
+    "fs.list",
+    "fs.search",
+    "fs.write",
+    "fs.mkdir",
+    "fs.move",
+    "fs.delete",
+    "fs.chmod",
+    "fs.chown",
+    "proc.list",
+    "proc.signal",
+    "proc.spawn",
+    "sys.info",
+    "sys.metrics",
+    "sys.power",
+    "sys.mount",
+    "sys.firmware",
+    "svc.status",
+    "svc.start",
+    "svc.stop",
+    "svc.restart",
+    "pkg.query",
+    "pkg.install",
+    "pkg.remove",
+    "net.status",
+    "net.connect",
+    "net.listen",
     "shell.exec",
     "model.infer",
-    "ctx.read", "ctx.write",
+    "ctx.read",
+    "ctx.write",
     "journal.revert",
-    "ui.notify", "ui.render",
+    "ui.notify",
+    "ui.render",
     "journal.read",
-    "media.probe", "media.search", "media.thumbnail", "media.play", "media.control",
-    "media.edit", "media.render", "media.index",
-    "curate.scan", "curate.propose", "curate.apply",
-    "desk.apps", "desk.windows", "desk.session_info", "desk.notify", "desk.copy",
-    "desk.clipboard", "desk.focus", "desk.open", "desk.launch", "desk.close",
-    "desk.screenshot", "desk.setting", "desk.session",
-    "policy.amend", "secret.read", "user.admin",
+    "media.probe",
+    "media.search",
+    "media.thumbnail",
+    "media.play",
+    "media.control",
+    "media.edit",
+    "media.render",
+    "media.index",
+    "curate.scan",
+    "curate.propose",
+    "curate.apply",
+    "desk.apps",
+    "desk.windows",
+    "desk.session_info",
+    "desk.notify",
+    "desk.copy",
+    "desk.clipboard",
+    "desk.focus",
+    "desk.open",
+    "desk.launch",
+    "desk.close",
+    "desk.screenshot",
+    "desk.setting",
+    "desk.session",
+    "policy.amend",
+    "secret.read",
+    "user.admin",
 ];
 
 /// Is `name` (a bare `domain.action`) something the system implements?
@@ -352,8 +406,12 @@ mod tests {
             let c = Capability::parse(name).unwrap();
             let deliberate = matches!(
                 (c.domain.as_str(), c.action.as_str()),
-                ("policy", "amend") | ("secret", "read") | ("user", "admin")
-                    | ("sys", "power") | ("sys", "mount") | ("sys", "firmware")
+                ("policy", "amend")
+                    | ("secret", "read")
+                    | ("user", "admin")
+                    | ("sys", "power")
+                    | ("sys", "mount")
+                    | ("sys", "firmware")
                     | ("desk", "session")
             );
             assert!(
@@ -366,9 +424,15 @@ mod tests {
 
     #[test]
     fn unknown_capabilities_are_critical() {
-        assert_eq!(Capability::parse("wat.dothis").unwrap().risk(), Risk::Critical);
+        assert_eq!(
+            Capability::parse("wat.dothis").unwrap().risk(),
+            Risk::Critical
+        );
         assert_eq!(Capability::parse("fs.read").unwrap().risk(), Risk::Read);
-        assert_eq!(Capability::parse("fs.delete").unwrap().risk(), Risk::Elevated);
+        assert_eq!(
+            Capability::parse("fs.delete").unwrap().risk(),
+            Risk::Elevated
+        );
     }
 
     #[test]
@@ -402,7 +466,9 @@ mod tests {
         let grant = Capability::parse("fs.write:~/**").unwrap().expand_home();
         assert_eq!(grant.scope, "/export/home/joey/**");
 
-        let request = Capability::parse("fs.write:~/notes.md").unwrap().expand_home();
+        let request = Capability::parse("fs.write:~/notes.md")
+            .unwrap()
+            .expand_home();
         assert_eq!(request.scope, "/export/home/joey/notes.md");
         assert!(grant.covers(&request));
 
@@ -419,7 +485,10 @@ mod tests {
         std::env::set_var("HOME", "/home/joey");
         let c = Capability::parse("fs.read:/etc/hosts").unwrap();
         assert_eq!(c.expand_home().scope, "/etc/hosts");
-        assert_eq!(Capability::parse("proc.list").unwrap().expand_home().scope, "*");
+        assert_eq!(
+            Capability::parse("proc.list").unwrap().expand_home().scope,
+            "*"
+        );
     }
 
     #[test]
@@ -434,6 +503,9 @@ mod tests {
         assert_eq!(protected_violation(&ok), None);
 
         // Reading /boot is fine; writing it is not.
-        assert_eq!(protected_violation(&Capability::parse("fs.read:/boot/x").unwrap()), None);
+        assert_eq!(
+            protected_violation(&Capability::parse("fs.read:/boot/x").unwrap()),
+            None
+        );
     }
 }

@@ -12,7 +12,7 @@ pub mod media;
 pub mod sysops;
 
 use nous_core::journal::Undo;
-use nous_core::{Capability, Config, Json, Journal, Step};
+use nous_core::{Capability, Config, Journal, Json, Step};
 use std::path::PathBuf;
 
 /// Everything an executor is allowed to reach.
@@ -30,12 +30,23 @@ pub struct ExecCtx<'a> {
 
 impl<'a> ExecCtx<'a> {
     pub fn new(cfg: &'a Config, journal: &'a Journal, dry_run: bool) -> ExecCtx<'a> {
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
-        ExecCtx { cfg, journal, dry_run, home, state: nous_core::ipc::state_dir() }
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/"));
+        ExecCtx {
+            cfg,
+            journal,
+            dry_run,
+            home,
+            state: nous_core::ipc::state_dir(),
+        }
     }
 
-    /// Same, but with the home and state roots pinned. Used by tests, and by the
-    /// installer when it operates on a target filesystem that is not `/`.
+    /// Same, but with the home and state roots pinned, so a caller can operate
+    /// on a filesystem that is not the live one. Used throughout the tests, and
+    /// the reason the executors take their roots from the context rather than
+    /// re-deriving them from the environment.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn rooted(
         cfg: &'a Config,
         journal: &'a Journal,
@@ -43,7 +54,13 @@ impl<'a> ExecCtx<'a> {
         home: PathBuf,
         state: PathBuf,
     ) -> ExecCtx<'a> {
-        ExecCtx { cfg, journal, dry_run, home, state }
+        ExecCtx {
+            cfg,
+            journal,
+            dry_run,
+            home,
+            state,
+        }
     }
 
     /// Where reversible deletes go.
@@ -65,11 +82,19 @@ pub struct Effect {
 
 impl Effect {
     pub fn read_only(result: Json, detail: impl Into<String>) -> Effect {
-        Effect { result, undo: Undo::None, detail: detail.into() }
+        Effect {
+            result,
+            undo: Undo::None,
+            detail: detail.into(),
+        }
     }
 
     pub fn with_undo(result: Json, undo: Undo, detail: impl Into<String>) -> Effect {
-        Effect { result, undo, detail: detail.into() }
+        Effect {
+            result,
+            undo,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -90,10 +115,16 @@ pub fn execute(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 pub fn revert(undo: &Undo, ctx: &ExecCtx) -> Result<String, String> {
     match undo {
         Undo::None => Err("this action recorded nothing to undo".to_string()),
-        Undo::RestoreFile { path, backup, existed } => {
+        Undo::RestoreFile {
+            path,
+            backup,
+            existed,
+        } => {
             let target = PathBuf::from(path);
             if *existed {
-                let src = backup.as_ref().ok_or("the snapshot for this action is missing")?;
+                let src = backup
+                    .as_ref()
+                    .ok_or("the snapshot for this action is missing")?;
                 std::fs::copy(src, &target)
                     .map_err(|e| format!("cannot restore {}: {}", path, e))?;
                 Ok(format!("restored {}", path))
@@ -114,9 +145,8 @@ pub fn revert(undo: &Undo, ctx: &ExecCtx) -> Result<String, String> {
             if p.exists() {
                 // Only remove it if it is still empty: the user may have put
                 // something there since, and an undo must not destroy that.
-                std::fs::remove_dir(&p).map_err(|e| {
-                    format!("cannot remove {} (is it still empty?): {}", path, e)
-                })?;
+                std::fs::remove_dir(&p)
+                    .map_err(|e| format!("cannot remove {} (is it still empty?): {}", path, e))?;
             }
             Ok(format!("removed directory {}", path))
         }
@@ -203,7 +233,9 @@ mod tests {
         std::fs::create_dir(&made).unwrap();
         std::fs::write(made.join("something-the-user-added"), b"!").unwrap();
 
-        let undo = Undo::RemoveDir { path: made.to_string_lossy().to_string() };
+        let undo = Undo::RemoveDir {
+            path: made.to_string_lossy().to_string(),
+        };
         assert!(revert(&undo, &ctx_for(&cfg, &j)).is_err());
         assert!(made.exists(), "the user's file must survive the undo");
         let _ = std::fs::remove_dir_all(&dir);
@@ -214,7 +246,9 @@ mod tests {
         let dir = scratch("undo-manual");
         let cfg = Config::with_defaults();
         let j = Journal::open(&dir).unwrap();
-        let undo = Undo::Manual { note: "re-pair the bluetooth device".into() };
+        let undo = Undo::Manual {
+            note: "re-pair the bluetooth device".into(),
+        };
         let err = revert(&undo, &ctx_for(&cfg, &j)).unwrap_err();
         assert!(err.contains("re-pair"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);

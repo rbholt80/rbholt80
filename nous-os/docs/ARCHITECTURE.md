@@ -99,6 +99,28 @@ folder, tidying a directory, asking what is using memory, undoing. It is fast,
 private, free, and it comes *first* rather than being a fallback. Opening a
 folder should not require an inference.
 
+### Keeping itself in check
+
+NOUS stores a lot on your behalf: a journal of everything it did, a snapshot of
+every file before it changed it, a trash store so deletion is reversible,
+thumbnails, screenshots. Each is the right call on its own; together they are an
+unbounded copy of your disk.
+
+So every store has a bound, and a maintenance pass prunes them on a slow timer
+and at startup. One invariant governs it: **a snapshot is never removed while
+the action it would undo can still be undone.** History ages out by whole files
+— rotation moves a journal, never rewrites it, so the append-only property
+survives — and undo degrades by losing the oldest history, never by finding a
+journal entry whose backup has gone.
+
+The one exception is deliberate: if the snapshots that are still needed exceed
+their ceiling, the oldest go anyway and those actions stop being undoable.
+Running out of disk is the worse failure. It is reported, not silent.
+
+`nousctl storage` shows what is kept and what a pass would reclaim; the preview
+reports exactly what the real run does, because a preview that under-reports is
+worse than none — it teaches you the operation is harmless.
+
 ## The graphical shell
 
 Served by the daemon, compiled into its binary, so a half-finished package
@@ -123,14 +145,14 @@ CSP does not restrict.
 
 ## Testing
 
-290 Rust tests and 24 shell tests, and the ones that matter most are the adversarial ones: that a
+308 Rust tests and 24 shell tests, and the ones that matter most are the adversarial ones: that a
 protected path beats an explicit `allow`, that an undone action cannot be undone
 twice, that a corrupt journal line does not poison the log, that a hung
 subprocess is killed rather than wedging the daemon, that a slow event subscriber
 sheds load instead of stalling, and that a duplicate file with the same size but
 different contents is not treated as a copy.
 
-Two of the most important defects in this codebase were found by *running* it,
-not by testing it — the unreversible tidy-up, and a policy that hardcoded
+Several of the most important defects in this codebase were found by *running*
+it, not by testing it — the unreversible tidy-up, and a policy that hardcoded
 `/home/**` and so default-denied anyone whose home was elsewhere. Both are now
 regression-tested.

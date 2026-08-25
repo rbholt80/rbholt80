@@ -57,7 +57,11 @@ pub struct RunOptions {
 
 impl Default for RunOptions {
     fn default() -> Self {
-        RunOptions { subject: Subject::User, dry_run: false, approved: false }
+        RunOptions {
+            subject: Subject::User,
+            dry_run: false,
+            approved: false,
+        }
     }
 }
 
@@ -70,7 +74,12 @@ pub struct Broker {
 
 impl Broker {
     pub fn new(cfg: Config, policy: Policy, journal: Journal, bus: Arc<Bus>) -> Broker {
-        Broker { cfg, policy, journal, bus }
+        Broker {
+            cfg,
+            policy,
+            journal,
+            bus,
+        }
     }
 
     fn publish(&self, topic: &str, data: Json) {
@@ -170,7 +179,10 @@ impl Broker {
                     break;
                 }
             };
-            let resolved = Step { args: args.clone(), ..step.clone() };
+            let resolved = Step {
+                args: args.clone(),
+                ..step.clone()
+            };
 
             // Control flow has no capability because it has no effect.
             if step.handler == HANDLER_FLOW {
@@ -207,9 +219,14 @@ impl Broker {
             let verdict = self.policy.evaluate(&opts.subject, &cap);
             let outcome_kind = match &verdict.decision {
                 Decision::Deny(reason) => {
-                    if let Err(e) =
-                        self.record(&cap, verdict.decision.kind(), Outcome::Refused, plan, reason, Undo::None)
-                    {
+                    if let Err(e) = self.record(
+                        &cap,
+                        verdict.decision.kind(),
+                        Outcome::Refused,
+                        plan,
+                        reason,
+                        Undo::None,
+                    ) {
                         // The audit trail is the point. A hole in it is not a
                         // detail to swallow.
                         nous_core::log_error!("broker", "could not journal a refusal: {}", e);
@@ -243,9 +260,14 @@ impl Broker {
             let effect = match self.dispatch(&cap, &resolved, &ctx, plan, opts) {
                 Ok(e) => e,
                 Err(e) => {
-                    if let Err(je) =
-                        self.record(&cap, verdict.decision.kind(), Outcome::Failed, plan, &e, Undo::None)
-                    {
+                    if let Err(je) = self.record(
+                        &cap,
+                        verdict.decision.kind(),
+                        Outcome::Failed,
+                        plan,
+                        &e,
+                        Undo::None,
+                    ) {
                         nous_core::log_error!("broker", "could not journal a failure: {}", je);
                     }
                     status = RunStatus::Failed;
@@ -255,9 +277,20 @@ impl Broker {
                 }
             };
 
-            let recorded = if opts.dry_run { Outcome::DryRun } else { outcome_kind };
+            let recorded = if opts.dry_run {
+                Outcome::DryRun
+            } else {
+                outcome_kind
+            };
             let seq = self
-                .record(&cap, verdict.decision.kind(), recorded, plan, &effect.detail, effect.undo)
+                .record(
+                    &cap,
+                    verdict.decision.kind(),
+                    recorded,
+                    plan,
+                    &effect.detail,
+                    effect.undo,
+                )
                 .unwrap_or(0);
 
             if let Some(name) = args.get("$bind").and_then(|v| v.as_str()) {
@@ -311,11 +344,18 @@ impl Broker {
         match (cap.domain.as_str(), cap.action.as_str()) {
             ("curate", "apply") => self.apply_proposal(step, ctx, plan, opts),
             ("journal", "read") => {
-                let n = step.args.get("limit").and_then(|v| v.as_u64()).unwrap_or(25) as usize;
+                let n = step
+                    .args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(25) as usize;
                 let records = self.journal.tail(n)?;
                 let items: Vec<Json> = records.iter().map(|r| r.to_json()).collect();
                 Ok(exec::Effect::read_only(
-                    json_obj([("records", Json::Arr(items.clone())), ("count", items.len().into())]),
+                    json_obj([
+                        ("records", Json::Arr(items.clone())),
+                        ("count", items.len().into()),
+                    ]),
                     format!("read {} journal records", items.len()),
                 ))
             }
@@ -323,11 +363,18 @@ impl Broker {
             ("fs", "search") => {
                 let q = step.args.str_or("query", "");
                 let kind = step.args.get("kind").and_then(|v| v.as_str());
-                let limit = step.args.get("limit").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
+                let limit = step
+                    .args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(40) as usize;
                 let idx = Index::load();
                 let result = idx.search_json(q, kind, limit);
                 let n = result.arr_or_empty("results").len();
-                Ok(exec::Effect::read_only(result, format!("{} matches for '{}'", n, q)))
+                Ok(exec::Effect::read_only(
+                    result,
+                    format!("{} matches for '{}'", n, q),
+                ))
             }
             ("fs", "index") => {
                 let roots = self.cfg.paths("index.roots");
@@ -358,8 +405,12 @@ impl Broker {
         plan: &Plan,
         opts: &RunOptions,
     ) -> Result<exec::Effect, String> {
-        let steps: Vec<Step> =
-            step.args.arr_or_empty("steps").iter().map(Step::from_json).collect();
+        let steps: Vec<Step> = step
+            .args
+            .arr_or_empty("steps")
+            .iter()
+            .map(Step::from_json)
+            .collect();
         if steps.is_empty() {
             return Err("this proposal has no steps to apply".to_string());
         }
@@ -372,7 +423,10 @@ impl Broker {
             let sub = match Capability::parse(&s.capability) {
                 Ok(c) => c,
                 Err(e) => {
-                    failed.push(json_obj([("step", s.id.clone().into()), ("error", e.into())]));
+                    failed.push(json_obj([
+                        ("step", s.id.clone().into()),
+                        ("error", e.into()),
+                    ]));
                     continue;
                 }
             };
@@ -481,7 +535,11 @@ impl Broker {
         if !record.is_revertible() {
             return Err(match record.undone_by {
                 Some(by) => format!("entry {} was already undone by entry {}", record.seq, by),
-                None => format!("entry {} cannot be undone ({})", record.seq, record.undo.describe()),
+                None => format!(
+                    "entry {} cannot be undone ({})",
+                    record.seq,
+                    record.undo.describe()
+                ),
             });
         }
         if ctx.dry_run {
@@ -507,7 +565,10 @@ impl Broker {
             undone_by: None,
         })?;
         Ok(exec::Effect::read_only(
-            json_obj([("reverted", record.seq.into()), ("detail", detail.clone().into())]),
+            json_obj([
+                ("reverted", record.seq.into()),
+                ("detail", detail.clone().into()),
+            ]),
             detail,
         ))
     }
@@ -525,7 +586,9 @@ impl Broker {
                 if opts.approved || opts.dry_run {
                     ControlOutcome::Continue
                 } else {
-                    ControlOutcome::NeedsApproval(step.args.str_or("prompt", &step.summary).to_string())
+                    ControlOutcome::NeedsApproval(
+                        step.args.str_or("prompt", &step.summary).to_string(),
+                    )
                 }
             }
             other => ControlOutcome::Stop(format!("unknown control step '{}'", other)),
@@ -550,7 +613,7 @@ impl Broker {
             decision: decision.to_string(),
             outcome,
             intent: plan.utterance.clone(),
-            detail: crate::secrets::redact(detail),
+            detail: nous_core::secrets::redact(detail),
             undo,
             undone_by: None,
         })
@@ -633,7 +696,7 @@ fn step_result(step: &Step, state: &str, value: Json, detail: &str) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     struct Fixture {
         root: PathBuf,
@@ -658,7 +721,12 @@ mod tests {
         .unwrap();
         policy.extend(Policy::builtin());
         let journal = Journal::open(&root.join("journal")).unwrap();
-        let broker = Broker::new(Config::with_defaults(), policy, journal, Arc::new(Bus::new()));
+        let broker = Broker::new(
+            Config::with_defaults(),
+            policy,
+            journal,
+            Arc::new(Bus::new()),
+        );
         Fixture { root, broker }
     }
 
@@ -679,7 +747,7 @@ mod tests {
         }
     }
 
-    fn write_step(path: &PathBuf, content: &str) -> Step {
+    fn write_step(path: &Path, content: &str) -> Step {
         Step::new(
             "s1",
             &format!("fs.write:{}", path.display()),
@@ -697,8 +765,16 @@ mod tests {
         let f = fixture("allow");
         let target = f.root.join("work/notes.md");
         let broker = &f.broker;
-        let out = broker.run(&plan_of(vec![write_step(&target, "hello")]), &RunOptions::default());
-        assert_eq!(out.str_or("status", ""), "completed", "{}", out.to_string_pretty());
+        let out = broker.run(
+            &plan_of(vec![write_step(&target, "hello")]),
+            &RunOptions::default(),
+        );
+        assert_eq!(
+            out.str_or("status", ""),
+            "completed",
+            "{}",
+            out.to_string_pretty()
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
         assert_eq!(broker.journal.read_all().unwrap().len(), 1);
     }
@@ -710,10 +786,24 @@ mod tests {
         let out = f.broker.run(&plan_of(vec![step]), &RunOptions::default());
 
         assert_eq!(out.str_or("status", ""), "blocked");
-        assert!(!PathBuf::from("/boot/grub/grub.cfg").exists() || true);
+        // A path under the protected floor that certainly does not exist. If
+        // the broker ever honoured this write, the file would appear -- and in
+        // a container running as root, it genuinely could.
+        let forbidden = PathBuf::from("/boot/nous-must-never-write-this");
+        let out2 = f.broker.run(
+            &plan_of(vec![write_step(&forbidden, "x")]),
+            &RunOptions::default(),
+        );
+        assert_eq!(out2.str_or("status", ""), "blocked");
+        assert!(
+            !forbidden.exists(),
+            "a denied write must not reach the disk"
+        );
+        // Both refusals are journalled: an agent cannot erase the evidence
+        // through the same API it misused.
         let records = f.broker.journal.read_all().unwrap();
-        assert_eq!(records.len(), 1, "a refusal must leave a trace");
-        assert_eq!(records[0].outcome, Outcome::Refused);
+        assert_eq!(records.len(), 2, "every refusal must leave a trace");
+        assert!(records.iter().all(|r| r.outcome == Outcome::Refused));
     }
 
     #[test]
@@ -729,13 +819,23 @@ mod tests {
             json_obj([("path", victim.to_string_lossy().to_string().into())]),
         );
 
-        let out = f.broker.run(&plan_of(vec![step.clone()]), &RunOptions::default());
+        let out = f
+            .broker
+            .run(&plan_of(vec![step.clone()]), &RunOptions::default());
         assert_eq!(out.str_or("status", ""), "needs_approval");
         assert!(victim.exists(), "nothing may happen before approval");
 
-        let approved = RunOptions { approved: true, ..Default::default() };
+        let approved = RunOptions {
+            approved: true,
+            ..Default::default()
+        };
         let out2 = f.broker.run(&plan_of(vec![step]), &approved);
-        assert_eq!(out2.str_or("status", ""), "completed", "{}", out2.to_string_pretty());
+        assert_eq!(
+            out2.str_or("status", ""),
+            "completed",
+            "{}",
+            out2.to_string_pretty()
+        );
         assert!(!victim.exists());
     }
 
@@ -743,8 +843,13 @@ mod tests {
     fn dry_run_reports_without_touching_anything() {
         let f = fixture("dry");
         let target = f.root.join("work/dry.txt");
-        let opts = RunOptions { dry_run: true, ..Default::default() };
-        let out = f.broker.run(&plan_of(vec![write_step(&target, "x")]), &opts);
+        let opts = RunOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = f
+            .broker
+            .run(&plan_of(vec![write_step(&target, "x")]), &opts);
 
         assert_eq!(out.str_or("status", ""), "completed");
         assert!(!target.exists());
@@ -760,10 +865,16 @@ mod tests {
             "flow.gate",
             HANDLER_FLOW,
             "continue only if there is something to do",
-            json_obj([("left", 0i64.into()), ("op", ">".into()), ("right", 0i64.into())]),
+            json_obj([
+                ("left", 0i64.into()),
+                ("op", ">".into()),
+                ("right", 0i64.into()),
+            ]),
         );
         let after = write_step(&f.root.join("work/never.txt"), "x");
-        let out = f.broker.run(&plan_of(vec![gate, after]), &RunOptions::default());
+        let out = f
+            .broker
+            .run(&plan_of(vec![gate, after]), &RunOptions::default());
 
         assert_eq!(out.str_or("status", ""), "stopped");
         assert!(!f.root.join("work/never.txt").exists());
@@ -779,11 +890,16 @@ mod tests {
             "confirm",
             json_obj([("prompt", "Move 12 files?".into())]),
         );
-        let out = f.broker.run(&plan_of(vec![ask.clone()]), &RunOptions::default());
+        let out = f
+            .broker
+            .run(&plan_of(vec![ask.clone()]), &RunOptions::default());
         assert_eq!(out.str_or("status", ""), "needs_approval");
         assert_eq!(out.str_or("message", ""), "Move 12 files?");
 
-        let approved = RunOptions { approved: true, ..Default::default() };
+        let approved = RunOptions {
+            approved: true,
+            ..Default::default()
+        };
         let out2 = f.broker.run(&plan_of(vec![ask]), &approved);
         assert_eq!(out2.str_or("status", ""), "completed");
     }
@@ -815,12 +931,20 @@ mod tests {
         let target = f.root.join("work/edited.txt");
         std::fs::write(&target, b"original").unwrap();
         let broker = &f.broker;
-        broker.run(&plan_of(vec![write_step(&target, "changed")]), &RunOptions::default());
+        broker.run(
+            &plan_of(vec![write_step(&target, "changed")]),
+            &RunOptions::default(),
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "changed");
 
         let undo = Step::new("u1", "journal.revert", "journal", "undo", Json::obj());
         let out = broker.run(&plan_of(vec![undo]), &RunOptions::default());
-        assert_eq!(out.str_or("status", ""), "completed", "{}", out.to_string_pretty());
+        assert_eq!(
+            out.str_or("status", ""),
+            "completed",
+            "{}",
+            out.to_string_pretty()
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
     }
 
@@ -830,16 +954,25 @@ mod tests {
         let target = f.root.join("work/x.txt");
         std::fs::write(&target, b"v1").unwrap();
         let broker = &f.broker;
-        broker.run(&plan_of(vec![write_step(&target, "v2")]), &RunOptions::default());
+        broker.run(
+            &plan_of(vec![write_step(&target, "v2")]),
+            &RunOptions::default(),
+        );
 
         let undo = Step::new("u1", "journal.revert", "journal", "undo", Json::obj());
         assert_eq!(
-            broker.run(&plan_of(vec![undo.clone()]), &RunOptions::default()).str_or("status", ""),
+            broker
+                .run(&plan_of(vec![undo.clone()]), &RunOptions::default())
+                .str_or("status", ""),
             "completed"
         );
         let second = broker.run(&plan_of(vec![undo]), &RunOptions::default());
         assert_eq!(second.str_or("status", ""), "failed");
-        assert!(second.str_or("message", "").contains("nothing to undo"), "{}", second.str_or("message", ""));
+        assert!(
+            second.str_or("message", "").contains("nothing to undo"),
+            "{}",
+            second.str_or("message", "")
+        );
     }
 
     #[test]
@@ -858,8 +991,15 @@ mod tests {
                 ("right", 0i64.into()),
             ]),
         );
-        let out = f.broker.run(&plan_of(vec![metrics, gate]), &RunOptions::default());
-        assert_eq!(out.str_or("status", ""), "completed", "{}", out.to_string_pretty());
+        let out = f
+            .broker
+            .run(&plan_of(vec![metrics, gate]), &RunOptions::default());
+        assert_eq!(
+            out.str_or("status", ""),
+            "completed",
+            "{}",
+            out.to_string_pretty()
+        );
     }
 
     #[test]
@@ -914,9 +1054,17 @@ mod tests {
         );
         let out = f.broker.run(
             &plan_of(vec![apply]),
-            &RunOptions { approved: true, ..Default::default() },
+            &RunOptions {
+                approved: true,
+                ..Default::default()
+            },
         );
-        assert_eq!(out.str_or("status", ""), "completed", "{}", out.to_string_pretty());
+        assert_eq!(
+            out.str_or("status", ""),
+            "completed",
+            "{}",
+            out.to_string_pretty()
+        );
         assert!(!work.join("Downloads/a.mp3").exists());
         assert!(work.join("Library/a.mp3").exists());
 
@@ -930,16 +1078,34 @@ mod tests {
             .filter(|r| r.capability.starts_with("fs.move"))
             .collect();
         assert_eq!(moves.len(), 3, "each move must be journalled on its own");
-        assert!(moves.iter().all(|m| m.is_revertible()), "and each must be reversible");
+        assert!(
+            moves.iter().all(|m| m.is_revertible()),
+            "and each must be reversible"
+        );
 
         // Undoing three times puts every file back.
         for _ in 0..3 {
             let undo = Step::new("u", "journal.revert", "journal", "undo", Json::obj());
-            let r = f.broker.run(&plan_of(vec![undo]), &RunOptions { approved: true, ..Default::default() });
-            assert_eq!(r.str_or("status", ""), "completed", "{}", r.to_string_pretty());
+            let r = f.broker.run(
+                &plan_of(vec![undo]),
+                &RunOptions {
+                    approved: true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                r.str_or("status", ""),
+                "completed",
+                "{}",
+                r.to_string_pretty()
+            );
         }
         for name in ["a.mp3", "b.mp3", "c.mp4"] {
-            assert!(work.join("Downloads").join(name).exists(), "{} should be back", name);
+            assert!(
+                work.join("Downloads").join(name).exists(),
+                "{} should be back",
+                name
+            );
         }
     }
 
@@ -967,18 +1133,45 @@ mod tests {
                 "move an ordinary file",
                 json_obj([
                     ("from", good_from.to_string_lossy().to_string().into()),
-                    ("to", work.join("moved.txt").to_string_lossy().to_string().into()),
+                    (
+                        "to",
+                        work.join("moved.txt").to_string_lossy().to_string().into(),
+                    ),
                 ]),
             )
             .to_json(),
         ];
-        let apply = Step::new("s1", "curate.apply", "curate", "apply", json_obj([("steps", Json::Arr(sub))]));
-        let out = f.broker.run(&plan_of(vec![apply]), &RunOptions { approved: true, ..Default::default() });
+        let apply = Step::new(
+            "s1",
+            "curate.apply",
+            "curate",
+            "apply",
+            json_obj([("steps", Json::Arr(sub))]),
+        );
+        let out = f.broker.run(
+            &plan_of(vec![apply]),
+            &RunOptions {
+                approved: true,
+                ..Default::default()
+            },
+        );
 
         let value = &out.arr_or_empty("results")[0];
-        assert_eq!(value.path("value.applied").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(value.path("value.failed").and_then(|v| v.as_arr()).map(|a| a.len()), Some(1));
-        assert!(work.join("moved.txt").exists(), "the permitted move should still happen");
+        assert_eq!(
+            value.path("value.applied").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            value
+                .path("value.failed")
+                .and_then(|v| v.as_arr())
+                .map(|a| a.len()),
+            Some(1)
+        );
+        assert!(
+            work.join("moved.txt").exists(),
+            "the permitted move should still happen"
+        );
     }
 
     #[test]
@@ -992,8 +1185,14 @@ mod tests {
             json_obj([("path", "/definitely/not/here".into())]),
         );
         let after = Step::new("s2", "sys.metrics", "sys", "metrics", Json::obj());
-        let out = f.broker.run(&plan_of(vec![bad, after]), &RunOptions::default());
+        let out = f
+            .broker
+            .run(&plan_of(vec![bad, after]), &RunOptions::default());
         assert_eq!(out.str_or("status", ""), "failed");
-        assert_eq!(out.arr_or_empty("results").len(), 1, "later steps must not run");
+        assert_eq!(
+            out.arr_or_empty("results").len(),
+            1,
+            "later steps must not run"
+        );
     }
 }

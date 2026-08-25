@@ -80,7 +80,13 @@ pub fn log(l: Level, module: &str, msg: &str) {
     if l < level() {
         return;
     }
-    let line = format!("{} {:<5} [{}] {}", format_ts(now_secs()), l.as_str(), module, msg);
+    let line = format!(
+        "{} {:<5} [{}] {}",
+        format_ts(now_secs()),
+        l.as_str(),
+        module,
+        msg
+    );
     eprintln!("{}", line);
     if let Some(cell) = SINK.get() {
         if let Ok(mut guard) = cell.lock() {

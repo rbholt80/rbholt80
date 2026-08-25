@@ -16,8 +16,8 @@
 //! be a password or someone else's message — and unlike a file, you did not
 //! choose to put it in front of the system.
 
-use super::{Effect, ExecCtx};
 use super::sysops::{have, run};
+use super::{Effect, ExecCtx};
 use nous_core::cap::Capability;
 use nous_core::journal::Undo;
 use nous_core::json::{json_obj, Json};
@@ -30,7 +30,10 @@ pub fn execute(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, S
     match cap.action.as_str() {
         "apps" => apps(step),
         "windows" => windows(),
-        "session_info" => Ok(Effect::read_only(session_info(), "described the desktop session")),
+        "session_info" => Ok(Effect::read_only(
+            session_info(),
+            "described the desktop session",
+        )),
         "notify" => notify(step, ctx),
         "copy" => copy(step, ctx),
         "clipboard" => clipboard(ctx),
@@ -70,7 +73,11 @@ pub fn session_kind() -> &'static str {
 }
 
 pub fn desktop_name() -> String {
-    for var in ["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "XDG_SESSION_DESKTOP"] {
+    for var in [
+        "XDG_CURRENT_DESKTOP",
+        "DESKTOP_SESSION",
+        "XDG_SESSION_DESKTOP",
+    ] {
         if let Ok(v) = std::env::var(var) {
             if !v.is_empty() {
                 return v;
@@ -93,8 +100,11 @@ pub fn session_info() -> Json {
             ])
         })
         .collect();
-    let missing: Vec<&str> =
-        TOOLS.iter().filter(|(n, _, _)| !have(n)).map(|(_, _, p)| *p).collect();
+    let missing: Vec<&str> = TOOLS
+        .iter()
+        .filter(|(n, _, _)| !have(n))
+        .map(|(_, _, p)| *p)
+        .collect();
 
     json_obj([
         ("session", kind.into()),
@@ -122,8 +132,16 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("xdotool", "window details and keyboard input", "xdotool"),
     ("xclip", "read and write the clipboard", "xclip"),
     ("notify-send", "desktop notifications", "libnotify-bin"),
-    ("xdg-open", "open a file in its usual application", "xdg-utils"),
-    ("gsettings", "read and change desktop settings", "libglib2.0-bin"),
+    (
+        "xdg-open",
+        "open a file in its usual application",
+        "xdg-utils",
+    ),
+    (
+        "gsettings",
+        "read and change desktop settings",
+        "libglib2.0-bin",
+    ),
 ];
 
 /// Find the first available program from a list, or explain what to install.
@@ -142,7 +160,10 @@ fn first_tool(candidates: &[&str], purpose: &str) -> Result<String, String> {
     } else {
         format!("sudo apt install {}", packages.join(" "))
     };
-    Err(format!("cannot {} — no tool for it is installed. Try: {}", purpose, hint))
+    Err(format!(
+        "cannot {} — no tool for it is installed. Try: {}",
+        purpose, hint
+    ))
 }
 
 // ------------------------------------------------------------------- apps
@@ -243,23 +264,37 @@ pub fn installed_apps(dirs: &[PathBuf]) -> Vec<Json> {
             };
 
             let truthy = |k: &str| {
-                fields.get(k).map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false)
+                fields
+                    .get(k)
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
             };
             if truthy("NoDisplay") || truthy("Hidden") {
                 continue;
             }
-            if fields.get("Type").map(|t| t != "Application").unwrap_or(false) {
+            if fields
+                .get("Type")
+                .map(|t| t != "Application")
+                .unwrap_or(false)
+            {
                 continue;
             }
             let name = match fields.get("Name") {
                 Some(n) if !n.is_empty() => n.clone(),
                 _ => continue,
             };
-            let exec = fields.get("Exec").map(|e| clean_exec(e)).unwrap_or_default();
+            let exec = fields
+                .get("Exec")
+                .map(|e| clean_exec(e))
+                .unwrap_or_default();
             if exec.is_empty() {
                 continue;
             }
-            let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
 
             // A user's own ~/.local override should win over the system copy,
             // and it is scanned last, so overwrite rather than skip.
@@ -269,9 +304,18 @@ pub fn installed_apps(dirs: &[PathBuf]) -> Vec<Json> {
                     ("id", id.into()),
                     ("name", name.into()),
                     ("exec", exec.into()),
-                    ("comment", fields.get("Comment").cloned().unwrap_or_default().into()),
-                    ("icon", fields.get("Icon").cloned().unwrap_or_default().into()),
-                    ("categories", fields.get("Categories").cloned().unwrap_or_default().into()),
+                    (
+                        "comment",
+                        fields.get("Comment").cloned().unwrap_or_default().into(),
+                    ),
+                    (
+                        "icon",
+                        fields.get("Icon").cloned().unwrap_or_default().into(),
+                    ),
+                    (
+                        "categories",
+                        fields.get("Categories").cloned().unwrap_or_default().into(),
+                    ),
                     ("terminal", truthy("Terminal").into()),
                     ("path", path.to_string_lossy().to_string().into()),
                 ]),
@@ -280,7 +324,7 @@ pub fn installed_apps(dirs: &[PathBuf]) -> Vec<Json> {
     }
 
     let mut out: Vec<Json> = seen.into_values().collect();
-    out.sort_by(|a, b| a.str_or("name", "").to_lowercase().cmp(&b.str_or("name", "").to_lowercase()));
+    out.sort_by_key(|a| a.str_or("name", "").to_lowercase());
     out
 }
 
@@ -289,8 +333,13 @@ fn apps(step: &Step) -> Result<Effect, String> {
     let mut list = installed_apps(&application_dirs());
     if !query.is_empty() {
         list.retain(|a| {
-            let hay = format!("{} {} {}", a.str_or("name", ""), a.str_or("comment", ""), a.str_or("categories", ""))
-                .to_ascii_lowercase();
+            let hay = format!(
+                "{} {} {}",
+                a.str_or("name", ""),
+                a.str_or("comment", ""),
+                a.str_or("categories", "")
+            )
+            .to_ascii_lowercase();
             query.split_whitespace().all(|t| hay.contains(t))
         });
     }
@@ -358,14 +407,26 @@ pub fn match_window(windows: &[Json], phrase: &str) -> Option<Json> {
     windows
         .iter()
         .find(|w| w.str_or("app", "").to_ascii_lowercase() == q)
-        .or_else(|| windows.iter().find(|w| w.str_or("app", "").to_ascii_lowercase().contains(&q)))
-        .or_else(|| windows.iter().find(|w| w.str_or("title", "").to_ascii_lowercase().contains(&q)))
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|w| w.str_or("app", "").to_ascii_lowercase().contains(&q))
+        })
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|w| w.str_or("title", "").to_ascii_lowercase().contains(&q))
+        })
         .cloned()
 }
 
 fn window_by_phrase(step: &Step) -> Result<Json, String> {
     if let Some(id) = step.args.get("id").and_then(|v| v.as_str()) {
-        return Ok(json_obj([("id", id.into()), ("title", id.into()), ("app", "".into())]));
+        return Ok(json_obj([
+            ("id", id.into()),
+            ("title", id.into()),
+            ("app", "".into()),
+        ]));
     }
     let phrase = step.args.str_or("window", step.args.str_or("name", ""));
     if phrase.is_empty() {
@@ -375,19 +436,24 @@ fn window_by_phrase(step: &Step) -> Result<Json, String> {
     let out = run(&tool, &["-lpx"], Duration::from_secs(10))?;
     out.require("wmctrl")?;
     let list: Vec<Json> = out.stdout.lines().filter_map(parse_wmctrl_line).collect();
-    match_window(&list, phrase)
-        .ok_or_else(|| format!("no open window matches '{}'", phrase))
+    match_window(&list, phrase).ok_or_else(|| format!("no open window matches '{}'", phrase))
 }
 
 fn focus(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let w = window_by_phrase(step)?;
     let id = w.str_or("id", "").to_string();
     if ctx.dry_run {
-        return Ok(Effect::read_only(w.clone(), format!("would focus {}", w.str_or("title", &id))));
+        return Ok(Effect::read_only(
+            w.clone(),
+            format!("would focus {}", w.str_or("title", &id)),
+        ));
     }
     let tool = first_tool(&["wmctrl"], "focus a window")?;
     run(&tool, &["-ia", &id], Duration::from_secs(10))?.require("wmctrl")?;
-    Ok(Effect::read_only(w.clone(), format!("focused {}", w.str_or("title", &id))))
+    Ok(Effect::read_only(
+        w.clone(),
+        format!("focused {}", w.str_or("title", &id)),
+    ))
 }
 
 fn close_window(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
@@ -395,7 +461,10 @@ fn close_window(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let id = w.str_or("id", "").to_string();
     let title = w.str_or("title", &id).to_string();
     if ctx.dry_run {
-        return Ok(Effect::read_only(w.clone(), format!("would close {}", title)));
+        return Ok(Effect::read_only(
+            w.clone(),
+            format!("would close {}", title),
+        ));
     }
     let tool = first_tool(&["wmctrl"], "close a window")?;
     // `-c` asks the window to close, so the application still gets to prompt
@@ -403,7 +472,9 @@ fn close_window(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     run(&tool, &["-ic", &id], Duration::from_secs(10))?.require("wmctrl")?;
     Ok(Effect::with_undo(
         w,
-        Undo::Manual { note: format!("reopen {}", title) },
+        Undo::Manual {
+            note: format!("reopen {}", title),
+        },
         format!("asked {} to close", title),
     ))
 }
@@ -438,7 +509,10 @@ fn copy(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         return Err("nothing to copy".to_string());
     }
     if ctx.dry_run {
-        return Ok(Effect::read_only(Json::obj(), "would put text on the clipboard"));
+        return Ok(Effect::read_only(
+            Json::obj(),
+            "would put text on the clipboard",
+        ));
     }
 
     use std::io::Write;
@@ -467,11 +541,15 @@ fn copy(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         .ok_or("cannot write to the clipboard tool")?
         .write_all(text.as_bytes())
         .map_err(|e| format!("cannot write to the clipboard: {}", e))?;
-    child.wait().map_err(|e| format!("clipboard tool failed: {}", e))?;
+    child
+        .wait()
+        .map_err(|e| format!("clipboard tool failed: {}", e))?;
 
     Ok(Effect::with_undo(
         json_obj([("length", text.chars().count().into())]),
-        Undo::Manual { note: "the previous clipboard contents were replaced".to_string() },
+        Undo::Manual {
+            note: "the previous clipboard contents were replaced".to_string(),
+        },
         format!("copied {} characters", text.chars().count()),
     ))
 }
@@ -479,18 +557,28 @@ fn copy(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 // ------------------------------------------------------- notify and launch
 
 fn notify(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
-    let message = step.args.str_or("message", step.args.str_or("text", "")).to_string();
+    let message = step
+        .args
+        .str_or("message", step.args.str_or("text", ""))
+        .to_string();
     if message.is_empty() {
         return Err("nothing to say".to_string());
     }
     let title = step.args.str_or("title", "NOUS").to_string();
     if ctx.dry_run {
-        return Ok(Effect::read_only(Json::obj(), format!("would notify: {}", message)));
+        return Ok(Effect::read_only(
+            Json::obj(),
+            format!("would notify: {}", message),
+        ));
     }
     let tool = first_tool(&["notify-send"], "show a notification")?;
     let urgency = step.args.str_or("urgency", "normal").to_string();
-    run(&tool, &["-a", "NOUS", "-u", &urgency, &title, &message], Duration::from_secs(10))?
-        .require("notify-send")?;
+    run(
+        &tool,
+        &["-a", "NOUS", "-u", &urgency, &title, &message],
+        Duration::from_secs(10),
+    )?
+    .require("notify-send")?;
     Ok(Effect::read_only(
         json_obj([("title", title.into()), ("message", message.clone().into())]),
         format!("notified: {}", message),
@@ -515,11 +603,17 @@ fn open(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         p.to_string_lossy().to_string()
     };
     if ctx.dry_run {
-        return Ok(Effect::read_only(Json::obj(), format!("would open {}", resolved)));
+        return Ok(Effect::read_only(
+            Json::obj(),
+            format!("would open {}", resolved),
+        ));
     }
     let tool = first_tool(&["xdg-open", "gio"], "open a file")?;
-    let args: Vec<&str> =
-        if tool == "gio" { vec!["open", &resolved] } else { vec![&resolved] };
+    let args: Vec<&str> = if tool == "gio" {
+        vec!["open", &resolved]
+    } else {
+        vec![&resolved]
+    };
     // Detached: the opened application outlives this request.
     std::process::Command::new(&tool)
         .args(&args)
@@ -535,7 +629,10 @@ fn open(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 }
 
 fn launch(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
-    let wanted = step.args.str_or("name", step.args.str_or("app", "")).to_string();
+    let wanted = step
+        .args
+        .str_or("name", step.args.str_or("app", ""))
+        .to_string();
     if wanted.is_empty() {
         return Err("which application?".to_string());
     }
@@ -544,18 +641,29 @@ fn launch(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let app = apps
         .iter()
         .find(|a| a.str_or("name", "").to_ascii_lowercase() == lower)
-        .or_else(|| apps.iter().find(|a| a.str_or("id", "").to_ascii_lowercase() == lower))
-        .or_else(|| apps.iter().find(|a| a.str_or("name", "").to_ascii_lowercase().contains(&lower)))
+        .or_else(|| {
+            apps.iter()
+                .find(|a| a.str_or("id", "").to_ascii_lowercase() == lower)
+        })
+        .or_else(|| {
+            apps.iter()
+                .find(|a| a.str_or("name", "").to_ascii_lowercase().contains(&lower))
+        })
         .ok_or_else(|| format!("no installed application matches '{}'", wanted))?;
 
     let exec = app.str_or("exec", "").to_string();
     let name = app.str_or("name", "").to_string();
     if ctx.dry_run {
-        return Ok(Effect::read_only(app.clone(), format!("would launch {} ({})", name, exec)));
+        return Ok(Effect::read_only(
+            app.clone(),
+            format!("would launch {} ({})", name, exec),
+        ));
     }
 
     let mut parts = exec.split_whitespace();
-    let program = parts.next().ok_or("this application has no command to run")?;
+    let program = parts
+        .next()
+        .ok_or("this application has no command to run")?;
     let args: Vec<&str> = parts.collect();
     let child = std::process::Command::new(program)
         .args(&args)
@@ -566,8 +674,13 @@ fn launch(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         .map_err(|e| format!("cannot launch {}: {}", name, e))?;
 
     Ok(Effect::with_undo(
-        json_obj([("name", name.clone().into()), ("pid", (child.id() as u64).into())]),
-        Undo::Manual { note: format!("close {}", name) },
+        json_obj([
+            ("name", name.clone().into()),
+            ("pid", (child.id() as u64).into()),
+        ]),
+        Undo::Manual {
+            note: format!("close {}", name),
+        },
         format!("launched {}", name),
     ))
 }
@@ -602,8 +715,16 @@ fn screenshot(_step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         if r.ok() && out.exists() {
             let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
             return Ok(Effect::with_undo(
-                json_obj([("path", path.clone().into()), ("bytes", size.into()), ("tool", tool.into())]),
-                Undo::RestoreFile { path: path.clone(), backup: None, existed: false },
+                json_obj([
+                    ("path", path.clone().into()),
+                    ("bytes", size.into()),
+                    ("tool", tool.into()),
+                ]),
+                Undo::RestoreFile {
+                    path: path.clone(),
+                    backup: None,
+                    existed: false,
+                },
                 format!("captured the screen to {}", path),
             ));
         }
@@ -611,7 +732,10 @@ fn screenshot(_step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     Err(if tried.is_empty() {
         "no screenshot tool is installed. Try: sudo apt install gnome-screenshot".to_string()
     } else {
-        format!("the screenshot tools available ({}) all failed", tried.join(", "))
+        format!(
+            "the screenshot tools available ({}) all failed",
+            tried.join(", ")
+        )
     })
 }
 
@@ -633,7 +757,11 @@ fn setting(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         // No value means read it.
         None => {
             return Ok(Effect::read_only(
-                json_obj([("schema", schema.clone().into()), ("key", key.clone().into()), ("value", previous.clone().into())]),
+                json_obj([
+                    ("schema", schema.clone().into()),
+                    ("key", key.clone().into()),
+                    ("value", previous.clone().into()),
+                ]),
                 format!("{} {} is {}", schema, key, previous),
             ))
         }
@@ -642,13 +770,27 @@ fn setting(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     if ctx.dry_run {
         return Ok(Effect::read_only(
             Json::obj(),
-            format!("would set {} {} to {} (currently {})", schema, key, value, previous),
+            format!(
+                "would set {} {} to {} (currently {})",
+                schema, key, value, previous
+            ),
         ));
     }
-    run(&tool, &["set", &schema, &key, &value], Duration::from_secs(10))?.require("gsettings")?;
+    run(
+        &tool,
+        &["set", &schema, &key, &value],
+        Duration::from_secs(10),
+    )?
+    .require("gsettings")?;
     Ok(Effect::with_undo(
-        json_obj([("schema", schema.clone().into()), ("key", key.clone().into()), ("value", value.clone().into())]),
-        Undo::Manual { note: format!("gsettings set {} {} {}", schema, key, previous) },
+        json_obj([
+            ("schema", schema.clone().into()),
+            ("key", key.clone().into()),
+            ("value", value.clone().into()),
+        ]),
+        Undo::Manual {
+            note: format!("gsettings set {} {} {}", schema, key, previous),
+        },
         format!("set {} {} to {}", schema, key, value),
     ))
 }
@@ -656,7 +798,10 @@ fn setting(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 fn session(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let action = step.args.str_or("action", "lock").to_string();
     if ctx.dry_run {
-        return Ok(Effect::read_only(Json::obj(), format!("would {} the session", action)));
+        return Ok(Effect::read_only(
+            Json::obj(),
+            format!("would {} the session", action),
+        ));
     }
     let attempts: Vec<(&str, Vec<&str>)> = match action.as_str() {
         "lock" => vec![
@@ -674,29 +819,31 @@ fn session(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         if have(tool) && run(tool, &args, Duration::from_secs(15))?.ok() {
             return Ok(Effect::with_undo(
                 json_obj([("action", action.clone().into())]),
-                Undo::Manual { note: "log back in".to_string() },
+                Undo::Manual {
+                    note: "log back in".to_string(),
+                },
                 format!("{} requested", action),
             ));
         }
     }
-    Err(format!("nothing on this system could {} the session", action))
-}
-
-/// The paths the file manager's context menu passes in, as a shared helper.
-pub fn selected_paths(step: &Step) -> Vec<PathBuf> {
-    step.args
-        .str_list("paths")
-        .iter()
-        .map(|p| nous_core::config::expand_tilde(p))
-        .filter(|p: &PathBuf| p.exists())
-        .collect()
+    Err(format!(
+        "nothing on this system could {} the session",
+        action
+    ))
 }
 
 /// Describe what the user is looking at, for the resolver's benefit.
 pub fn focus_context() -> Json {
-    let mut ctx = json_obj([("session", session_kind().into()), ("desktop", desktop_name().into())]);
+    let mut ctx = json_obj([
+        ("session", session_kind().into()),
+        ("desktop", desktop_name().into()),
+    ]);
     if session_kind() == "x11" && have("xdotool") {
-        if let Ok(r) = run("xdotool", &["getactivewindow", "getwindowname"], Duration::from_secs(3)) {
+        if let Ok(r) = run(
+            "xdotool",
+            &["getactivewindow", "getwindowname"],
+            Duration::from_secs(3),
+        ) {
             if r.ok() {
                 ctx.set("focused_window", Json::Str(r.stdout.trim().to_string()));
             }
@@ -728,7 +875,11 @@ Name=Open a New Window
 Exec=firefox --new-window
 ";
         let f = parse_desktop_entry(text).unwrap();
-        assert_eq!(f.get("Name").unwrap(), "Firefox Web Browser", "the localised name must not win");
+        assert_eq!(
+            f.get("Name").unwrap(),
+            "Firefox Web Browser",
+            "the localised name must not win"
+        );
         assert_eq!(f.get("Exec").unwrap(), "firefox %u");
         // Fields from the action group must not leak into the application.
         assert!(!f.get("Exec").unwrap().contains("--new-window"));
@@ -738,7 +889,10 @@ Exec=firefox --new-window
     fn strips_desktop_field_codes_from_exec() {
         assert_eq!(clean_exec("firefox %u"), "firefox");
         assert_eq!(clean_exec("gimp-2.10 %U"), "gimp-2.10");
-        assert_eq!(clean_exec("env FOO=1 code --unity-launch %F"), "env FOO=1 code --unity-launch");
+        assert_eq!(
+            clean_exec("env FOO=1 code --unity-launch %F"),
+            "env FOO=1 code --unity-launch"
+        );
         // %% is a literal percent, not a field code.
         assert_eq!(clean_exec("thing --pct 50%% %f"), "thing --pct 50%");
         assert_eq!(clean_exec("plain-command"), "plain-command");
@@ -748,11 +902,17 @@ Exec=firefox --new-window
     fn enumerates_real_applications_from_disk() {
         // The container has a handful of genuine .desktop files.
         let apps = installed_apps(&[PathBuf::from("/usr/share/applications")]);
-        assert!(!apps.is_empty(), "should find the system's installed applications");
+        assert!(
+            !apps.is_empty(),
+            "should find the system's installed applications"
+        );
         for a in &apps {
             assert!(!a.str_or("name", "").is_empty());
             assert!(!a.str_or("exec", "").is_empty());
-            assert!(!a.str_or("exec", "").contains('%'), "field codes must be stripped");
+            assert!(
+                !a.str_or("exec", "").contains('%'),
+                "field codes must be stripped"
+            );
         }
     }
 
@@ -782,8 +942,11 @@ Exec=firefox --new-window
         )
         .unwrap();
 
-        let apps = installed_apps(&[dir.clone()]);
-        let names: Vec<String> = apps.iter().map(|a| a.str_or("name", "").to_string()).collect();
+        let apps = installed_apps(std::slice::from_ref(&dir));
+        let names: Vec<String> = apps
+            .iter()
+            .map(|a| a.str_or("name", "").to_string())
+            .collect();
         assert_eq!(names, ["Shown"], "got {:?}", names);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -795,8 +958,16 @@ Exec=firefox --new-window
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&sys).unwrap();
         std::fs::create_dir_all(&user).unwrap();
-        std::fs::write(sys.join("editor.desktop"), "[Desktop Entry]\nType=Application\nName=Editor\nExec=old-editor\n").unwrap();
-        std::fs::write(user.join("editor.desktop"), "[Desktop Entry]\nType=Application\nName=Editor\nExec=new-editor\n").unwrap();
+        std::fs::write(
+            sys.join("editor.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Editor\nExec=old-editor\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("editor.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Editor\nExec=new-editor\n",
+        )
+        .unwrap();
 
         let apps = installed_apps(&[sys, user]);
         assert_eq!(apps.len(), 1, "the same id must not appear twice");
@@ -812,7 +983,11 @@ Exec=firefox --new-window
         assert_eq!(w.f64_or("workspace", -9.0), 1.0);
         assert_eq!(w.f64_or("pid", 0.0), 12345.0);
         assert_eq!(w.str_or("app", ""), "Firefox");
-        assert_eq!(w.str_or("title", ""), "Bug 42 - Mozilla Firefox", "titles contain spaces");
+        assert_eq!(
+            w.str_or("title", ""),
+            "Bug 42 - Mozilla Firefox",
+            "titles contain spaces"
+        );
     }
 
     #[test]
@@ -828,9 +1003,16 @@ Exec=firefox --new-window
             parse_wmctrl_line("0x02 0 2 Navigator.Firefox host Mozilla Firefox").unwrap(),
         ];
         let hit = match_window(&windows, "firefox").unwrap();
-        assert_eq!(hit.str_or("id", ""), "0x02", "'close firefox' means the browser");
+        assert_eq!(
+            hit.str_or("id", ""),
+            "0x02",
+            "'close firefox' means the browser"
+        );
 
-        assert_eq!(match_window(&windows, "notes").unwrap().str_or("id", ""), "0x01");
+        assert_eq!(
+            match_window(&windows, "notes").unwrap().str_or("id", ""),
+            "0x01"
+        );
         assert!(match_window(&windows, "inkscape").is_none());
         assert!(match_window(&windows, "").is_none());
     }
@@ -854,7 +1036,10 @@ Exec=firefox --new-window
         assert!(info.get("tools").is_some());
         assert!(!info.str_or("session", "").is_empty());
         // Headless container: it should say so rather than pretending.
-        let hint = info.get("install_hint").and_then(|v| v.as_str()).unwrap_or("");
+        let hint = info
+            .get("install_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(hint.starts_with("sudo apt install"), "{hint}");
     }
 
@@ -866,30 +1051,5 @@ Exec=firefox --new-window
         assert_eq!(session_kind(), "none");
         let err = windows().unwrap_err();
         assert!(err.contains("no graphical session"), "{err}");
-    }
-
-    #[test]
-    fn selected_paths_drop_things_that_are_gone() {
-        let dir = std::env::temp_dir().join(format!("nous-sel-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let real = dir.join("here.txt");
-        std::fs::write(&real, b"x").unwrap();
-
-        let step = Step::new(
-            "s",
-            "desk.open",
-            "desk",
-            "",
-            json_obj([(
-                "paths",
-                Json::Arr(vec![
-                    Json::Str(real.to_string_lossy().to_string()),
-                    Json::Str(dir.join("gone.txt").to_string_lossy().to_string()),
-                ]),
-            )]),
-        );
-        assert_eq!(selected_paths(&step).len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

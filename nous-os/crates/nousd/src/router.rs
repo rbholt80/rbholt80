@@ -8,9 +8,9 @@
 //! AI-native OS and an OS that requires an internet connection to open a folder.
 
 use crate::httpc;
-use crate::secrets::Secrets;
 use nous_core::json::{json_obj, Json};
 use nous_core::Config;
+use nous_core::Secrets;
 use std::time::Duration;
 
 /// How much model a request actually needs.
@@ -60,7 +60,11 @@ impl Completion {
 
     /// A small-tier request: background classification and housekeeping.
     pub fn small(system: &str, prompt: &str) -> Completion {
-        Completion { max_tokens: 512, tier: Tier::Small, ..Completion::new(system, prompt) }
+        Completion {
+            max_tokens: 512,
+            tier: Tier::Small,
+            ..Completion::new(system, prompt)
+        }
     }
 }
 
@@ -113,7 +117,12 @@ impl Backend for Ollama {
                 ]),
             ),
         ]);
-        let res = httpc::post_json(&format!("{}/api/generate", self.url), &[], &body, self.timeout)?;
+        let res = httpc::post_json(
+            &format!("{}/api/generate", self.url),
+            &[],
+            &body,
+            self.timeout,
+        )?;
         let json = res.require_ok()?.json()?;
         let text = json.str_or("response", "");
         if text.is_empty() {
@@ -161,7 +170,9 @@ impl Backend for Anthropic {
     }
 
     fn complete(&self, c: &Completion) -> Result<String, String> {
-        let key = self.key().ok_or_else(|| format!("{} is not set", self.key_env))?;
+        let key = self
+            .key()
+            .ok_or_else(|| format!("{} is not set", self.key_env))?;
         let body = json_obj([
             ("model", self.model.clone().into()),
             ("max_tokens", self.max_tokens.min(c.max_tokens).into()),
@@ -177,7 +188,10 @@ impl Backend for Anthropic {
         ]);
         let res = httpc::post_json(
             &self.url,
-            &[("x-api-key", key.as_str()), ("anthropic-version", "2023-06-01")],
+            &[
+                ("x-api-key", key.as_str()),
+                ("anthropic-version", "2023-06-01"),
+            ],
             &body,
             self.timeout,
         )?;
@@ -240,8 +254,14 @@ impl Backend for OpenAICompat {
             (
                 "messages",
                 Json::Arr(vec![
-                    json_obj([("role", "system".into()), ("content", c.system.clone().into())]),
-                    json_obj([("role", "user".into()), ("content", c.prompt.clone().into())]),
+                    json_obj([
+                        ("role", "system".into()),
+                        ("content", c.system.clone().into()),
+                    ]),
+                    json_obj([
+                        ("role", "user".into()),
+                        ("content", c.prompt.clone().into()),
+                    ]),
                 ]),
             ),
         ]);
@@ -291,22 +311,41 @@ impl Router {
         let timeout = Duration::from_secs(cfg.u64_or("model.timeout_secs", 60));
         let backends: Vec<Box<dyn Backend>> = vec![
             Box::new(Ollama {
-                url: cfg.str_or("model.ollama.url", "http://127.0.0.1:11434").trim_end_matches('/').to_string(),
-                model: cfg.str_or("model.ollama.model", "qwen2.5:7b-instruct").to_string(),
+                url: cfg
+                    .str_or("model.ollama.url", "http://127.0.0.1:11434")
+                    .trim_end_matches('/')
+                    .to_string(),
+                model: cfg
+                    .str_or("model.ollama.model", "qwen2.5:7b-instruct")
+                    .to_string(),
                 small_model: cfg
                     .str_or("model.ollama.small_model", "qwen2.5:1.5b-instruct")
                     .to_string(),
                 timeout,
             }),
             Box::new(Anthropic {
-                url: cfg.str_or("model.anthropic.url", "https://api.anthropic.com/v1/messages").to_string(),
-                model: cfg.str_or("model.anthropic.model", "claude-sonnet-5").to_string(),
+                url: cfg
+                    .str_or(
+                        "model.anthropic.url",
+                        "https://api.anthropic.com/v1/messages",
+                    )
+                    .to_string(),
+                model: cfg
+                    .str_or("model.anthropic.model", "claude-sonnet-5")
+                    .to_string(),
                 max_tokens: cfg.u64_or("model.anthropic.max_tokens", 2048),
-                key_env: cfg.str_or("model.anthropic.key_env", "ANTHROPIC_API_KEY").to_string(),
+                key_env: cfg
+                    .str_or("model.anthropic.key_env", "ANTHROPIC_API_KEY")
+                    .to_string(),
                 timeout,
             }),
             Box::new(OpenAICompat {
-                url: cfg.str_or("model.openai.url", "https://api.openai.com/v1/chat/completions").to_string(),
+                url: cfg
+                    .str_or(
+                        "model.openai.url",
+                        "https://api.openai.com/v1/chat/completions",
+                    )
+                    .to_string(),
                 model: cfg.str_or("model.openai.model", "gpt-4o-mini").to_string(),
                 provider: cfg.str_or("model.openai.provider", "openai").to_string(),
                 timeout,
@@ -317,12 +356,20 @@ impl Router {
             v if v.is_empty() => order.clone(),
             v => v,
         };
-        Router { backends, order, small_order }
+        Router {
+            backends,
+            order,
+            small_order,
+        }
     }
 
     /// For tests and for embedding a fixed backend.
     pub fn with_backends(backends: Vec<Box<dyn Backend>>, order: Vec<String>) -> Router {
-        Router { backends, small_order: order.clone(), order }
+        Router {
+            backends,
+            small_order: order.clone(),
+            order,
+        }
     }
 
     /// Same, with a distinct small-tier route.
@@ -331,7 +378,11 @@ impl Router {
         order: Vec<String>,
         small_order: Vec<String>,
     ) -> Router {
-        Router { backends, order, small_order }
+        Router {
+            backends,
+            order,
+            small_order,
+        }
     }
 
     fn route_for(&self, tier: Tier) -> &[String] {
@@ -342,7 +393,10 @@ impl Router {
     }
 
     fn find(&self, name: &str) -> Option<&dyn Backend> {
-        self.backends.iter().find(|b| b.name() == name).map(|b| b.as_ref())
+        self.backends
+            .iter()
+            .find(|b| b.name() == name)
+            .map(|b| b.as_ref())
     }
 
     /// Is any model reachable right now?
@@ -405,13 +459,31 @@ impl Router {
                     ("name", b.name().into()),
                     ("model", b.model().into()),
                     ("available", b.available().into()),
-                    ("position", self.order.iter().position(|n| n == b.name()).map(|p| Json::from(p as u64)).unwrap_or(Json::Null)),
+                    (
+                        "position",
+                        self.order
+                            .iter()
+                            .position(|n| n == b.name())
+                            .map(|p| Json::from(p as u64))
+                            .unwrap_or(Json::Null),
+                    ),
                 ])
             })
             .collect();
         json_obj([
-            ("route", Json::Arr(self.order.iter().map(|s| Json::Str(s.clone())).collect())),
-            ("route_small", Json::Arr(self.small_order.iter().map(|s| Json::Str(s.clone())).collect())),
+            (
+                "route",
+                Json::Arr(self.order.iter().map(|s| Json::Str(s.clone())).collect()),
+            ),
+            (
+                "route_small",
+                Json::Arr(
+                    self.small_order
+                        .iter()
+                        .map(|s| Json::Str(s.clone()))
+                        .collect(),
+                ),
+            ),
             ("backends", Json::Arr(list)),
             ("has_model", self.has_model().into()),
             ("credentials", Secrets::load().status()),
@@ -448,9 +520,21 @@ mod tests {
         }
     }
 
-    fn fake(name: &'static str, up: bool, answer: Result<String, String>) -> (Box<dyn Backend>, Arc<AtomicUsize>) {
+    fn fake(
+        name: &'static str,
+        up: bool,
+        answer: Result<String, String>,
+    ) -> (Box<dyn Backend>, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        (Box::new(Fake { name, up, answer, calls: calls.clone() }), calls)
+        (
+            Box::new(Fake {
+                name,
+                up,
+                answer,
+                calls: calls.clone(),
+            }),
+            calls,
+        )
     }
 
     #[test]
@@ -462,7 +546,11 @@ mod tests {
         assert_eq!(served.backend, "ollama");
         assert_eq!(served.text, "local answer");
         assert_eq!(a_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(b_calls.load(Ordering::Relaxed), 0, "the fallback must not be called");
+        assert_eq!(
+            b_calls.load(Ordering::Relaxed),
+            0,
+            "the fallback must not be called"
+        );
     }
 
     #[test]
@@ -470,7 +558,10 @@ mod tests {
         let (a, a_calls) = fake("ollama", false, Ok("local".into()));
         let (b, _) = fake("anthropic", true, Ok("remote".into()));
         let r = Router::with_backends(vec![a, b], vec!["ollama".into(), "anthropic".into()]);
-        assert_eq!(r.complete(&Completion::new("s", "p")).unwrap().backend, "anthropic");
+        assert_eq!(
+            r.complete(&Completion::new("s", "p")).unwrap().backend,
+            "anthropic"
+        );
         assert_eq!(a_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -479,7 +570,10 @@ mod tests {
         let (a, _) = fake("ollama", true, Err("model not pulled".into()));
         let (b, _) = fake("anthropic", true, Ok("remote".into()));
         let r = Router::with_backends(vec![a, b], vec!["ollama".into(), "anthropic".into()]);
-        assert_eq!(r.complete(&Completion::new("s", "p")).unwrap().text, "remote");
+        assert_eq!(
+            r.complete(&Completion::new("s", "p")).unwrap().text,
+            "remote"
+        );
     }
 
     #[test]
@@ -537,7 +631,12 @@ mod tests {
             "routine background work must not reach a paid API"
         );
 
-        assert_eq!(r.complete(&Completion::new("s", "hard intent")).unwrap().backend, "anthropic");
+        assert_eq!(
+            r.complete(&Completion::new("s", "hard intent"))
+                .unwrap()
+                .backend,
+            "anthropic"
+        );
         assert_eq!(local_calls.load(Ordering::Relaxed), 1);
     }
 
@@ -561,7 +660,10 @@ mod tests {
         let s = r.status();
         assert_eq!(s.arr_or_empty("route").len(), 2);
         assert!(s.bool_or("has_model", false));
-        assert_eq!(s.arr_or_empty("backends")[0].str_or("model", ""), "ollama-model");
+        assert_eq!(
+            s.arr_or_empty("backends")[0].str_or("model", ""),
+            "ollama-model"
+        );
     }
 
     #[test]

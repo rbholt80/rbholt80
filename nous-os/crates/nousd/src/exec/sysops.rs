@@ -48,7 +48,11 @@ impl CmdOutput {
             return Err(format!("{} timed out", what));
         }
         if self.status != 0 {
-            let msg = if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr };
+            let msg = if self.stderr.trim().is_empty() {
+                &self.stdout
+            } else {
+                &self.stderr
+            };
             return Err(format!("{} failed ({}): {}", what, self.status, msg.trim()));
         }
         Ok(&self.stdout)
@@ -88,7 +92,9 @@ pub fn run(program: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput,
             Err(e) => return Err(format!("cannot wait on {}: {}", program, e)),
         }
     }
-    let out = child.wait_with_output().map_err(|e| format!("cannot collect output: {}", e))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot collect output: {}", e))?;
     Ok(CmdOutput {
         status: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).to_string(),
@@ -120,7 +126,10 @@ pub fn systemctl(args: &[&str], _ctx: &ExecCtx) -> Result<String, String> {
 // ------------------------------------------------------------------ readouts
 
 fn read_line_file(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_default().trim().to_string()
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 pub fn sys_info() -> Json {
@@ -141,8 +150,14 @@ pub fn sys_info() -> Json {
     json_obj([
         ("name", nous_core::NOUS_NAME.into()),
         ("version", nous_core::NOUS_VERSION.into()),
-        ("hostname", read_line_file("/proc/sys/kernel/hostname").into()),
-        ("kernel", read_line_file("/proc/sys/kernel/osrelease").into()),
+        (
+            "hostname",
+            read_line_file("/proc/sys/kernel/hostname").into(),
+        ),
+        (
+            "kernel",
+            read_line_file("/proc/sys/kernel/osrelease").into(),
+        ),
         ("distro", distro.into()),
         ("arch", std::env::consts::ARCH.into()),
         ("uptime_secs", (uptime as u64).into()),
@@ -163,7 +178,7 @@ fn meminfo() -> std::collections::BTreeMap<String, u64> {
     if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
         for line in text.lines() {
             if let Some((k, v)) = line.split_once(':') {
-                if let Some(kb) = v.trim().split_whitespace().next().and_then(|n| n.parse().ok()) {
+                if let Some(kb) = v.split_whitespace().next().and_then(|n| n.parse().ok()) {
                     m.insert(k.to_string(), kb);
                 }
             }
@@ -182,11 +197,18 @@ pub fn sys_metrics() -> Json {
     let mi = meminfo();
     let total = mi.get("MemTotal").copied().unwrap_or(0);
     let avail = mi.get("MemAvailable").copied().unwrap_or(0);
-    let used_pct = if total > 0 { ((total - avail) as f64 / total as f64) * 100.0 } else { 0.0 };
+    let used_pct = if total > 0 {
+        ((total - avail) as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
 
     let (disk_total, disk_free) = disk_usage("/");
-    let disk_pct =
-        if disk_total > 0 { ((disk_total - disk_free) as f64 / disk_total as f64) * 100.0 } else { 0.0 };
+    let disk_pct = if disk_total > 0 {
+        ((disk_total - disk_free) as f64 / disk_total as f64) * 100.0
+    } else {
+        0.0
+    };
 
     json_obj([
         ("load1", l1.into()),
@@ -236,7 +258,11 @@ pub fn disk_usage(path: &str) -> (u64, u64) {
     if rc != 0 {
         return (0, 0);
     }
-    let unit = if st.f_frsize > 0 { st.f_frsize } else { st.f_bsize };
+    let unit = if st.f_frsize > 0 {
+        st.f_frsize
+    } else {
+        st.f_bsize
+    };
     ((st.f_blocks * unit) / 1024, (st.f_bavail * unit) / 1024)
 }
 
@@ -244,14 +270,23 @@ fn count_procs() -> u64 {
     std::fs::read_dir("/proc")
         .map(|d| {
             d.flatten()
-                .filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()))
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .chars()
+                        .all(|c| c.is_ascii_digit())
+                })
                 .count() as u64
         })
         .unwrap_or(0)
 }
 
 fn proc_list(step: &Step) -> Result<Effect, String> {
-    let limit = step.args.get("limit").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
+    let limit = step
+        .args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40) as usize;
     let filter = step.args.str_or("filter", "").to_ascii_lowercase();
     let ticks_per_sec = 100.0; // USER_HZ; constant on every Linux target we support.
 
@@ -317,7 +352,11 @@ fn proc_list(step: &Step) -> Result<Effect, String> {
 }
 
 fn proc_signal(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
-    let pid = step.args.get("pid").and_then(|v| v.as_u64()).ok_or("step is missing 'pid'")?;
+    let pid = step
+        .args
+        .get("pid")
+        .and_then(|v| v.as_u64())
+        .ok_or("step is missing 'pid'")?;
     let signal = step.args.str_or("signal", "TERM").to_string();
     if ctx.dry_run {
         return Ok(Effect::read_only(
@@ -325,11 +364,17 @@ fn proc_signal(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             format!("would send SIG{} to pid {}", signal, pid),
         ));
     }
-    let out = run("kill", &[&format!("-{}", signal), &pid.to_string()], Duration::from_secs(5))?;
+    let out = run(
+        "kill",
+        &[&format!("-{}", signal), &pid.to_string()],
+        Duration::from_secs(5),
+    )?;
     out.require("kill")?;
     Ok(Effect::with_undo(
         json_obj([("pid", pid.into()), ("signal", signal.clone().into())]),
-        Undo::Manual { note: format!("pid {} was signalled; restart it if it was wanted", pid) },
+        Undo::Manual {
+            note: format!("pid {} was signalled; restart it if it was wanted", pid),
+        },
         format!("sent SIG{} to pid {}", signal, pid),
     ))
 }
@@ -339,8 +384,14 @@ fn svc_status(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     if unit.is_empty() {
         return Err("step is missing 'unit'".to_string());
     }
-    let active = systemctl(&["is-active", &unit], ctx).unwrap_or_default().trim().to_string();
-    let enabled = systemctl(&["is-enabled", &unit], ctx).unwrap_or_default().trim().to_string();
+    let active = systemctl(&["is-active", &unit], ctx)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let enabled = systemctl(&["is-enabled", &unit], ctx)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     Ok(Effect::read_only(
         json_obj([
             ("unit", unit.clone().into()),
@@ -348,12 +399,23 @@ fn svc_status(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             ("enabled", enabled.into()),
             ("running", (active == "active").into()),
         ]),
-        format!("{} is {}", unit, if active.is_empty() { "unknown" } else { &active }),
+        format!(
+            "{} is {}",
+            unit,
+            if active.is_empty() {
+                "unknown"
+            } else {
+                &active
+            }
+        ),
     ))
 }
 
 fn cap_scope(step: &Step) -> &str {
-    step.capability.split_once(':').map(|(_, s)| s).unwrap_or("")
+    step.capability
+        .split_once(':')
+        .map(|(_, s)| s)
+        .unwrap_or("")
 }
 
 fn svc_change(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
@@ -361,28 +423,42 @@ fn svc_change(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, St
     if unit.is_empty() {
         return Err("step is missing 'unit'".to_string());
     }
-    let was_active =
-        systemctl(&["is-active", &unit], ctx).unwrap_or_default().trim() == "active";
+    let was_active = systemctl(&["is-active", &unit], ctx)
+        .unwrap_or_default()
+        .trim()
+        == "active";
 
     if ctx.dry_run {
         return Ok(Effect::read_only(
-            json_obj([("unit", unit.clone().into()), ("action", cap.action.clone().into())]),
+            json_obj([
+                ("unit", unit.clone().into()),
+                ("action", cap.action.clone().into()),
+            ]),
             format!("would {} {}", cap.action, unit),
         ));
     }
     systemctl(&[cap.action.as_str(), &unit], ctx)?;
     Ok(Effect::with_undo(
-        json_obj([("unit", unit.clone().into()), ("action", cap.action.clone().into())]),
-        Undo::ServiceState { unit: unit.clone(), was_active },
+        json_obj([
+            ("unit", unit.clone().into()),
+            ("action", cap.action.clone().into()),
+        ]),
+        Undo::ServiceState {
+            unit: unit.clone(),
+            was_active,
+        },
         format!("{}ed {}", cap.action.trim_end_matches('e'), unit),
     ))
 }
 
 /// Which package manager this machine actually has.
 pub fn package_manager() -> Option<(&'static str, &'static str)> {
-    for (bin, family) in
-        [("apt-get", "debian"), ("dnf", "fedora"), ("pacman", "arch"), ("zypper", "suse")]
-    {
+    for (bin, family) in [
+        ("apt-get", "debian"),
+        ("dnf", "fedora"),
+        ("pacman", "arch"),
+        ("zypper", "suse"),
+    ] {
         if have(bin) {
             return Some((bin, family));
         }
@@ -396,10 +472,18 @@ fn pkg_query(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
         return Err("step is missing 'name'".to_string());
     }
     let (installed, version) = if have("dpkg-query") {
-        let out = run("dpkg-query", &["-W", "-f=${Version}", &name], Duration::from_secs(15))?;
+        let out = run(
+            "dpkg-query",
+            &["-W", "-f=${Version}", &name],
+            Duration::from_secs(15),
+        )?;
         (out.ok(), out.stdout.trim().to_string())
     } else if have("rpm") {
-        let out = run("rpm", &["-q", "--qf", "%{VERSION}", &name], Duration::from_secs(15))?;
+        let out = run(
+            "rpm",
+            &["-q", "--qf", "%{VERSION}", &name],
+            Duration::from_secs(15),
+        )?;
         (out.ok(), out.stdout.trim().to_string())
     } else {
         (false, String::new())
@@ -410,7 +494,11 @@ fn pkg_query(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
             ("installed", installed.into()),
             ("version", version.into()),
         ]),
-        format!("{} is {}installed", name, if installed { "" } else { "not " }),
+        format!(
+            "{} is {}installed",
+            name,
+            if installed { "" } else { "not " }
+        ),
     ))
 }
 
@@ -445,7 +533,12 @@ fn pkg_change(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, St
         json_obj([("name", name.clone().into()), ("manager", bin.into())]),
         // The inverse of an install is a remove, and vice versa.
         Undo::Manual {
-            note: format!("run: {} {} {}", bin, if installing { "remove" } else { "install" }, name),
+            note: format!(
+                "run: {} {} {}",
+                bin,
+                if installing { "remove" } else { "install" },
+                name
+            ),
         },
         format!("{}ed {}", cap.action.trim_end_matches('e'), name),
     ))
@@ -484,7 +577,12 @@ fn shell_exec(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     if cmd.trim().is_empty() {
         return Err("step is missing 'command'".to_string());
     }
-    let timeout = Duration::from_secs(step.args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(60));
+    let timeout = Duration::from_secs(
+        step.args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(60),
+    );
 
     if ctx.dry_run {
         return Ok(Effect::read_only(
@@ -503,7 +601,9 @@ fn shell_exec(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         ]),
         // The system cannot know how to reverse an arbitrary command, and must
         // not pretend otherwise.
-        Undo::Manual { note: format!("`{}` ran; its effects are not tracked", cmd) },
+        Undo::Manual {
+            note: format!("`{}` ran; its effects are not tracked", cmd),
+        },
         format!("ran `{}` (exit {})", cmd, out.status),
     ))
 }
@@ -525,7 +625,9 @@ fn power(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     systemctl(&[verb], ctx)?;
     Ok(Effect::with_undo(
         json_obj([("mode", verb.into())]),
-        Undo::Manual { note: "power the machine back on".to_string() },
+        Undo::Manual {
+            note: "power the machine back on".to_string(),
+        },
         format!("{} requested", verb),
     ))
 }
@@ -547,7 +649,10 @@ mod tests {
     #[test]
     fn describes_the_machine_it_is_running_on() {
         let info = sys_info();
-        assert!(!info.str_or("kernel", "").is_empty(), "kernel version should be readable");
+        assert!(
+            !info.str_or("kernel", "").is_empty(),
+            "kernel version should be readable"
+        );
         assert!(info.get("cpus").unwrap().as_u64().unwrap() >= 1);
         assert_eq!(info.str_or("name", ""), "NOUS");
     }
@@ -556,8 +661,14 @@ mod tests {
     fn metrics_are_plausible() {
         let m = sys_metrics();
         let pct = m.f64_or("mem_used_pct", -1.0);
-        assert!((0.0..=100.0).contains(&pct), "mem_used_pct out of range: {pct}");
-        assert!(m.get("disk_total_kb").unwrap().as_u64().unwrap() > 0, "root fs should have a size");
+        assert!(
+            (0.0..=100.0).contains(&pct),
+            "mem_used_pct out of range: {pct}"
+        );
+        assert!(
+            m.get("disk_total_kb").unwrap().as_u64().unwrap() > 0,
+            "root fs should have a size"
+        );
         assert!(m.f64_or("load1", -1.0) >= 0.0);
     }
 
@@ -565,13 +676,21 @@ mod tests {
     fn lists_processes_including_this_one() {
         let (dir, cfg, j) = fixture("proc");
         let ctx = ExecCtx::rooted(&cfg, &j, false, dir.clone(), dir.clone());
-        let step = Step::new("s", "proc.list", "sys", "", json_obj([("limit", 500u64.into())]));
+        let step = Step::new(
+            "s",
+            "proc.list",
+            "sys",
+            "",
+            json_obj([("limit", 500u64.into())]),
+        );
         let e = execute(&Capability::parse("proc.list").unwrap(), &step, &ctx).unwrap();
         let procs = e.result.arr_or_empty("processes");
         assert!(!procs.is_empty());
         let me = std::process::id() as u64;
         assert!(
-            procs.iter().any(|p| p.get("pid").and_then(|v| v.as_u64()) == Some(me)),
+            procs
+                .iter()
+                .any(|p| p.get("pid").and_then(|v| v.as_u64()) == Some(me)),
             "the test process should appear in its own process list"
         );
         let _ = std::fs::remove_dir_all(&dir);

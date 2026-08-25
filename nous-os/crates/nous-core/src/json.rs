@@ -66,7 +66,8 @@ impl Json {
     }
 
     pub fn as_u64(&self) -> Option<u64> {
-        self.as_f64().and_then(|f| if f < 0.0 { None } else { Some(f as u64) })
+        self.as_f64()
+            .and_then(|f| if f < 0.0 { None } else { Some(f as u64) })
     }
 
     pub fn as_bool(&self) -> Option<bool> {
@@ -109,7 +110,10 @@ impl Json {
     }
 
     pub fn arr_or_empty(&self, key: &str) -> Vec<Json> {
-        self.get(key).and_then(|v| v.as_arr()).cloned().unwrap_or_default()
+        self.get(key)
+            .and_then(|v| v.as_arr())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Collect an array of strings, skipping non-string members.
@@ -318,7 +322,11 @@ pub struct Parser<'a> {
 const MAX_DEPTH: usize = 128;
 
 pub fn parse(s: &str) -> Result<Json, String> {
-    let mut p = Parser { b: s.as_bytes(), i: 0, depth: 0 };
+    let mut p = Parser {
+        b: s.as_bytes(),
+        i: 0,
+        depth: 0,
+    };
     p.ws();
     let v = p.value()?;
     p.ws();

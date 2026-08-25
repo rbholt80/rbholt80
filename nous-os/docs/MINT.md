@@ -192,6 +192,8 @@ and the shell all work normally.
 ## When something is wrong
 
 ```console
+nousctl storage                   # what it is keeping, and what it can reclaim
+nousctl storage --clean           # reclaim it
 systemctl --user status nousd     # is the daemon up
 journalctl --user -u nousd -f     # what is it saying
 nousctl status                    # what does it think it is doing

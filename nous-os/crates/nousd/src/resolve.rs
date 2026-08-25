@@ -18,7 +18,7 @@ use nous_core::glyph::{self, ast, Flow, Stmt, Value};
 use nous_core::json::{json_obj, Json};
 use nous_core::{Plan, Step};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Bindings produced by steps that have already run.
 pub type Env = BTreeMap<String, Json>;
@@ -42,9 +42,21 @@ pub struct Context {
 impl Context {
     pub fn from_json(v: &Json) -> Context {
         Context {
-            focus: v.get("focus").and_then(|f| f.as_str()).filter(|s| !s.is_empty()).map(String::from),
-            paths: v.str_list("paths").iter().map(|p| nous_core::config::expand_tilde(p)).collect(),
-            cwd: v.get("cwd").and_then(|c| c.as_str()).filter(|s| !s.is_empty()).map(nous_core::config::expand_tilde),
+            focus: v
+                .get("focus")
+                .and_then(|f| f.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            paths: v
+                .str_list("paths")
+                .iter()
+                .map(|p| nous_core::config::expand_tilde(p))
+                .collect(),
+            cwd: v
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .filter(|s| !s.is_empty())
+                .map(nous_core::config::expand_tilde),
         }
     }
 
@@ -63,10 +75,17 @@ impl Context {
         }
         match self.paths.len() {
             0 => {}
-            1 => parts.push(format!("They have selected the file {}.", self.paths[0].display())),
+            1 => parts.push(format!(
+                "They have selected the file {}.",
+                self.paths[0].display()
+            )),
             n => {
-                let shown: Vec<String> =
-                    self.paths.iter().take(6).map(|p| p.display().to_string()).collect();
+                let shown: Vec<String> = self
+                    .paths
+                    .iter()
+                    .take(6)
+                    .map(|p| p.display().to_string())
+                    .collect();
                 parts.push(format!(
                     "They have selected {} files: {}{}",
                     n,
@@ -100,10 +119,18 @@ pub fn compile_flow(flow: &Flow, platform: &str) -> Vec<Step> {
     steps
 }
 
-fn lower(flow: &Flow, stmts: &[Stmt], platform: &str, bound: &mut Vec<String>, out: &mut Vec<Step>) {
+fn lower(
+    flow: &Flow,
+    stmts: &[Stmt],
+    platform: &str,
+    bound: &mut Vec<String>,
+    out: &mut Vec<Step>,
+) {
     for stmt in stmts {
         match stmt {
-            Stmt::On { platform: p, body, .. } => {
+            Stmt::On {
+                platform: p, body, ..
+            } => {
                 // Blocks for other platforms are dropped here rather than
                 // emitted and skipped, so the plan a user sees is the plan that
                 // will run on their machine.
@@ -120,8 +147,19 @@ fn lower(flow: &Flow, stmts: &[Stmt], platform: &str, bound: &mut Vec<String>, o
                     &format!("continue only if {}", cond.render()),
                     json_obj([
                         ("left", encode(&cond.left, bound)),
-                        ("op", cond.op.map(|o| Json::Str(o.as_str().to_string())).unwrap_or(Json::Null)),
-                        ("right", cond.right.as_ref().map(|r| encode(r, bound)).unwrap_or(Json::Null)),
+                        (
+                            "op",
+                            cond.op
+                                .map(|o| Json::Str(o.as_str().to_string()))
+                                .unwrap_or(Json::Null),
+                        ),
+                        (
+                            "right",
+                            cond.right
+                                .as_ref()
+                                .map(|r| encode(r, bound))
+                                .unwrap_or(Json::Null),
+                        ),
                         ("line", (*line as u64).into()),
                     ]),
                 ));
@@ -152,7 +190,13 @@ fn lower(flow: &Flow, stmts: &[Stmt], platform: &str, bound: &mut Vec<String>, o
     }
 }
 
-fn lower_call(flow: &Flow, call: &ast::Call, platform: &str, bound: &[String], index: usize) -> Step {
+fn lower_call(
+    flow: &Flow,
+    call: &ast::Call,
+    platform: &str,
+    bound: &[String],
+    index: usize,
+) -> Step {
     let id = format!("s{}", index + 1);
 
     // A foreign tool becomes a governed shell.exec rather than a special case.
@@ -181,8 +225,11 @@ fn lower_call(flow: &Flow, call: &ast::Call, platform: &str, bound: &[String], i
         .and_then(|v| v.literal())
         .and_then(|j| j.as_str().map(String::from))
         .unwrap_or_else(|| "*".to_string());
-    let capability =
-        if scope == "*" { call.target.clone() } else { format!("{}:{}", call.target, scope) };
+    let capability = if scope == "*" {
+        call.target.clone()
+    } else {
+        format!("{}:{}", call.target, scope)
+    };
 
     let mut args = Json::obj();
     for (k, v) in &call.args {
@@ -193,8 +240,11 @@ fn lower_call(flow: &Flow, call: &ast::Call, platform: &str, bound: &[String], i
     let summary = if call.args.is_empty() {
         call.target.clone()
     } else {
-        let rendered: Vec<String> =
-            call.args.iter().map(|(k, v)| format!("{}: {}", k, v.render())).collect();
+        let rendered: Vec<String> = call
+            .args
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v.render()))
+            .collect();
         format!("{} {}", call.target, rendered.join(", "))
     };
     Step::new(&id, &capability, &handler, &summary, args)
@@ -243,8 +293,12 @@ pub fn resolve_args(args: &Json, env: &Env) -> Result<Json, String> {
     match args {
         Json::Obj(map) => {
             if let Some(Json::Str(r)) = map.get(REF_KEY) {
-                return lookup(env, r)
-                    .ok_or_else(|| format!("`{}` is not available — the step that produces it did not run", r));
+                return lookup(env, r).ok_or_else(|| {
+                    format!(
+                        "`{}` is not available — the step that produces it did not run",
+                        r
+                    )
+                });
             }
             if let Some(Json::Arr(parts)) = map.get(FMT_KEY) {
                 let mut out = String::new();
@@ -252,7 +306,8 @@ pub fn resolve_args(args: &Json, env: &Env) -> Result<Json, String> {
                     if let Some(l) = p.get("lit").and_then(|v| v.as_str()) {
                         out.push_str(l);
                     } else if let Some(r) = p.get("ref").and_then(|v| v.as_str()) {
-                        let v = lookup(env, r).ok_or_else(|| format!("`{}` is not available", r))?;
+                        let v =
+                            lookup(env, r).ok_or_else(|| format!("`{}` is not available", r))?;
                         out.push_str(&match v {
                             Json::Str(s) => s,
                             other => other.to_string(),
@@ -291,8 +346,11 @@ pub mod grammar {
     }
 
     /// Well-known folders, so "downloads" resolves without a model.
-    pub fn folder(word: &str, home: &PathBuf) -> Option<PathBuf> {
-        let w = word.trim().trim_end_matches(&['.', '?', '!'][..]).to_ascii_lowercase();
+    pub fn folder(word: &str, home: &Path) -> Option<PathBuf> {
+        let w = word
+            .trim()
+            .trim_end_matches(&['.', '?', '!'][..])
+            .to_ascii_lowercase();
         let name = match w.as_str() {
             "downloads" | "download" => "Downloads",
             "documents" | "docs" | "document" => "Documents",
@@ -300,7 +358,7 @@ pub mod grammar {
             "videos" | "movies" | "video" | "films" => "Videos",
             "pictures" | "photos" | "images" | "pics" => "Pictures",
             "desktop" => "Desktop",
-            "home" => return Some(home.clone()),
+            "home" => return Some(home.to_path_buf()),
             "trash" | "bin" => return Some(nous_core::ipc::state_dir().join("trash")),
             _ => return None,
         };
@@ -352,7 +410,7 @@ pub mod grammar {
         Step::new(&format!("s{}", n + 1), cap, handler, summary, args)
     }
 
-    fn p(path: &PathBuf) -> Json {
+    fn p(path: &Path) -> Json {
         Json::Str(path.to_string_lossy().to_string())
     }
 
@@ -373,7 +431,11 @@ pub mod grammar {
         if words.is_empty() {
             return None;
         }
-        let has = |w: &str| words.iter().any(|x| x.trim_end_matches(&['.', '?', '!', ','][..]) == w);
+        let has = |w: &str| {
+            words
+                .iter()
+                .any(|x| x.trim_end_matches(&['.', '?', '!', ','][..]) == w)
+        };
         let any = |ws: &[&str]| ws.iter().any(|w| has(w));
         // An explicit path in the words wins; otherwise the folder the user is
         // looking at stands in for one.
@@ -382,8 +444,11 @@ pub mod grammar {
         // --- what you have selected ----------------------------------------
         // "open these", "delete this", "tidy these" -- the file manager already
         // told us what they are, so there is nothing to guess at.
-        if !ctx.context.paths.is_empty() {
-            if any(&["copy"]) && any(&["path", "paths", "name", "names"]) {
+        if !ctx.context.paths.is_empty()
+            && any(&["copy"])
+            && any(&["path", "paths", "name", "names"])
+        {
+            {
                 let joined = ctx
                     .context
                     .paths
@@ -393,7 +458,13 @@ pub mod grammar {
                     .join("\n");
                 let n = ctx.context.paths.len();
                 return Some((
-                    vec![step(0, "desk.copy", "desk", &format!("copy {} path(s)", n), json_obj([("text", joined.into())]))],
+                    vec![step(
+                        0,
+                        "desk.copy",
+                        "desk",
+                        &format!("copy {} path(s)", n),
+                        json_obj([("text", joined.into())]),
+                    )],
                     0.9,
                 ));
             }
@@ -418,7 +489,10 @@ pub mod grammar {
                             i,
                             &format!("desk.open:{}", p.display()),
                             "desk",
-                            &format!("open {}", p.file_name().and_then(|f| f.to_str()).unwrap_or("?")),
+                            &format!(
+                                "open {}",
+                                p.file_name().and_then(|f| f.to_str()).unwrap_or("?")
+                            ),
                             json_obj([("path", self::p(p))]),
                         )
                     })
@@ -436,7 +510,10 @@ pub mod grammar {
                             i,
                             &format!("fs.delete:{}", p.display()),
                             "fs",
-                            &format!("move {} to the trash store", p.file_name().and_then(|f| f.to_str()).unwrap_or("?")),
+                            &format!(
+                                "move {} to the trash store",
+                                p.file_name().and_then(|f| f.to_str()).unwrap_or("?")
+                            ),
                             json_obj([("path", self::p(p))]),
                         )
                     })
@@ -450,16 +527,30 @@ pub mod grammar {
                     .context
                     .paths
                     .iter()
-                    .filter_map(|p| if p.is_dir() { Some(p.clone()) } else { p.parent().map(|d| d.to_path_buf()) })
+                    .filter_map(|p| {
+                        if p.is_dir() {
+                            Some(p.clone())
+                        } else {
+                            p.parent().map(|d| d.to_path_buf())
+                        }
+                    })
                     .collect();
                 dirs.sort();
                 dirs.dedup();
-                let roots: Vec<Json> =
-                    dirs.iter().map(|d| Json::Str(d.to_string_lossy().to_string())).collect();
+                let roots: Vec<Json> = dirs
+                    .iter()
+                    .map(|d| Json::Str(d.to_string_lossy().to_string()))
+                    .collect();
                 let args = json_obj([("roots", Json::Arr(roots))]);
                 return Some((
                     vec![
-                        step(0, "curate.scan", "curate", "look for things to tidy", args.clone()),
+                        step(
+                            0,
+                            "curate.scan",
+                            "curate",
+                            "look for things to tidy",
+                            args.clone(),
+                        ),
                         step(1, "curate.propose", "curate", "work out what to move", args),
                     ],
                     0.87,
@@ -471,7 +562,13 @@ pub mod grammar {
         // --- the ledger ----------------------------------------------------
         if any(&["undo", "revert", "unde"]) {
             return Some((
-                vec![step(0, "journal.revert", "journal", "undo the last action", Json::obj())],
+                vec![step(
+                    0,
+                    "journal.revert",
+                    "journal",
+                    "undo the last action",
+                    Json::obj(),
+                )],
                 0.95,
             ));
         }
@@ -479,13 +576,27 @@ pub mod grammar {
             || any(&["history", "ledger", "journal"])
         {
             return Some((
-                vec![step(0, "journal.read", "journal", "show recent activity", json_obj([("limit", 25u64.into())]))],
+                vec![step(
+                    0,
+                    "journal.read",
+                    "journal",
+                    "show recent activity",
+                    json_obj([("limit", 25u64.into())]),
+                )],
                 0.85,
             ));
         }
 
         // --- tidying -------------------------------------------------------
-        if any(&["tidy", "clean", "cleanup", "organise", "organize", "declutter", "sort"]) {
+        if any(&[
+            "tidy",
+            "clean",
+            "cleanup",
+            "organise",
+            "organize",
+            "declutter",
+            "sort",
+        ]) {
             let roots = match &path {
                 Some(p) => Json::Arr(vec![self::p(p)]),
                 None => Json::Null,
@@ -496,7 +607,13 @@ pub mod grammar {
             }
             return Some((
                 vec![
-                    step(0, "curate.scan", "curate", "look for things to tidy", args.clone()),
+                    step(
+                        0,
+                        "curate.scan",
+                        "curate",
+                        "look for things to tidy",
+                        args.clone(),
+                    ),
                     step(1, "curate.propose", "curate", "work out what to move", args),
                 ],
                 0.88,
@@ -520,23 +637,55 @@ pub mod grammar {
             return Some((
                 vec![
                     step(0, "sys.metrics", "sys", "check disk usage", Json::obj()),
-                    step(1, "curate.scan", "curate", "look for space to reclaim", Json::obj()),
+                    step(
+                        1,
+                        "curate.scan",
+                        "curate",
+                        "look for space to reclaim",
+                        Json::obj(),
+                    ),
                 ],
                 0.86,
             ));
         }
-        if any(&["memory", "ram", "cpu", "load", "slow", "performance", "temperature"]) {
+        if any(&[
+            "memory",
+            "ram",
+            "cpu",
+            "load",
+            "slow",
+            "performance",
+            "temperature",
+        ]) {
             return Some((
                 vec![
-                    step(0, "sys.metrics", "sys", "sample machine metrics", Json::obj()),
-                    step(1, "proc.list", "proc", "list the busiest processes", json_obj([("limit", 10u64.into())])),
+                    step(
+                        0,
+                        "sys.metrics",
+                        "sys",
+                        "sample machine metrics",
+                        Json::obj(),
+                    ),
+                    step(
+                        1,
+                        "proc.list",
+                        "proc",
+                        "list the busiest processes",
+                        json_obj([("limit", 10u64.into())]),
+                    ),
                 ],
                 0.85,
             ));
         }
         if any(&["running", "processes", "process"]) {
             return Some((
-                vec![step(0, "proc.list", "proc", "list running processes", json_obj([("limit", 25u64.into())]))],
+                vec![step(
+                    0,
+                    "proc.list",
+                    "proc",
+                    "list running processes",
+                    json_obj([("limit", 25u64.into())]),
+                )],
                 0.82,
             ));
         }
@@ -555,7 +704,13 @@ pub mod grammar {
                     args.set("level", Json::Num(0.0));
                 }
                 return Some((
-                    vec![step(0, "media.control", "media", &format!("{} playback", action), args)],
+                    vec![step(
+                        0,
+                        "media.control",
+                        "media",
+                        &format!("{} playback", action),
+                        args,
+                    )],
                     0.92,
                 ));
             }
@@ -568,7 +723,13 @@ pub mod grammar {
             if !query.is_empty() {
                 return Some((
                     vec![
-                        step(0, "media.search", "media", &format!("find '{}'", query), json_obj([("query", query.clone().into()), ("limit", 1u64.into())])),
+                        step(
+                            0,
+                            "media.search",
+                            "media",
+                            &format!("find '{}'", query),
+                            json_obj([("query", query.clone().into()), ("limit", 1u64.into())]),
+                        ),
                         step(1, "media.play", "media", "start playback", Json::obj()),
                     ],
                     0.8,
@@ -585,7 +746,13 @@ pub mod grammar {
                 .to_string();
             if !query.is_empty() {
                 return Some((
-                    vec![step(0, "fs.search", "fs", &format!("search for '{}'", query), json_obj([("query", query.into())]))],
+                    vec![step(
+                        0,
+                        "fs.search",
+                        "fs",
+                        &format!("search for '{}'", query),
+                        json_obj([("query", query.into())]),
+                    )],
                     0.8,
                 ));
             }
@@ -593,7 +760,13 @@ pub mod grammar {
         if any(&["show", "list", "open", "browse", "ls"]) {
             if let Some(dir) = path {
                 return Some((
-                    vec![step(0, &format!("fs.list:{}", dir.display()), "fs", &format!("list {}", dir.display()), json_obj([("path", self::p(&dir))]))],
+                    vec![step(
+                        0,
+                        &format!("fs.list:{}", dir.display()),
+                        "fs",
+                        &format!("list {}", dir.display()),
+                        json_obj([("path", self::p(&dir))]),
+                    )],
                     0.9,
                 ));
             }
@@ -604,27 +777,53 @@ pub mod grammar {
         // folder, and only an utterance that names no path falls through here.
         if any(&["screenshot", "screengrab", "capture"]) {
             return Some((
-                vec![step(0, "desk.screenshot", "desk", "capture the screen", Json::obj())],
+                vec![step(
+                    0,
+                    "desk.screenshot",
+                    "desk",
+                    "capture the screen",
+                    Json::obj(),
+                )],
                 0.9,
             ));
         }
         if has("lock") && words.len() <= 4 {
             return Some((
-                vec![step(0, "desk.session", "desk", "lock the screen", json_obj([("action", "lock".into())]))],
+                vec![step(
+                    0,
+                    "desk.session",
+                    "desk",
+                    "lock the screen",
+                    json_obj([("action", "lock".into())]),
+                )],
                 0.9,
             ));
         }
         if any(&["clipboard"]) {
             return Some((
-                vec![step(0, "desk.clipboard", "desk", "read the clipboard", Json::obj())],
+                vec![step(
+                    0,
+                    "desk.clipboard",
+                    "desk",
+                    "read the clipboard",
+                    Json::obj(),
+                )],
                 0.85,
             ));
         }
-        if (any(&["what", "which"]) && any(&["open", "running"]) && any(&["windows", "window", "apps"]))
+        if (any(&["what", "which"])
+            && any(&["open", "running"])
+            && any(&["windows", "window", "apps"]))
             || (any(&["windows"]) && words.len() <= 3)
         {
             return Some((
-                vec![step(0, "desk.windows", "desk", "list open windows", Json::obj())],
+                vec![step(
+                    0,
+                    "desk.windows",
+                    "desk",
+                    "list open windows",
+                    Json::obj(),
+                )],
                 0.85,
             ));
         }
@@ -632,7 +831,13 @@ pub mod grammar {
             let target = tail_after(&words, &["close", "quit"]).trim().to_string();
             if !target.is_empty() {
                 return Some((
-                    vec![step(0, "desk.close", "desk", &format!("close {}", target), json_obj([("window", target.into())]))],
+                    vec![step(
+                        0,
+                        "desk.close",
+                        "desk",
+                        &format!("close {}", target),
+                        json_obj([("window", target.into())]),
+                    )],
                     0.85,
                 ));
             }
@@ -644,7 +849,13 @@ pub mod grammar {
                 .to_string();
             if !target.is_empty() {
                 return Some((
-                    vec![step(0, "desk.focus", "desk", &format!("switch to {}", target), json_obj([("window", target.into())]))],
+                    vec![step(
+                        0,
+                        "desk.focus",
+                        "desk",
+                        &format!("switch to {}", target),
+                        json_obj([("window", target.into())]),
+                    )],
                     0.85,
                 ));
             }
@@ -658,7 +869,13 @@ pub mod grammar {
             // "run the backup" does not become a launch attempt.
             if !name.is_empty() && app_exists(&name) {
                 return Some((
-                    vec![step(0, &format!("desk.launch:{}", name), "desk", &format!("launch {}", name), json_obj([("name", name.into())]))],
+                    vec![step(
+                        0,
+                        &format!("desk.launch:{}", name),
+                        "desk",
+                        &format!("launch {}", name),
+                        json_obj([("name", name.into())]),
+                    )],
                     0.85,
                 ));
             }
@@ -669,16 +886,30 @@ pub mod grammar {
             let name = tail_after(&words, &["install"]).trim().to_string();
             if !name.is_empty() {
                 return Some((
-                    vec![step(0, &format!("pkg.install:{}", name), "pkg", &format!("install {}", name), json_obj([("name", name.into())]))],
+                    vec![step(
+                        0,
+                        &format!("pkg.install:{}", name),
+                        "pkg",
+                        &format!("install {}", name),
+                        json_obj([("name", name.into())]),
+                    )],
                     0.85,
                 ));
             }
         }
         if any(&["restart", "reboot"]) && any(&["service", "daemon", "unit"]) {
-            let name = tail_after(&words, &["service", "daemon", "unit"]).trim().to_string();
+            let name = tail_after(&words, &["service", "daemon", "unit"])
+                .trim()
+                .to_string();
             if !name.is_empty() {
                 return Some((
-                    vec![step(0, &format!("svc.restart:{}", name), "svc", &format!("restart {}", name), json_obj([("unit", name.into())]))],
+                    vec![step(
+                        0,
+                        &format!("svc.restart:{}", name),
+                        "svc",
+                        &format!("restart {}", name),
+                        json_obj([("unit", name.into())]),
+                    )],
                     0.85,
                 ));
             }
@@ -700,7 +931,9 @@ impl Resolver {
     pub fn from_config(cfg: &nous_core::Config) -> Resolver {
         Resolver {
             grammar_threshold: cfg.f64_or("plan.grammar_threshold", 0.72),
-            home: std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/")),
+            home: std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/")),
             max_steps: cfg.u64_or("plan.max_steps", 12) as usize,
         }
     }
@@ -718,7 +951,10 @@ impl Resolver {
         router: &Router,
         context: &Context,
     ) -> Plan {
-        let ctx = grammar::Ctx { home: self.home.clone(), context: context.clone() };
+        let ctx = grammar::Ctx {
+            home: self.home.clone(),
+            context: context.clone(),
+        };
         if let Some((steps, confidence)) = grammar::resolve(utterance, &ctx) {
             if confidence >= self.grammar_threshold {
                 return Plan {
@@ -787,9 +1023,15 @@ impl Resolver {
         // here, before anything runs.
         let manifest = glyph::check(flow, ast::current_platform());
         if !manifest.is_valid() {
-            let errs: Vec<String> =
-                manifest.errors().iter().map(|d| d.message.clone()).collect();
-            return Err(format!("the model's plan did not check out: {}", errs.join("; ")));
+            let errs: Vec<String> = manifest
+                .errors()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect();
+            return Err(format!(
+                "the model's plan did not check out: {}",
+                errs.join("; ")
+            ));
         }
 
         let mut steps = compile_flow(flow, ast::current_platform());
@@ -833,7 +1075,12 @@ pub fn system_prompt() -> String {
         .iter()
         // Capabilities no flow should ever reach for are omitted rather than
         // listed and forbidden -- do not put the idea in the model's head.
-        .filter(|c| !matches!(**c, "policy.amend" | "secret.read" | "user.admin" | "sys.firmware"))
+        .filter(|c| {
+            !matches!(
+                **c,
+                "policy.amend" | "secret.read" | "user.admin" | "sys.firmware"
+            )
+        })
         .map(|c| format!("  {}", c))
         .collect::<Vec<_>>()
         .join("\n");
@@ -887,11 +1134,17 @@ mod tests {
     use super::*;
 
     fn ctx() -> Ctx {
-        Ctx { home: PathBuf::from("/home/joey"), context: Context::default() }
+        Ctx {
+            home: PathBuf::from("/home/joey"),
+            context: Context::default(),
+        }
     }
 
     fn ctx_with(context: Context) -> Ctx {
-        Ctx { home: PathBuf::from("/home/joey"), context }
+        Ctx {
+            home: PathBuf::from("/home/joey"),
+            context,
+        }
     }
 
     fn resolve(u: &str) -> Option<(Vec<Step>, f64)> {
@@ -916,7 +1169,13 @@ mod tests {
             ("docs", "Documents"),
         ] {
             let got = grammar::folder(word, &PathBuf::from("/home/joey")).unwrap();
-            assert!(got.ends_with(dir), "{} should map to {}, got {:?}", word, dir, got);
+            assert!(
+                got.ends_with(dir),
+                "{} should map to {}, got {:?}",
+                word,
+                dir,
+                got
+            );
         }
         assert!(grammar::folder("quux", &PathBuf::from("/home/joey")).is_none());
     }
@@ -934,7 +1193,9 @@ mod tests {
         assert_eq!(steps[0].capability, "curate.scan");
         assert_eq!(steps[1].capability, "curate.propose");
         // Crucially, it does not apply anything on its own.
-        assert!(!steps.iter().any(|s| s.capability.starts_with("curate.apply")));
+        assert!(!steps
+            .iter()
+            .any(|s| s.capability.starts_with("curate.apply")));
     }
 
     #[test]
@@ -989,7 +1250,11 @@ mod tests {
         std::fs::write(&a, b"x").unwrap();
         std::fs::write(&b, b"x").unwrap();
 
-        let context = Context { focus: None, paths: vec![a.clone(), b.clone()], cwd: None };
+        let context = Context {
+            focus: None,
+            paths: vec![a.clone(), b.clone()],
+            cwd: None,
+        };
         let c = ctx_with(context);
 
         let (steps, _) = grammar::resolve("open these", &c).unwrap();
@@ -1005,7 +1270,12 @@ mod tests {
         // Several files in one folder must not scan that folder twice.
         let (steps, _) = grammar::resolve("tidy these", &c).unwrap();
         let roots = steps[0].args.arr_or_empty("roots");
-        assert_eq!(roots.len(), 1, "shared parents should collapse: {:?}", roots);
+        assert_eq!(
+            roots.len(),
+            1,
+            "shared parents should collapse: {:?}",
+            roots
+        );
 
         let (steps, _) = grammar::resolve("copy the paths", &c).unwrap();
         assert_eq!(steps[0].capability, "desk.copy");
@@ -1030,15 +1300,26 @@ mod tests {
             cwd: None,
         };
         let (steps, _) = grammar::resolve("open my downloads", &ctx_with(context)).unwrap();
-        assert!(steps[0].capability.starts_with("fs.list:"), "{}", steps[0].capability);
+        assert!(
+            steps[0].capability.starts_with("fs.list:"),
+            "{}",
+            steps[0].capability
+        );
     }
 
     #[test]
     fn the_current_folder_stands_in_for_an_unnamed_path() {
-        let context = Context { focus: None, paths: vec![], cwd: Some(PathBuf::from("/srv/work")) };
+        let context = Context {
+            focus: None,
+            paths: vec![],
+            cwd: Some(PathBuf::from("/srv/work")),
+        };
         let (steps, _) = grammar::resolve("tidy up", &ctx_with(context)).unwrap();
         assert_eq!(steps[0].capability, "curate.scan");
-        assert_eq!(steps[0].args.arr_or_empty("roots")[0].as_str(), Some("/srv/work"));
+        assert_eq!(
+            steps[0].args.arr_or_empty("roots")[0].as_str(),
+            Some("/srv/work")
+        );
     }
 
     #[test]
@@ -1081,7 +1362,11 @@ mod tests {
         // "open my downloads" must remain a folder listing even though the
         // launch rule also matches the word "open".
         let (steps, _) = resolve("open my downloads").unwrap();
-        assert!(steps[0].capability.starts_with("fs.list:"), "{}", steps[0].capability);
+        assert!(
+            steps[0].capability.starts_with("fs.list:"),
+            "{}",
+            steps[0].capability
+        );
     }
 
     #[test]
@@ -1120,7 +1405,10 @@ mod tests {
         assert_eq!(steps[2].capability, "flow.ask");
         // The reference is deferred, not resolved at compile time.
         assert_eq!(
-            steps[3].args.path(&format!("steps.{}", REF_KEY)).and_then(|v| v.as_str()),
+            steps[3]
+                .args
+                .path(&format!("steps.{}", REF_KEY))
+                .and_then(|v| v.as_str()),
             Some("plan.steps")
         );
     }
@@ -1130,7 +1418,10 @@ mod tests {
         let f = flow_of("flow t { plan = curate.propose\n curate.apply steps: plan.steps }");
         let steps = compile_flow(&f, "linux");
         let mut env = Env::new();
-        env.insert("plan".into(), json_obj([("steps", Json::Arr(vec![Json::Str("a".into())]))]));
+        env.insert(
+            "plan".into(),
+            json_obj([("steps", Json::Arr(vec![Json::Str("a".into())]))]),
+        );
 
         let resolved = resolve_args(&steps[1].args, &env).unwrap();
         assert_eq!(resolved.arr_or_empty("steps").len(), 1);
@@ -1147,8 +1438,10 @@ mod tests {
 
     #[test]
     fn interpolated_prompts_are_filled_in_at_run_time() {
-        let f = flow_of(r#"flow t { plan = curate.propose
-                                    ask "Move ${plan.count} files?" }"#);
+        let f = flow_of(
+            r#"flow t { plan = curate.propose
+                                    ask "Move ${plan.count} files?" }"#,
+        );
         let steps = compile_flow(&f, "linux");
         let mut env = Env::new();
         env.insert("plan".into(), json_obj([("count", 7u64.into())]));
@@ -1187,7 +1480,11 @@ mod tests {
         let f = flow_of("flow t { curate.propose kinds: [duplicate] }");
         let steps = compile_flow(&f, "linux");
         let kinds = steps[0].args.arr_or_empty("kinds");
-        assert_eq!(kinds[0].as_str(), Some("duplicate"), "a symbol, not a reference");
+        assert_eq!(
+            kinds[0].as_str(),
+            Some("duplicate"),
+            "a symbol, not a reference"
+        );
     }
 
     // --- model output handling ---------------------------------------------
@@ -1209,7 +1506,10 @@ mod tests {
         let p = system_prompt();
         assert!(p.contains("curate.propose"));
         assert!(p.contains("fs.write"));
-        assert!(!p.contains("secret.read"), "do not name it to the model at all");
+        assert!(
+            !p.contains("secret.read"),
+            "do not name it to the model at all"
+        );
         assert!(!p.contains("policy.amend"));
     }
 

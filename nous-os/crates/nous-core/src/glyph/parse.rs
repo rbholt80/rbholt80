@@ -35,7 +35,12 @@ impl Parser {
     }
 
     fn err<T>(&self, msg: &str) -> Result<T, String> {
-        Err(format!("line {}: {} (found {})", self.line(), msg, self.peek()))
+        Err(format!(
+            "line {}: {} (found {})",
+            self.line(),
+            msg,
+            self.peek()
+        ))
     }
 
     fn expect_sym(&mut self, s: Sym) -> Result<(), String> {
@@ -102,7 +107,10 @@ impl Parser {
         };
         while *self.peek() != Tok::Sym(Sym::RBrace) {
             if *self.peek() == Tok::Eof {
-                return Err(format!("line {}: this flow is never closed with `}}`", line));
+                return Err(format!(
+                    "line {}: this flow is never closed with `}}`",
+                    line
+                ));
             }
             // `meta` and `use foreign` are flow-level declarations, not steps.
             if self.at_kw("meta") {
@@ -143,25 +151,39 @@ impl Parser {
             .and_then(|(_, v)| v.literal())
             .and_then(|j| j.as_str().map(String::from))
             .ok_or_else(|| {
-                format!("line {}: `use foreign {}` needs a literal `cmd:`", line, name)
+                format!(
+                    "line {}: `use foreign {}` needs a literal `cmd:`",
+                    line, name
+                )
             })?;
         let platforms = match args.iter().find(|(k, _)| k == "on").map(|(_, v)| v) {
             Some(Value::List(items)) => items.iter().map(|i| i.render()).collect(),
             Some(other) => vec![other.render()],
             None => Vec::new(),
         };
-        Ok(Foreign { name, cmd, platforms, line })
+        Ok(Foreign {
+            name,
+            cmd,
+            platforms,
+            line,
+        })
     }
 
     fn stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
         if self.at_kw("gate") {
             self.bump();
-            return Ok(Stmt::Gate { cond: self.cond()?, line });
+            return Ok(Stmt::Gate {
+                cond: self.cond()?,
+                line,
+            });
         }
         if self.at_kw("ask") {
             self.bump();
-            return Ok(Stmt::Ask { prompt: self.value()?, line });
+            return Ok(Stmt::Ask {
+                prompt: self.value()?,
+                line,
+            });
         }
         if self.at_kw("on") {
             self.bump();
@@ -175,7 +197,11 @@ impl Parser {
                 body.push(self.stmt()?);
             }
             self.expect_sym(Sym::RBrace)?;
-            return Ok(Stmt::On { platform, body, line });
+            return Ok(Stmt::On {
+                platform,
+                body,
+                line,
+            });
         }
 
         // `name = call` or a bare call.
@@ -186,7 +212,11 @@ impl Parser {
             return Ok(Stmt::Bind { name: head, call });
         }
         let args = self.arglist()?;
-        Ok(Stmt::Effect(Call { target: head, args, line }))
+        Ok(Stmt::Effect(Call {
+            target: head,
+            args,
+            line,
+        }))
     }
 
     fn call(&mut self) -> Result<Call, String> {
@@ -205,8 +235,8 @@ impl Parser {
                 self.bump();
                 continue;
             }
-            let is_arg = matches!(self.peek(), Tok::Ident(_))
-                && *self.peek_at(1) == Tok::Sym(Sym::Colon);
+            let is_arg =
+                matches!(self.peek(), Tok::Ident(_)) && *self.peek_at(1) == Tok::Sym(Sym::Colon);
             if !is_arg {
                 return Ok(out);
             }
@@ -214,7 +244,11 @@ impl Parser {
             self.expect_sym(Sym::Colon)?;
             let value = self.value()?;
             if out.iter().any(|(k, _): &(String, Value)| k == &key) {
-                return Err(format!("line {}: argument `{}` is given twice", self.line(), key));
+                return Err(format!(
+                    "line {}: argument `{}` is given twice",
+                    self.line(),
+                    key
+                ));
             }
             out.push((key, value));
         }
@@ -280,9 +314,17 @@ impl Parser {
             Some(o) => {
                 self.bump();
                 let right = self.value()?;
-                Ok(Cond { left, op: Some(o), right: Some(right) })
+                Ok(Cond {
+                    left,
+                    op: Some(o),
+                    right: Some(right),
+                })
             }
-            None => Ok(Cond { left, op: None, right: None }),
+            None => Ok(Cond {
+                left,
+                op: None,
+                right: None,
+            }),
         }
     }
 }
@@ -317,7 +359,10 @@ mod tests {
     fn parses_meta_and_description() {
         let p = parse(r#"flow t { meta description "Tidy the Downloads folder" }"#).unwrap();
         assert_eq!(p.flows[0].description(), "Tidy the Downloads folder");
-        assert!(p.flows[0].stmts.is_empty(), "meta is a declaration, not a step");
+        assert!(
+            p.flows[0].stmts.is_empty(),
+            "meta is a declaration, not a step"
+        );
     }
 
     #[test]
@@ -373,20 +418,30 @@ mod tests {
         .unwrap();
         let f = &p.flows[0];
         assert_eq!(f.foreigns["handbrake"].len(), 2);
-        assert_eq!(f.foreign_for("handbrake", "windows").unwrap().cmd, "HandBrakeCLI.exe");
-        assert_eq!(f.foreign_for("handbrake", "linux").unwrap().cmd, "HandBrakeCLI");
+        assert_eq!(
+            f.foreign_for("handbrake", "windows").unwrap().cmd,
+            "HandBrakeCLI.exe"
+        );
+        assert_eq!(
+            f.foreign_for("handbrake", "linux").unwrap().cmd,
+            "HandBrakeCLI"
+        );
         assert!(f.foreign_for("handbrake", "plan9").is_none());
     }
 
     #[test]
     fn foreign_without_a_platform_is_the_fallback() {
         let p = parse(r#"flow t { use foreign ffmpeg cmd: "ffmpeg" }"#).unwrap();
-        assert_eq!(p.flows[0].foreign_for("ffmpeg", "windows").unwrap().cmd, "ffmpeg");
+        assert_eq!(
+            p.flows[0].foreign_for("ffmpeg", "windows").unwrap().cmd,
+            "ffmpeg"
+        );
     }
 
     #[test]
     fn lists_and_units_parse_as_values() {
-        let p = parse("flow t { curate.propose kinds: [duplicate, screenshots] min: 1GB }").unwrap();
+        let p =
+            parse("flow t { curate.propose kinds: [duplicate, screenshots] min: 1GB }").unwrap();
         match &p.flows[0].stmts[0] {
             Stmt::Effect(c) => {
                 assert_eq!(

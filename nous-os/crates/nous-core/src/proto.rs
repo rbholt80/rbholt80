@@ -84,7 +84,11 @@ pub struct Request {
 
 impl Request {
     pub fn new(id: &str, method: &str, params: Json) -> Request {
-        Request { id: id.to_string(), method: method.to_string(), params }
+        Request {
+            id: id.to_string(),
+            method: method.to_string(),
+            params,
+        }
     }
 
     pub fn to_json(&self) -> Json {
@@ -100,9 +104,15 @@ impl Request {
     pub fn from_json(v: &Json) -> Result<Request, String> {
         let ver = v.get("v").and_then(|x| x.as_u64()).unwrap_or(PROTO_VERSION);
         if ver != PROTO_VERSION {
-            return Err(format!("unsupported protocol version {} (want {})", ver, PROTO_VERSION));
+            return Err(format!(
+                "unsupported protocol version {} (want {})",
+                ver, PROTO_VERSION
+            ));
         }
-        let method = v.get("method").and_then(|m| m.as_str()).ok_or("request has no method")?;
+        let method = v
+            .get("method")
+            .and_then(|m| m.as_str())
+            .ok_or("request has no method")?;
         Ok(Request {
             id: v.str_or("id", "").to_string(),
             method: method.to_string(),
@@ -119,19 +129,33 @@ impl Request {
     }
 
     pub fn param_u64(&self, key: &str, default: u64) -> u64 {
-        self.params.get(key).and_then(|v| v.as_u64()).unwrap_or(default)
+        self.params
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default)
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Response {
-    Ok { id: String, result: Json },
-    Err { id: String, code: String, message: String, data: Json },
+    Ok {
+        id: String,
+        result: Json,
+    },
+    Err {
+        id: String,
+        code: String,
+        message: String,
+        data: Json,
+    },
 }
 
 impl Response {
     pub fn ok(id: &str, result: Json) -> Response {
-        Response::Ok { id: id.to_string(), result }
+        Response::Ok {
+            id: id.to_string(),
+            result,
+        }
     }
 
     pub fn err(id: &str, code: &str, message: impl Into<String>) -> Response {
@@ -144,7 +168,12 @@ impl Response {
     }
 
     pub fn err_with(id: &str, code: &str, message: impl Into<String>, data: Json) -> Response {
-        Response::Err { id: id.to_string(), code: code.to_string(), message: message.into(), data }
+        Response::Err {
+            id: id.to_string(),
+            code: code.to_string(),
+            message: message.into(),
+            data,
+        }
     }
 
     pub fn to_json(&self) -> Json {
@@ -156,7 +185,12 @@ impl Response {
                 ("ok", true.into()),
                 ("result", result.clone()),
             ]),
-            Response::Err { id, code, message, data } => json_obj([
+            Response::Err {
+                id,
+                code,
+                message,
+                data,
+            } => json_obj([
                 ("v", PROTO_VERSION.into()),
                 ("kind", "res".into()),
                 ("id", id.clone().into()),
@@ -176,7 +210,10 @@ impl Response {
     pub fn from_json(v: &Json) -> Result<Response, String> {
         let id = v.str_or("id", "").to_string();
         if v.bool_or("ok", false) {
-            Ok(Response::Ok { id, result: v.get("result").cloned().unwrap_or(Json::Null) })
+            Ok(Response::Ok {
+                id,
+                result: v.get("result").cloned().unwrap_or(Json::Null),
+            })
         } else {
             let e = v.get("error").cloned().unwrap_or_else(Json::obj);
             Ok(Response::Err {
@@ -215,7 +252,10 @@ pub struct Event {
 
 impl Event {
     pub fn new(topic: &str, data: Json) -> Event {
-        Event { topic: topic.to_string(), data }
+        Event {
+            topic: topic.to_string(),
+            data,
+        }
     }
 
     pub fn to_json(&self) -> Json {
@@ -340,8 +380,17 @@ impl Plan {
             ("utterance", self.utterance.clone().into()),
             ("origin", self.origin.clone().into()),
             ("confidence", self.confidence.into()),
-            ("steps", Json::Arr(self.steps.iter().map(|s| s.to_json()).collect())),
-            ("clarification", self.clarification.clone().map(Json::Str).unwrap_or(Json::Null)),
+            (
+                "steps",
+                Json::Arr(self.steps.iter().map(|s| s.to_json()).collect()),
+            ),
+            (
+                "clarification",
+                self.clarification
+                    .clone()
+                    .map(Json::Str)
+                    .unwrap_or(Json::Null),
+            ),
         ])
     }
 
@@ -349,10 +398,17 @@ impl Plan {
         Plan {
             intent_id: v.str_or("intent_id", "").to_string(),
             utterance: v.str_or("utterance", "").to_string(),
-            steps: v.arr_or_empty("steps").iter().map(Step::from_json).collect(),
+            steps: v
+                .arr_or_empty("steps")
+                .iter()
+                .map(Step::from_json)
+                .collect(),
             origin: v.str_or("origin", "unknown").to_string(),
             confidence: v.f64_or("confidence", 0.0),
-            clarification: v.get("clarification").and_then(|c| c.as_str()).map(String::from),
+            clarification: v
+                .get("clarification")
+                .and_then(|c| c.as_str())
+                .map(String::from),
         }
     }
 }
@@ -364,7 +420,11 @@ mod tests {
 
     #[test]
     fn requests_round_trip() {
-        let r = Request::new("1", method::INTENT_SUBMIT, json_obj([("text", "hello".into())]));
+        let r = Request::new(
+            "1",
+            method::INTENT_SUBMIT,
+            json_obj([("text", "hello".into())]),
+        );
         let back = Request::from_json(&parse(&r.to_json().to_string()).unwrap()).unwrap();
         assert_eq!(back.method, method::INTENT_SUBMIT);
         assert_eq!(back.param_str("text"), Some("hello"));
@@ -435,7 +495,11 @@ mod tests {
     #[test]
     fn serialized_frames_never_contain_a_raw_newline() {
         // The transport is newline-delimited, so this is a framing invariant.
-        let r = Request::new("1", "ctx.note", json_obj([("text", "line one\nline two".into())]));
+        let r = Request::new(
+            "1",
+            "ctx.note",
+            json_obj([("text", "line one\nline two".into())]),
+        );
         let wire = r.to_json().to_string();
         assert!(!wire.contains('\n'), "frame must be a single line: {wire}");
         let back = Request::from_json(&parse(&wire).unwrap()).unwrap();

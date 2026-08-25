@@ -49,7 +49,15 @@ pub fn probe(path: &Path) -> Result<Json, String> {
     let p = path.to_string_lossy().to_string();
     let out = run(
         "ffprobe",
-        &["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", &p],
+        &[
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            &p,
+        ],
         Duration::from_secs(30),
     )?;
     out.require("ffprobe")?;
@@ -57,8 +65,12 @@ pub fn probe(path: &Path) -> Result<Json, String> {
 
     let format = raw.get("format").cloned().unwrap_or_else(Json::obj);
     let streams = raw.arr_or_empty("streams");
-    let video = streams.iter().find(|s| s.str_or("codec_type", "") == "video");
-    let audio = streams.iter().find(|s| s.str_or("codec_type", "") == "audio");
+    let video = streams
+        .iter()
+        .find(|s| s.str_or("codec_type", "") == "video");
+    let audio = streams
+        .iter()
+        .find(|s| s.str_or("codec_type", "") == "audio");
 
     let duration: f64 = format.str_or("duration", "0").parse().unwrap_or(0.0);
     let tags = format.get("tags").cloned().unwrap_or_else(Json::obj);
@@ -66,15 +78,46 @@ pub fn probe(path: &Path) -> Result<Json, String> {
     Ok(json_obj([
         ("path", p.into()),
         ("duration", duration.into()),
-        ("size", format.str_or("size", "0").parse::<f64>().unwrap_or(0.0).into()),
+        (
+            "size",
+            format
+                .str_or("size", "0")
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                .into(),
+        ),
         ("format", format.str_or("format_name", "").into()),
         ("has_video", video.is_some().into()),
         ("has_audio", audio.is_some().into()),
-        ("width", video.map(|v| v.f64_or("width", 0.0)).unwrap_or(0.0).into()),
-        ("height", video.map(|v| v.f64_or("height", 0.0)).unwrap_or(0.0).into()),
-        ("fps", video.map(|v| parse_rational(v.str_or("r_frame_rate", "0/1"))).unwrap_or(0.0).into()),
-        ("vcodec", video.map(|v| v.str_or("codec_name", "").to_string()).unwrap_or_default().into()),
-        ("acodec", audio.map(|a| a.str_or("codec_name", "").to_string()).unwrap_or_default().into()),
+        (
+            "width",
+            video.map(|v| v.f64_or("width", 0.0)).unwrap_or(0.0).into(),
+        ),
+        (
+            "height",
+            video.map(|v| v.f64_or("height", 0.0)).unwrap_or(0.0).into(),
+        ),
+        (
+            "fps",
+            video
+                .map(|v| parse_rational(v.str_or("r_frame_rate", "0/1")))
+                .unwrap_or(0.0)
+                .into(),
+        ),
+        (
+            "vcodec",
+            video
+                .map(|v| v.str_or("codec_name", "").to_string())
+                .unwrap_or_default()
+                .into(),
+        ),
+        (
+            "acodec",
+            audio
+                .map(|a| a.str_or("codec_name", "").to_string())
+                .unwrap_or_default()
+                .into(),
+        ),
         // Tag keys vary in case between containers; look for both spellings.
         ("title", tag(&tags, "title").into()),
         ("artist", tag(&tags, "artist").into()),
@@ -110,7 +153,10 @@ fn probe_step(step: &Step) -> Result<Effect, String> {
     let path = arg_path(step, "path")?;
     let info = probe(&path)?;
     let d = info.f64_or("duration", 0.0);
-    Ok(Effect::read_only(info, format!("probed {} ({})", path.display(), fmt_duration(d))))
+    Ok(Effect::read_only(
+        info,
+        format!("probed {} ({})", path.display(), fmt_duration(d)),
+    ))
 }
 
 pub fn fmt_duration(secs: f64) -> String {
@@ -131,7 +177,12 @@ fn library_path() -> PathBuf {
 fn index(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let roots: Vec<PathBuf> = if let Some(list) = step.args.get("roots") {
         list.as_arr()
-            .map(|a| a.iter().filter_map(|v| v.as_str()).map(nous_core::config::expand_tilde).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(nous_core::config::expand_tilde)
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         default_media_roots(ctx)
@@ -153,7 +204,10 @@ fn index(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         let md = std::fs::metadata(f).ok();
         let mut entry = json_obj([
             ("path", f.to_string_lossy().to_string().into()),
-            ("name", f.file_name().and_then(|s| s.to_str()).unwrap_or("").into()),
+            (
+                "name",
+                f.file_name().and_then(|s| s.to_str()).unwrap_or("").into(),
+            ),
             ("kind", kind.into()),
             ("size", md.as_ref().map(|m| m.len()).unwrap_or(0).into()),
             (
@@ -180,7 +234,10 @@ fn index(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     }
 
     let count = items.len();
-    let audio = items.iter().filter(|i| i.str_or("kind", "") == "audio").count();
+    let audio = items
+        .iter()
+        .filter(|i| i.str_or("kind", "") == "audio")
+        .count();
     let video = count - audio;
 
     if !ctx.dry_run {
@@ -198,8 +255,15 @@ fn index(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     }
 
     Ok(Effect::read_only(
-        json_obj([("count", count.into()), ("audio", audio.into()), ("video", video.into())]),
-        format!("indexed {} media files ({} audio, {} video)", count, audio, video),
+        json_obj([
+            ("count", count.into()),
+            ("audio", audio.into()),
+            ("video", video.into()),
+        ]),
+        format!(
+            "indexed {} media files ({} audio, {} video)",
+            count, audio, video
+        ),
     ))
 }
 
@@ -222,7 +286,11 @@ pub fn load_library() -> Json {
 fn search(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
     let q = step.args.str_or("query", "").to_ascii_lowercase();
     let kind = step.args.str_or("kind", "").to_string();
-    let limit = step.args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60) as usize;
+    let limit = step
+        .args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60) as usize;
 
     let lib = load_library();
     let mut hits: Vec<Json> = lib
@@ -245,7 +313,11 @@ fn search(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
         })
         .collect();
 
-    hits.sort_by(|a, b| b.f64_or("modified", 0.0).partial_cmp(&a.f64_or("modified", 0.0)).unwrap());
+    hits.sort_by(|a, b| {
+        b.f64_or("modified", 0.0)
+            .partial_cmp(&a.f64_or("modified", 0.0))
+            .unwrap()
+    });
     let total = hits.len();
     hits.truncate(limit);
     Ok(Effect::read_only(
@@ -266,7 +338,10 @@ fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     if out.exists() {
         return Ok(Effect::read_only(
-            json_obj([("thumbnail", out.to_string_lossy().to_string().into()), ("cached", true.into())]),
+            json_obj([
+                ("thumbnail", out.to_string_lossy().to_string().into()),
+                ("cached", true.into()),
+            ]),
             "thumbnail already cached",
         ));
     }
@@ -279,7 +354,19 @@ fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let at_s = format!("{}", at);
     let r = run(
         "ffmpeg",
-        &["-nostdin", "-y", "-ss", &at_s, "-i", &src, "-frames:v", "1", "-vf", "scale=480:-1", &dst],
+        &[
+            "-nostdin",
+            "-y",
+            "-ss",
+            &at_s,
+            "-i",
+            &src,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=480:-1",
+            &dst,
+        ],
         Duration::from_secs(45),
     )?;
     r.require("ffmpeg")?;
@@ -337,8 +424,13 @@ fn play(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         .map_err(|e| format!("cannot start mpv: {}", e))?;
 
     Ok(Effect::with_undo(
-        json_obj([("path", path.to_string_lossy().to_string().into()), ("pid", (child.id() as u64).into())]),
-        Undo::Manual { note: "stop playback".to_string() },
+        json_obj([
+            ("path", path.to_string_lossy().to_string().into()),
+            ("pid", (child.id() as u64).into()),
+        ]),
+        Undo::Manual {
+            note: "stop playback".to_string(),
+        },
         format!("playing {}", path.display()),
     ))
 }
@@ -352,12 +444,23 @@ fn control(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         "stop" => vec!["quit".into()],
         "next" => vec!["playlist-next".into()],
         "previous" => vec!["playlist-prev".into()],
-        "seek" => vec!["seek".into(), Json::Num(step.args.f64_or("seconds", 10.0)), "relative".into()],
-        "volume" => vec!["set_property".into(), "volume".into(), Json::Num(step.args.f64_or("level", 70.0))],
+        "seek" => vec![
+            "seek".into(),
+            Json::Num(step.args.f64_or("seconds", 10.0)),
+            "relative".into(),
+        ],
+        "volume" => vec![
+            "set_property".into(),
+            "volume".into(),
+            Json::Num(step.args.f64_or("level", 70.0)),
+        ],
         other => return Err(format!("unknown playback action '{}'", other)),
     };
     if ctx.dry_run {
-        return Ok(Effect::read_only(Json::obj(), format!("would {} playback", action)));
+        return Ok(Effect::read_only(
+            Json::obj(),
+            format!("would {} playback", action),
+        ));
     }
     mpv_command(Json::Arr(command))?;
     Ok(Effect::read_only(
@@ -374,7 +477,8 @@ fn mpv_command(command: Json) -> Result<(), String> {
     let mut s = UnixStream::connect(&sock)
         .map_err(|_| "nothing is playing (no mpv instance to control)".to_string())?;
     let msg = format!("{}\n", json_obj([("command", command)]));
-    s.write_all(msg.as_bytes()).map_err(|e| format!("cannot talk to mpv: {}", e))
+    s.write_all(msg.as_bytes())
+        .map_err(|e| format!("cannot talk to mpv: {}", e))
 }
 
 // ------------------------------------------------------- non-destructive edit
@@ -386,7 +490,13 @@ fn projects_dir() -> PathBuf {
 pub fn project_path(name: &str) -> PathBuf {
     let safe: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     projects_dir().join(format!("{}.glyphedit.json", safe))
 }
@@ -420,7 +530,9 @@ fn edit(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             if !src.exists() {
                 return Err(format!("{} does not exist", src.display()));
             }
-            let duration = probe(&src).map(|p| p.f64_or("duration", 0.0)).unwrap_or(0.0);
+            let duration = probe(&src)
+                .map(|p| p.f64_or("duration", 0.0))
+                .unwrap_or(0.0);
             let id = format!("c{}", clips.len() + 1);
             clips.push(json_obj([
                 ("id", id.clone().into()),
@@ -444,7 +556,11 @@ fn edit(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             if let Some(e) = end {
                 clip.set("out", e.into());
             }
-            format!("trimmed clip to {}–{}", fmt_duration(start), end.map(fmt_duration).unwrap_or_else(|| "end".into()))
+            format!(
+                "trimmed clip to {}–{}",
+                fmt_duration(start),
+                end.map(fmt_duration).unwrap_or_else(|| "end".into())
+            )
         }
         "speed" | "volume" | "fade_in" | "fade_out" => {
             let id = step.args.str_or("clip", "").to_string();
@@ -474,9 +590,13 @@ fn edit(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     let path = project_path(&name);
     if ctx.dry_run {
-        return Ok(Effect::read_only(project, format!("would have {}", described)));
+        return Ok(Effect::read_only(
+            project,
+            format!("would have {}", described),
+        ));
     }
-    std::fs::create_dir_all(projects_dir()).map_err(|e| format!("cannot create projects dir: {}", e))?;
+    std::fs::create_dir_all(projects_dir())
+        .map_err(|e| format!("cannot create projects dir: {}", e))?;
     let backup = ctx.journal.snapshot(&path)?;
     let existed = backup.is_some();
     std::fs::write(&path, project.to_string_pretty())
@@ -484,7 +604,11 @@ fn edit(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     Ok(Effect::with_undo(
         project,
-        Undo::RestoreFile { path: path.to_string_lossy().to_string(), backup, existed },
+        Undo::RestoreFile {
+            path: path.to_string_lossy().to_string(),
+            backup,
+            existed,
+        },
         described,
     ))
 }
@@ -516,7 +640,10 @@ pub fn compile(project: &Json, output: &Path) -> Result<Vec<String>, String> {
         let fade_in = clip.f64_or("fade_in", 0.0);
         let fade_out = clip.f64_or("fade_out", 0.0);
         if end > 0.0 && end <= start {
-            return Err(format!("clip {} ends before it starts", clip.str_or("id", "?")));
+            return Err(format!(
+                "clip {} ends before it starts",
+                clip.str_or("id", "?")
+            ));
         }
         let dur = if end > 0.0 { end - start } else { 0.0 };
 
@@ -532,7 +659,11 @@ pub fn compile(project: &Json, output: &Path) -> Result<Vec<String>, String> {
             v.push_str(&format!(",fade=t=in:st=0:d={}", fade_in));
         }
         if fade_out > 0.0 && dur > fade_out {
-            v.push_str(&format!(",fade=t=out:st={}:d={}", (dur / speed) - fade_out, fade_out));
+            v.push_str(&format!(
+                ",fade=t=out:st={}:d={}",
+                (dur / speed) - fade_out,
+                fade_out
+            ));
         }
         v.push_str(&format!("[v{}]", i));
         chains.push(v);
@@ -557,7 +688,11 @@ pub fn compile(project: &Json, output: &Path) -> Result<Vec<String>, String> {
         concat_inputs.push_str(&format!("[v{}][a{}]", i, i));
     }
 
-    chains.push(format!("{}concat=n={}:v=1:a=1[vout][aout]", concat_inputs, clips.len()));
+    chains.push(format!(
+        "{}concat=n={}:v=1:a=1[vout][aout]",
+        concat_inputs,
+        clips.len()
+    ));
 
     args.push("-filter_complex".into());
     args.push(chains.join(";"));
@@ -604,11 +739,16 @@ fn render(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         Some(o) => nous_core::config::expand_tilde(o),
         None => {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join("Videos").join(format!("{}.mp4", name))
+            PathBuf::from(home)
+                .join("Videos")
+                .join(format!("{}.mp4", name))
         }
     };
     if output.exists() {
-        return Err(format!("{} already exists — choose another name", output.display()));
+        return Err(format!(
+            "{} already exists — choose another name",
+            output.display()
+        ));
     }
     let args = compile(&project, &output)?;
 
@@ -616,7 +756,10 @@ fn render(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         return Ok(Effect::read_only(
             json_obj([
                 ("output", output.to_string_lossy().to_string().into()),
-                ("ffmpeg_args", Json::Arr(args.iter().map(|a| Json::Str(a.clone())).collect())),
+                (
+                    "ffmpeg_args",
+                    Json::Arr(args.iter().map(|a| Json::Str(a.clone())).collect()),
+                ),
             ]),
             format!("would render '{}' to {}", name, output.display()),
         ));
@@ -632,7 +775,10 @@ fn render(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     out.require("ffmpeg")?;
 
     Ok(Effect::with_undo(
-        json_obj([("output", output.to_string_lossy().to_string().into()), ("project", name.clone().into())]),
+        json_obj([
+            ("output", output.to_string_lossy().to_string().into()),
+            ("project", name.clone().into()),
+        ]),
         // Rendering only ever creates a new file, so undo is a clean removal.
         Undo::RestoreFile {
             path: output.to_string_lossy().to_string(),
@@ -671,7 +817,10 @@ mod tests {
     fn compiles_a_multi_clip_concat() {
         let p = json_obj([(
             "clips",
-            Json::Arr(vec![clip("/m/a.mp4", 0.0, 10.0), clip("/m/b.mp4", 5.0, 15.0)]),
+            Json::Arr(vec![
+                clip("/m/a.mp4", 0.0, 10.0),
+                clip("/m/b.mp4", 5.0, 15.0),
+            ]),
         )]);
         let args = compile(&p, Path::new("/out/x.mp4")).unwrap();
         let joined = args.join(" ");

@@ -31,8 +31,13 @@ fn c(code: &str) -> &str {
 }
 
 fn banner(client: &mut Client) {
-    let status = client.call(method::SYS_STATUS, Json::obj()).unwrap_or_else(|_| Json::obj());
-    let has_model = status.path("models.has_model").and_then(|v| v.as_bool()).unwrap_or(false);
+    let status = client
+        .call(method::SYS_STATUS, Json::obj())
+        .unwrap_or_else(|_| Json::obj());
+    let has_model = status
+        .path("models.has_model")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     println!(
         "{}NOUS{} {}  {}·{}  {}",
         c(BOLD),
@@ -40,7 +45,11 @@ fn banner(client: &mut Client) {
         status.str_or("version", nous_core::NOUS_VERSION),
         c(DIM),
         c(RESET),
-        if has_model { "model reachable" } else { "no model — resolving locally" }
+        if has_model {
+            "model reachable"
+        } else {
+            "no model — resolving locally"
+        }
     );
     println!(
         "{}say what you want · !cmd runs a shell command · :help for more{}\n",
@@ -60,8 +69,24 @@ fn help() {
   {}:dry <intent>{}   resolve and preview without changing anything
   {}:help{}           this
   {}:quit{}           leave",
-        c(CYAN), c(RESET), c(CYAN), c(RESET), c(CYAN), c(RESET), c(CYAN), c(RESET),
-        c(CYAN), c(RESET), c(CYAN), c(RESET), c(CYAN), c(RESET), c(CYAN), c(RESET), c(CYAN), c(RESET)
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET),
+        c(CYAN),
+        c(RESET)
     );
 }
 
@@ -175,7 +200,9 @@ fn builtin(client: &mut Client, cmd: &str) -> Result<bool, String> {
                 m.f64_or("load1", 0.0),
                 m.f64_or("mem_used_pct", 0.0),
                 m.f64_or("disk_used_pct", 0.0),
-                s.get("journal_entries").and_then(|v| v.as_u64()).unwrap_or(0)
+                s.get("journal_entries")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
             );
         }
         "find" => {
@@ -188,7 +215,13 @@ fn builtin(client: &mut Client, cmd: &str) -> Result<bool, String> {
                 println!("  nothing matched");
             }
             for r in results {
-                println!("  {}  {}{}{}", r.str_or("name", ""), c(DIM), r.str_or("path", ""), c(RESET));
+                println!(
+                    "  {}  {}{}{}",
+                    r.str_or("name", ""),
+                    c(DIM),
+                    r.str_or("path", ""),
+                    c(RESET)
+                );
             }
         }
         "dry" => handle_intent(client, rest, true, false).map(|_| ())?,
@@ -256,7 +289,13 @@ fn handle_intent(
             "deny" => c(RED),
             _ => c(DIM),
         };
-        println!("  {}{:>7}{}  {}", tint, decision, c(RESET), s.str_or("summary", ""));
+        println!(
+            "  {}{:>7}{}  {}",
+            tint,
+            decision,
+            c(RESET),
+            s.str_or("summary", "")
+        );
     }
 
     if preflight.bool_or("blocked", false) {
@@ -292,7 +331,13 @@ fn handle_intent(
         if state == "ok" {
             println!("  {}✓{} {}", c(GREEN), c(RESET), r.str_or("detail", ""));
         } else {
-            println!("  {}×{} {} {}", c(RED), c(RESET), state, r.str_or("detail", ""));
+            println!(
+                "  {}×{} {} {}",
+                c(RED),
+                c(RESET),
+                state,
+                r.str_or("detail", "")
+            );
         }
         render_value(r.get("value").unwrap_or(&Json::Null));
     }
@@ -310,7 +355,11 @@ fn render_value(v: &Json) {
         for e in entries.iter().take(40) {
             println!(
                 "      {}{:<34}{} {}",
-                if e.bool_or("is_dir", false) { c(CYAN) } else { "" },
+                if e.bool_or("is_dir", false) {
+                    c(CYAN)
+                } else {
+                    ""
+                },
                 e.str_or("name", ""),
                 c(RESET),
                 if e.bool_or("is_dir", false) {
@@ -324,7 +373,13 @@ fn render_value(v: &Json) {
     }
     if let Some(findings) = v.get("findings").and_then(|f| f.as_arr()) {
         for f in findings {
-            println!("      {} {}({}){}", f.str_or("title", ""), c(DIM), f.str_or("detail", ""), c(RESET));
+            println!(
+                "      {} {}({}){}",
+                f.str_or("title", ""),
+                c(DIM),
+                f.str_or("detail", ""),
+                c(RESET)
+            );
         }
         return;
     }

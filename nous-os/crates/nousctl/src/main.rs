@@ -9,7 +9,7 @@ use nous_core::ipc::Client;
 use nous_core::journal::format_ts;
 use nous_core::json::{json_obj, Json};
 use nous_core::proto::method;
-use nous_core::{Capability, Policy, Subject};
+use nous_core::{Policy, Subject};
 
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -17,7 +17,6 @@ const RESET: &str = "\x1b[0m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
 
 fn colour(code: &str) -> &str {
     // Respect NO_COLOR, and drop colour when piped.
@@ -49,6 +48,7 @@ fn usage() -> i32 {
     models                  model backends and their state
     key set <provider>      store an API key (read from stdin)
     index                   rebuild the file index
+    storage                 what NOUS is keeping, and what it can reclaim
     find <words...>         search indexed files
     version",
         colour(BOLD),
@@ -76,9 +76,9 @@ fn main() {
         }
         Some("status") => run(cmd_status()),
         Some("doctor") => run(cmd_doctor()),
-        Some("ledger") | Some("journal") => {
-            run(cmd_ledger(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(20)))
-        }
+        Some("ledger") | Some("journal") => run(cmd_ledger(
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(20),
+        )),
         Some("undo") => run(cmd_undo(args.get(1).and_then(|n| n.parse().ok()))),
         Some("ask") => run(cmd_intent(&args[1..].join(" "), false)),
         Some("run") => run(cmd_intent(&args[1..].join(" "), true)),
@@ -88,6 +88,9 @@ fn main() {
         Some("models") => run(cmd_models()),
         Some("key") => run(cmd_key(&args[1..])),
         Some("index") => run(cmd_index()),
+        Some("storage") | Some("maintenance") => run(cmd_storage(
+            args.get(1).map(|s| s.as_str()) == Some("--clean"),
+        )),
         Some("find") => run(cmd_find(&args[1..].join(" "))),
         Some(other) => {
             eprintln!("nousctl: unknown command '{}'", other);
@@ -113,24 +116,72 @@ fn cmd_status() -> Result<(), String> {
     let sys = s.get("system").cloned().unwrap_or_else(Json::obj);
     let m = s.get("metrics").cloned().unwrap_or_else(Json::obj);
 
-    println!("{}NOUS {}{}  on {}", colour(BOLD), s.str_or("version", "?"), colour(RESET), sys.str_or("hostname", "?"));
-    println!("  {}up{}          {} minutes", colour(DIM), colour(RESET), s.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0) / 60);
-    println!("  {}system{}      {}", colour(DIM), colour(RESET), sys.str_or("distro", "?"));
-    println!("  {}profile{}     {}", colour(DIM), colour(RESET), s.path("hardware.profile").and_then(|v| v.as_str()).unwrap_or("?"));
-    println!("  {}policy{}      {} rules", colour(DIM), colour(RESET), s.get("policy_rules").and_then(|v| v.as_u64()).unwrap_or(0));
-    println!("  {}journal{}     {} entries", colour(DIM), colour(RESET), s.get("journal_entries").and_then(|v| v.as_u64()).unwrap_or(0));
+    println!(
+        "{}NOUS {}{}  on {}",
+        colour(BOLD),
+        s.str_or("version", "?"),
+        colour(RESET),
+        sys.str_or("hostname", "?")
+    );
+    println!(
+        "  {}up{}          {} minutes",
+        colour(DIM),
+        colour(RESET),
+        s.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0) / 60
+    );
+    println!(
+        "  {}system{}      {}",
+        colour(DIM),
+        colour(RESET),
+        sys.str_or("distro", "?")
+    );
+    println!(
+        "  {}profile{}     {}",
+        colour(DIM),
+        colour(RESET),
+        s.path("hardware.profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+    );
+    println!(
+        "  {}policy{}      {} rules",
+        colour(DIM),
+        colour(RESET),
+        s.get("policy_rules").and_then(|v| v.as_u64()).unwrap_or(0)
+    );
+    println!(
+        "  {}journal{}     {} entries",
+        colour(DIM),
+        colour(RESET),
+        s.get("journal_entries")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    );
     println!(
         "  {}load{}        {:.2}   {}memory{} {:.0}%   {}disk{} {:.0}%",
-        colour(DIM), colour(RESET), m.f64_or("load1", 0.0),
-        colour(DIM), colour(RESET), m.f64_or("mem_used_pct", 0.0),
-        colour(DIM), colour(RESET), m.f64_or("disk_used_pct", 0.0)
+        colour(DIM),
+        colour(RESET),
+        m.f64_or("load1", 0.0),
+        colour(DIM),
+        colour(RESET),
+        m.f64_or("mem_used_pct", 0.0),
+        colour(DIM),
+        colour(RESET),
+        m.f64_or("disk_used_pct", 0.0)
     );
-    let has_model = s.path("models.has_model").and_then(|v| v.as_bool()).unwrap_or(false);
+    let has_model = s
+        .path("models.has_model")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     println!(
         "  {}models{}      {}",
         colour(DIM),
         colour(RESET),
-        if has_model { "reachable" } else { "none — using the deterministic resolver" }
+        if has_model {
+            "reachable"
+        } else {
+            "none — using the deterministic resolver"
+        }
     );
     Ok(())
 }
@@ -142,19 +193,43 @@ fn cmd_doctor() -> Result<(), String> {
             let s = c.call(method::SYS_STATUS, Json::obj())?;
             let hw = s.get("hardware").cloned().unwrap_or_else(Json::obj);
             println!("{}This machine{}", colour(BOLD), colour(RESET));
-            println!("  CPU     {} ({} cores)", hw.str_or("cpu_model", "?"), hw.get("cpus").and_then(|v| v.as_u64()).unwrap_or(0));
-            println!("  Memory  {:.1} GB", hw.get("ram_mb").and_then(|v| v.as_u64()).unwrap_or(0) as f64 / 1024.0);
-            println!("  Disk    {:.1} GB free", hw.get("disk_free_mb").and_then(|v| v.as_u64()).unwrap_or(0) as f64 / 1024.0);
+            println!(
+                "  CPU     {} ({} cores)",
+                hw.str_or("cpu_model", "?"),
+                hw.get("cpus").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            println!(
+                "  Memory  {:.1} GB",
+                hw.get("ram_mb").and_then(|v| v.as_u64()).unwrap_or(0) as f64 / 1024.0
+            );
+            println!(
+                "  Disk    {:.1} GB free",
+                hw.get("disk_free_mb").and_then(|v| v.as_u64()).unwrap_or(0) as f64 / 1024.0
+            );
             for g in hw.arr_or_empty("gpus") {
-                println!("  GPU     {} ({})", g.str_or("name", "?"), g.str_or("vendor", "?"));
+                println!(
+                    "  GPU     {} ({})",
+                    g.str_or("name", "?"),
+                    g.str_or("vendor", "?")
+                );
             }
-            println!("\n  {}Profile{} {}", colour(BOLD), colour(RESET), hw.str_or("profile", "?"));
+            println!(
+                "\n  {}Profile{} {}",
+                colour(BOLD),
+                colour(RESET),
+                hw.str_or("profile", "?")
+            );
             println!("          {}", hw.str_or("explain", ""));
             if let Some(model) = hw.get("local_model").and_then(|v| v.as_str()) {
                 println!("          Local model: {}", model);
             }
             for n in hw.arr_or_empty("notes") {
-                println!("\n  {}Note{}    {}", colour(YELLOW), colour(RESET), n.as_str().unwrap_or(""));
+                println!(
+                    "\n  {}Note{}    {}",
+                    colour(YELLOW),
+                    colour(RESET),
+                    n.as_str().unwrap_or("")
+                );
             }
             Ok(())
         }
@@ -197,7 +272,11 @@ fn cmd_ledger(n: u64) -> Result<(), String> {
             }
         );
     }
-    println!("\n{}undo the last change with:{} nousctl undo", colour(DIM), colour(RESET));
+    println!(
+        "\n{}undo the last change with:{} nousctl undo",
+        colour(DIM),
+        colour(RESET)
+    );
     Ok(())
 }
 
@@ -210,7 +289,15 @@ fn cmd_undo(seq: Option<u64>) -> Result<(), String> {
     let out = c.call(method::JOURNAL_REVERT, params)?;
     let status = out.str_or("status", "");
     if status == "completed" {
-        println!("{}undone{} — {}", colour(GREEN), colour(RESET), out.arr_or_empty("results").first().map(|r| r.str_or("detail", "").to_string()).unwrap_or_default());
+        println!(
+            "{}undone{} — {}",
+            colour(GREEN),
+            colour(RESET),
+            out.arr_or_empty("results")
+                .first()
+                .map(|r| r.str_or("detail", "").to_string())
+                .unwrap_or_default()
+        );
         Ok(())
     } else {
         Err(out.str_or("message", "could not undo").to_string())
@@ -218,12 +305,21 @@ fn cmd_undo(seq: Option<u64>) -> Result<(), String> {
 }
 
 fn print_plan(preflight: &Json) {
-    println!("{}{}{}", colour(BOLD), preflight.str_or("utterance", ""), colour(RESET));
+    println!(
+        "{}{}{}",
+        colour(BOLD),
+        preflight.str_or("utterance", ""),
+        colour(RESET)
+    );
     let origin = preflight.str_or("origin", "");
     println!(
         "  {}{}{}\n",
         colour(DIM),
-        if origin.starts_with("model") { format!("resolved by {}", origin) } else { "understood locally".to_string() },
+        if origin.starts_with("model") {
+            format!("resolved by {}", origin)
+        } else {
+            "understood locally".to_string()
+        },
         colour(RESET)
     );
     for s in preflight.arr_or_empty("steps") {
@@ -234,8 +330,19 @@ fn print_plan(preflight: &Json) {
             "deny" => colour(RED),
             _ => colour(DIM),
         };
-        println!("  {}{:>7}{}  {}", tint, decision, colour(RESET), s.str_or("summary", ""));
-        println!("           {}{}{}", colour(DIM), s.str_or("capability", ""), colour(RESET));
+        println!(
+            "  {}{:>7}{}  {}",
+            tint,
+            decision,
+            colour(RESET),
+            s.str_or("summary", "")
+        );
+        println!(
+            "           {}{}{}",
+            colour(DIM),
+            s.str_or("capability", ""),
+            colour(RESET)
+        );
         let reason = s.str_or("reason", "");
         if !reason.is_empty() && decision != "allow" {
             println!("           {}{}{}", colour(DIM), reason, colour(RESET));
@@ -278,8 +385,18 @@ fn cmd_intent(text: &str, execute: bool) -> Result<(), String> {
     println!();
     for r in out.arr_or_empty("results") {
         let state = r.str_or("state", "");
-        let tint = if state == "ok" { colour(GREEN) } else { colour(RED) };
-        println!("  {}{}{}  {}", tint, if state == "ok" { "✓" } else { "×" }, colour(RESET), r.str_or("detail", r.str_or("summary", "")));
+        let tint = if state == "ok" {
+            colour(GREEN)
+        } else {
+            colour(RED)
+        };
+        println!(
+            "  {}{}{}  {}",
+            tint,
+            if state == "ok" { "✓" } else { "×" },
+            colour(RESET),
+            r.str_or("detail", r.str_or("summary", ""))
+        );
     }
     let message = out.str_or("message", "");
     if !message.is_empty() {
@@ -311,8 +428,20 @@ fn cmd_check(cap: &str) -> Result<(), String> {
         "confirm" => colour(YELLOW),
         _ => colour(RED),
     };
-    println!("{}  {}{}{}  ({} risk)", out.str_or("capability", cap), tint, decision, colour(RESET), out.str_or("risk", "?"));
-    println!("{}{}{}", colour(DIM), out.str_or("explain", ""), colour(RESET));
+    println!(
+        "{}  {}{}{}  ({} risk)",
+        out.str_or("capability", cap),
+        tint,
+        decision,
+        colour(RESET),
+        out.str_or("risk", "?")
+    );
+    println!(
+        "{}{}{}",
+        colour(DIM),
+        out.str_or("explain", ""),
+        colour(RESET)
+    );
     Ok(())
 }
 
@@ -320,11 +449,25 @@ fn cmd_policy() -> Result<(), String> {
     // Printed from the builtin so it works with the daemon stopped; the daemon
     // reports its own rule count in `status`.
     let policy = Policy::builtin();
-    println!("{}effective policy{} ({} builtin rules, first match wins)\n", colour(BOLD), colour(RESET), policy.rules.len());
+    println!(
+        "{}effective policy{} ({} builtin rules, first match wins)\n",
+        colour(BOLD),
+        colour(RESET),
+        policy.rules.len()
+    );
     for r in &policy.rules {
-        println!("  {:<8} {:<16} {}", r.decision.kind(), r.subject, r.capability);
+        println!(
+            "  {:<8} {:<16} {}",
+            r.decision.kind(),
+            r.subject,
+            r.capability
+        );
     }
-    println!("\n{}site rules in /etc/nous/policy.d/*.conf load above these{}", colour(DIM), colour(RESET));
+    println!(
+        "\n{}site rules in /etc/nous/policy.d/*.conf load above these{}",
+        colour(DIM),
+        colour(RESET)
+    );
     Ok(())
 }
 
@@ -339,12 +482,22 @@ fn cmd_glyph(args: &[String]) -> Result<(), String> {
             let policy = Policy::builtin();
             let mut failed = false;
             for m in &manifests {
-                println!("{}flow {}{}  — {}", colour(BOLD), m.flow, colour(RESET), m.blast_radius());
+                println!(
+                    "{}flow {}{}  — {}",
+                    colour(BOLD),
+                    m.flow,
+                    colour(RESET),
+                    m.blast_radius()
+                );
                 if !m.description.is_empty() {
                     println!("  {}{}{}", colour(DIM), m.description, colour(RESET));
                 }
                 for d in &m.diagnostics {
-                    let tint = if d.severity == glyph::Severity::Error { colour(RED) } else { colour(YELLOW) };
+                    let tint = if d.severity == glyph::Severity::Error {
+                        colour(RED)
+                    } else {
+                        colour(YELLOW)
+                    };
                     println!("  {}{}{}", tint, d.render(&m.flow), colour(RESET));
                     if d.severity == glyph::Severity::Error {
                         failed = true;
@@ -357,10 +510,22 @@ fn cmd_glyph(args: &[String]) -> Result<(), String> {
                         "confirm" => colour(YELLOW),
                         _ => colour(RED),
                     };
-                    println!("    {}{:>7}{}  {}", tint, decision.kind(), colour(RESET), cap);
+                    println!(
+                        "    {}{:>7}{}  {}",
+                        tint,
+                        decision.kind(),
+                        colour(RESET),
+                        cap
+                    );
                 }
                 if m.asks > 0 || m.gates > 0 {
-                    println!("\n  {}{} confirmation(s), {} gate(s){}", colour(DIM), m.asks, m.gates, colour(RESET));
+                    println!(
+                        "\n  {}{} confirmation(s), {} gate(s){}",
+                        colour(DIM),
+                        m.asks,
+                        m.gates,
+                        colour(RESET)
+                    );
                 }
                 println!();
             }
@@ -379,7 +544,13 @@ fn cmd_glyph(args: &[String]) -> Result<(), String> {
                 }
                 return Err("this program does not check out".to_string());
             }
-            println!("{}flow {}{} — {}", colour(BOLD), m.flow, colour(RESET), m.blast_radius());
+            println!(
+                "{}flow {}{} — {}",
+                colour(BOLD),
+                m.flow,
+                colour(RESET),
+                m.blast_radius()
+            );
             if !confirm("Run it?") {
                 println!("Nothing was done.");
                 return Ok(());
@@ -387,7 +558,10 @@ fn cmd_glyph(args: &[String]) -> Result<(), String> {
             let mut c = connect()?;
             let out = c.call(
                 method::INTENT_SUBMIT,
-                json_obj([("text", format!("glyph:{}", m.flow).into()), ("approved", true.into())]),
+                json_obj([
+                    ("text", format!("glyph:{}", m.flow).into()),
+                    ("approved", true.into()),
+                ]),
             )?;
             println!("{}", out.to_string_pretty());
             Ok(())
@@ -399,8 +573,18 @@ fn cmd_glyph(args: &[String]) -> Result<(), String> {
 fn cmd_models() -> Result<(), String> {
     let mut c = connect()?;
     let s = c.call(method::MODEL_STATUS, Json::obj())?;
-    println!("{}route{}       {}", colour(BOLD), colour(RESET), s.str_list("route").join(" → "));
-    println!("{}small route{} {}", colour(BOLD), colour(RESET), s.str_list("route_small").join(" → "));
+    println!(
+        "{}route{}       {}",
+        colour(BOLD),
+        colour(RESET),
+        s.str_list("route").join(" → ")
+    );
+    println!(
+        "{}small route{} {}",
+        colour(BOLD),
+        colour(RESET),
+        s.str_list("route_small").join(" → ")
+    );
     println!();
     for b in s.arr_or_empty("backends") {
         let up = b.bool_or("available", false);
@@ -413,7 +597,11 @@ fn cmd_models() -> Result<(), String> {
             b.str_or("model", "")
         );
     }
-    println!("\n{}add a key with:{} nousctl key set anthropic", colour(DIM), colour(RESET));
+    println!(
+        "\n{}add a key with:{} nousctl key set anthropic",
+        colour(DIM),
+        colour(RESET)
+    );
     Ok(())
 }
 
@@ -421,66 +609,121 @@ fn cmd_key(args: &[String]) -> Result<(), String> {
     if args.first().map(|s| s.as_str()) != Some("set") {
         return Err("usage: nousctl key set <provider>   (the key is read from stdin)".to_string());
     }
-    let provider = args.get(1).ok_or("which provider? anthropic, openai, openrouter")?;
+    let provider = args
+        .get(1)
+        .ok_or("which provider? anthropic, openai, openrouter")?;
     eprintln!("Paste the key for {} and press enter:", provider);
     let mut key = String::new();
-    std::io::stdin().read_line(&mut key).map_err(|e| format!("cannot read the key: {}", e))?;
+    std::io::stdin()
+        .read_line(&mut key)
+        .map_err(|e| format!("cannot read the key: {}", e))?;
     let key = key.trim();
     if key.is_empty() {
         return Err("no key given".to_string());
     }
-    // Written by the same helper the daemon reads, with 0600 permissions.
-    write_key(provider, key)?;
-    println!("{}stored{} — restart nousd to pick it up", colour(GREEN), colour(RESET));
+    // The same code the daemon reads with, so the format cannot drift.
+    nous_core::Secrets::set(provider, key)?;
+    println!(
+        "{}stored{} — restart nousd to pick it up",
+        colour(GREEN),
+        colour(RESET)
+    );
     Ok(())
 }
 
-/// Duplicated deliberately rather than shared: `nousctl` must be able to store a
-/// key on a machine where the daemon will not start, which is exactly when you
-/// most need to configure one.
-fn write_key(provider: &str, key: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let path = match std::env::var("NOUS_SECRETS") {
-        Ok(p) => std::path::PathBuf::from(p),
-        Err(_) => match std::env::var("HOME") {
-            Ok(h) if h != "/root" => std::path::PathBuf::from(h).join(".config/nous/secrets/providers.conf"),
-            _ => std::path::PathBuf::from("/etc/nous/secrets/providers.conf"),
-        },
-    };
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok();
-    }
-    let mut existing: Vec<String> = std::fs::read_to_string(&path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim_start().starts_with(&format!("{} ", provider)) && !l.trim().is_empty())
-        .map(String::from)
-        .collect();
-    existing.retain(|l| !l.starts_with('#'));
-    existing.push(format!("{} = {}", provider.to_ascii_lowercase(), key));
+fn cmd_storage(clean: bool) -> Result<(), String> {
+    let mut c = connect()?;
+    let out = c.call("sys.maintenance", json_obj([("apply", clean.into())]))?;
+    let usage = out.get("usage").cloned().unwrap_or_else(Json::obj);
 
-    let body = format!(
-        "# NOUS model provider credentials.\n# Owner-only, and unreadable through any capability.\n{}\n",
-        existing.join("\n")
+    let row = |label: &str, bytes: u64| {
+        println!(
+            "  {}{:<12}{} {}",
+            colour(DIM),
+            label,
+            colour(RESET),
+            human(bytes)
+        );
+    };
+    println!(
+        "{}NOUS is keeping{} {}",
+        colour(BOLD),
+        colour(RESET),
+        usage.str_or("total", "?")
     );
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-    f.write_all(body.as_bytes()).map_err(|e| format!("cannot write credentials: {}", e))?;
+    println!(
+        "  {}{}{}\n",
+        colour(DIM),
+        usage.str_or("path", ""),
+        colour(RESET)
+    );
+    for (label, key) in [
+        ("journal", "journal_bytes"),
+        ("trash", "trash_bytes"),
+        ("thumbnails", "thumbnail_bytes"),
+        ("screenshots", "screenshot_bytes"),
+        ("index", "index_bytes"),
+    ] {
+        row(label, usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0));
+    }
+
+    println!();
+    let summary = out.str_or("summary", "nothing to clean up");
+    if out.bool_or("applied", false) {
+        println!("{}cleaned{} — {}", colour(GREEN), colour(RESET), summary);
+    } else if summary == "nothing to clean up" {
+        println!("{}", summary);
+    } else {
+        println!(
+            "{}would reclaim{} — {}",
+            colour(YELLOW),
+            colour(RESET),
+            summary
+        );
+        let kept = out
+            .get("kept_for_undo")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if kept > 0 {
+            println!(
+                "{}{} snapshot(s) kept because their actions can still be undone{}",
+                colour(DIM),
+                kept,
+                colour(RESET)
+            );
+        }
+        println!(
+            "\n{}run `nousctl storage --clean` to do it{}",
+            colour(DIM),
+            colour(RESET)
+        );
+    }
     Ok(())
+}
+
+fn human(n: u64) -> String {
+    const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", n, U[0])
+    } else {
+        format!("{:.1} {}", v, U[i])
+    }
 }
 
 fn cmd_index() -> Result<(), String> {
     let mut c = connect()?;
     println!("indexing…");
     let out = c.call(method::FS_INDEX, Json::obj())?;
-    println!("{} files indexed", out.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0));
+    println!(
+        "{} files indexed",
+        out.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0)
+    );
     Ok(())
 }
 
@@ -489,14 +732,23 @@ fn cmd_find(query: &str) -> Result<(), String> {
         return Err("what are you looking for?".to_string());
     }
     let mut c = connect()?;
-    let out = c.call(method::FS_SEARCH, json_obj([("query", query.into()), ("limit", 20u64.into())]))?;
+    let out = c.call(
+        method::FS_SEARCH,
+        json_obj([("query", query.into()), ("limit", 20u64.into())]),
+    )?;
     let results = out.arr_or_empty("results");
     if results.is_empty() {
         println!("Nothing matched. Run `nousctl index` if you have not indexed yet.");
         return Ok(());
     }
     for r in results {
-        println!("  {}  {}{}{}", r.str_or("name", ""), colour(DIM), r.str_or("path", ""), colour(RESET));
+        println!(
+            "  {}  {}{}{}",
+            r.str_or("name", ""),
+            colour(DIM),
+            r.str_or("path", ""),
+            colour(RESET)
+        );
     }
     Ok(())
 }
@@ -507,8 +759,14 @@ mod tests {
 
     #[test]
     fn capability_strings_from_the_cli_parse() {
-        assert!(Capability::parse("fs.delete:/home/me/x").is_ok());
-        assert!(Capability::parse("garbage").is_err());
+        assert!(nous_core::Capability::parse("fs.delete:/home/me/x").is_ok());
+        assert!(nous_core::Capability::parse("garbage").is_err());
+    }
+
+    #[test]
+    fn formats_sizes_readably() {
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(1536), "1.5 KB");
     }
 
     #[test]
@@ -516,33 +774,5 @@ mod tests {
         std::env::set_var("NO_COLOR", "1");
         assert_eq!(colour(GREEN), "");
         std::env::remove_var("NO_COLOR");
-    }
-
-    #[test]
-    fn writing_a_key_creates_an_owner_only_file() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("nousctl-key-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("providers.conf");
-        std::env::set_var("NOUS_SECRETS", &path);
-
-        write_key("anthropic", "sk-test-1").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-
-        // A second provider must not drop the first.
-        write_key("openai", "sk-test-2").unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("anthropic = sk-test-1"), "{text}");
-        assert!(text.contains("openai = sk-test-2"), "{text}");
-
-        // Rewriting one provider replaces it rather than appending a duplicate.
-        write_key("anthropic", "sk-test-3").unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("sk-test-1"), "the old key should be gone: {text}");
-        assert_eq!(text.matches("anthropic =").count(), 1);
-
-        std::env::remove_var("NOUS_SECRETS");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

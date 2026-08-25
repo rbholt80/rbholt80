@@ -8,8 +8,8 @@
 //! wrong tool for ranking ten thousand filenames on every keystroke.
 
 use crate::exec::fsops;
-use nous_core::json::{json_obj, parse, Json};
 use nous_core::journal::now_secs;
+use nous_core::json::{json_obj, parse, Json};
 use nous_core::Config;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,12 +77,19 @@ impl Index {
     }
 
     pub fn load_from(path: &Path) -> Index {
-        let json = match std::fs::read_to_string(path).ok().and_then(|s| parse(&s).ok()) {
+        let json = match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| parse(&s).ok())
+        {
             Some(j) => j,
             None => return Index::default(),
         };
         Index {
-            docs: json.arr_or_empty("docs").iter().map(Doc::from_json).collect(),
+            docs: json
+                .arr_or_empty("docs")
+                .iter()
+                .map(Doc::from_json)
+                .collect(),
             built: json.get("built").and_then(|b| b.as_u64()).unwrap_or(0),
         }
     }
@@ -97,7 +104,10 @@ impl Index {
         }
         let json = json_obj([
             ("built", self.built.into()),
-            ("docs", Json::Arr(self.docs.iter().map(|d| d.to_json()).collect())),
+            (
+                "docs",
+                Json::Arr(self.docs.iter().map(|d| d.to_json()).collect()),
+            ),
         ]);
         std::fs::write(path, json.to_string()).map_err(|e| format!("cannot write index: {}", e))
     }
@@ -117,7 +127,11 @@ impl Index {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let name = f.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let name = f
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             let kind = fsops::classify(&f, false).to_string();
 
             // Path segments are searchable, so "invoices 2023" finds a file
@@ -147,22 +161,30 @@ impl Index {
                 text: text.to_ascii_lowercase(),
             });
         }
-        Index { docs, built: now_secs() }
+        Index {
+            docs,
+            built: now_secs(),
+        }
     }
 
     /// Rank documents against a query.
     pub fn search(&self, query: &str, kind: Option<&str>, limit: usize) -> Vec<(f64, &Doc)> {
         let terms = tokenize(query);
-        let candidates: Vec<&Doc> =
-            self.docs.iter().filter(|d| kind.is_none_or(|k| d.kind == k)).collect();
+        let candidates: Vec<&Doc> = self
+            .docs
+            .iter()
+            .filter(|d| kind.map_or(true, |k| d.kind == k))
+            .collect();
         if candidates.is_empty() {
             return Vec::new();
         }
         if terms.is_empty() {
             // No query: most recently modified first, which is what an empty
             // search box should show.
-            let mut all: Vec<(f64, &Doc)> =
-                candidates.into_iter().map(|d| (d.modified as f64, d)).collect();
+            let mut all: Vec<(f64, &Doc)> = candidates
+                .into_iter()
+                .map(|d| (d.modified as f64, d))
+                .collect();
             all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
             all.truncate(limit);
             return all;
@@ -171,7 +193,10 @@ impl Index {
         // Document frequency, so a term appearing in every file counts for little.
         let mut df: HashMap<&str, usize> = HashMap::new();
         for t in &terms {
-            let n = candidates.iter().filter(|d| d.text.contains(t.as_str())).count();
+            let n = candidates
+                .iter()
+                .filter(|d| d.text.contains(t.as_str()))
+                .count();
             df.insert(t.as_str(), n);
         }
         let total = candidates.len() as f64;
@@ -260,8 +285,11 @@ mod tests {
         p
     }
 
-    fn build(dir: &PathBuf) -> Index {
-        Index::build(&[dir.clone()], &Config::with_defaults())
+    fn build(dir: &Path) -> Index {
+        Index::build(
+            std::slice::from_ref(&dir.to_path_buf()),
+            &Config::with_defaults(),
+        )
     }
 
     #[test]
@@ -307,7 +335,10 @@ mod tests {
         let idx = build(&dir);
 
         let hits = idx.search("budget", None, 10);
-        assert_eq!(hits[0].1.name, "budget.md", "the file *called* budget should win");
+        assert_eq!(
+            hits[0].1.name, "budget.md",
+            "the file *called* budget should win"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -319,7 +350,11 @@ mod tests {
         let idx = build(&dir);
 
         let hits = idx.search("invoices 2023", None, 10);
-        assert_eq!(hits.len(), 1, "a file should be findable by where it is filed");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a file should be findable by where it is filed"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

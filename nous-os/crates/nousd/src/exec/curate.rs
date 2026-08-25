@@ -51,7 +51,10 @@ impl Finding {
             (
                 "paths",
                 Json::Arr(
-                    self.paths.iter().map(|p| Json::Str(p.to_string_lossy().to_string())).collect(),
+                    self.paths
+                        .iter()
+                        .map(|p| Json::Str(p.to_string_lossy().to_string()))
+                        .collect(),
                 ),
             ),
         ])
@@ -60,14 +63,25 @@ impl Finding {
 
 fn roots(step: &Step, ctx: &ExecCtx) -> Vec<PathBuf> {
     if let Some(list) = step.args.get("roots").and_then(|v| v.as_arr()) {
-        return list.iter().filter_map(|v| v.as_str()).map(nous_core::config::expand_tilde).collect();
+        return list
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(nous_core::config::expand_tilde)
+            .collect();
     }
     let home = ctx.home.clone();
-    ["Downloads", "Desktop", "Documents", "Pictures", "Videos", "Music"]
-        .iter()
-        .map(|d| home.join(d))
-        .filter(|p| p.is_dir())
-        .collect()
+    [
+        "Downloads",
+        "Desktop",
+        "Documents",
+        "Pictures",
+        "Videos",
+        "Music",
+    ]
+    .iter()
+    .map(|d| home.join(d))
+    .filter(|p| p.is_dir())
+    .collect()
 }
 
 /// Look for clutter. Read-only.
@@ -191,9 +205,15 @@ fn find_duplicates(files: &[PathBuf]) -> Vec<Finding> {
             title: format!(
                 "{} identical copies of {}",
                 confirmed.len(),
-                confirmed[0].file_name().and_then(|s| s.to_str()).unwrap_or("a file")
+                confirmed[0]
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("a file")
             ),
-            detail: format!("{} wasted; the oldest copy would be kept", human_bytes(wasted)),
+            detail: format!(
+                "{} wasted; the oldest copy would be kept",
+                human_bytes(wasted)
+            ),
             paths: confirmed,
             bytes: wasted,
         });
@@ -235,7 +255,10 @@ fn find_stale_downloads(roots: &[PathBuf], now: u64) -> Vec<Finding> {
         kind: "stale_downloads",
         severity: 2,
         title: format!("{} downloads untouched for over three months", stale.len()),
-        detail: format!("{} that could move to an archive folder", human_bytes(bytes)),
+        detail: format!(
+            "{} that could move to an archive folder",
+            human_bytes(bytes)
+        ),
         paths: stale,
         bytes,
     }])
@@ -267,7 +290,10 @@ fn find_screenshot_clutter(roots: &[PathBuf]) -> Vec<Finding> {
         kind: "screenshots",
         severity: 2,
         title: format!("{} screenshots loose in your folders", shots.len()),
-        detail: format!("{} that could gather into Pictures/Screenshots", human_bytes(bytes)),
+        detail: format!(
+            "{} that could gather into Pictures/Screenshots",
+            human_bytes(bytes)
+        ),
         paths: shots,
         bytes,
     }])
@@ -289,7 +315,11 @@ fn find_large_files(files: &[PathBuf]) -> Vec<Finding> {
         // Informational: a big file is not a problem, it is just worth knowing.
         severity: 1,
         title: format!("{} files over 1 GB", big.len()),
-        detail: format!("{} in total; the largest is {}", human_bytes(total), human_bytes(big[0].0)),
+        detail: format!(
+            "{} in total; the largest is {}",
+            human_bytes(total),
+            human_bytes(big[0].0)
+        ),
         paths: big.into_iter().take(20).map(|(_, p)| p).collect(),
         bytes: total,
     }])
@@ -391,16 +421,27 @@ fn scan(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     Ok(Effect::read_only(
         json_obj([
-            ("findings", Json::Arr(findings.iter().map(|f| f.to_json()).collect())),
+            (
+                "findings",
+                Json::Arr(findings.iter().map(|f| f.to_json()).collect()),
+            ),
             ("count", findings.len().into()),
             ("reclaimable_bytes", reclaimable.into()),
             ("reclaimable", human_bytes(reclaimable).into()),
             (
                 "roots",
-                Json::Arr(rs.iter().map(|r| Json::Str(r.to_string_lossy().to_string())).collect()),
+                Json::Arr(
+                    rs.iter()
+                        .map(|r| Json::Str(r.to_string_lossy().to_string()))
+                        .collect(),
+                ),
             ),
         ]),
-        format!("found {} things to tidy ({} reclaimable)", findings.len(), human_bytes(reclaimable)),
+        format!(
+            "found {} things to tidy ({} reclaimable)",
+            findings.len(),
+            human_bytes(reclaimable)
+        ),
     ))
 }
 
@@ -445,19 +486,27 @@ pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<St
             // rather than the trash, so nothing disappears on the user.
             "duplicate" => f.paths[1..]
                 .iter()
-                .map(|p| {
-                    (p.clone(), home.join("Tidy/Duplicates").join(unique_name(p)))
-                })
+                .map(|p| (p.clone(), home.join("Tidy/Duplicates").join(unique_name(p))))
                 .collect(),
             "stale_downloads" => f
                 .paths
                 .iter()
-                .map(|p| (p.clone(), home.join("Tidy/Old Downloads").join(unique_name(p))))
+                .map(|p| {
+                    (
+                        p.clone(),
+                        home.join("Tidy/Old Downloads").join(unique_name(p)),
+                    )
+                })
                 .collect(),
             "screenshots" => f
                 .paths
                 .iter()
-                .map(|p| (p.clone(), home.join("Pictures/Screenshots").join(unique_name(p))))
+                .map(|p| {
+                    (
+                        p.clone(),
+                        home.join("Pictures/Screenshots").join(unique_name(p)),
+                    )
+                })
                 .collect(),
             "misfiled_media" => f
                 .paths
@@ -482,8 +531,16 @@ pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<St
             }
             // Disambiguate a colliding destination rather than dropping the move.
             if claimed_dests.contains(&to) || to.exists() {
-                let stem = to.file_stem().and_then(|s| s.to_str()).unwrap_or("item").to_string();
-                let ext = to.extension().and_then(|s| s.to_str()).map(|e| format!(".{}", e)).unwrap_or_default();
+                let stem = to
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("item")
+                    .to_string();
+                let ext = to
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|e| format!(".{}", e))
+                    .unwrap_or_default();
                 let parent = to.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                 let mut i = 2;
                 loop {
@@ -504,7 +561,9 @@ pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<St
                 &format!(
                     "move {} to {}",
                     from.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
-                    to.parent().map(|d| d.display().to_string()).unwrap_or_default()
+                    to.parent()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default()
                 ),
                 json_obj([
                     ("from", from.to_string_lossy().to_string().into()),
@@ -517,7 +576,10 @@ pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<St
 }
 
 fn unique_name(p: &Path) -> String {
-    p.file_name().and_then(|s| s.to_str()).unwrap_or("item").to_string()
+    p.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("item")
+        .to_string()
 }
 
 fn propose(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
@@ -533,13 +595,23 @@ fn propose(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     Ok(Effect::read_only(
         json_obj([
-            ("steps", Json::Arr(steps.iter().map(|s| s.to_json()).collect())),
+            (
+                "steps",
+                Json::Arr(steps.iter().map(|s| s.to_json()).collect()),
+            ),
             ("count", steps.len().into()),
             ("bytes", moved.into()),
             ("summary", human_bytes(moved).into()),
-            ("findings", Json::Arr(findings.iter().map(|f| f.to_json()).collect())),
+            (
+                "findings",
+                Json::Arr(findings.iter().map(|f| f.to_json()).collect()),
+            ),
         ]),
-        format!("proposed {} moves affecting {}", steps.len(), human_bytes(moved)),
+        format!(
+            "proposed {} moves affecting {}",
+            steps.len(),
+            human_bytes(moved)
+        ),
     ))
 }
 
@@ -579,12 +651,17 @@ mod tests {
 
         let mut files = Vec::new();
         super::super::fsops::walk(&dir, 4, &[], &mut files, 100);
-        let dupes: Vec<_> =
-            find_duplicates(&files).into_iter().filter(|f| f.kind == "duplicate").collect();
+        let dupes: Vec<_> = find_duplicates(&files)
+            .into_iter()
+            .filter(|f| f.kind == "duplicate")
+            .collect();
 
         assert_eq!(dupes.len(), 1, "the distinct file must not be grouped in");
         assert_eq!(dupes[0].paths.len(), 2);
-        assert_eq!(dupes[0].bytes, 200_000, "one file's worth is wasted, not two");
+        assert_eq!(
+            dupes[0].bytes, 200_000,
+            "one file's worth is wasted, not two"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -603,7 +680,10 @@ mod tests {
         fs::write(&b, &db).unwrap();
 
         let files = vec![a.clone(), b.clone()];
-        assert!(find_duplicates(&files).is_empty(), "content differs, so these are not copies");
+        assert!(
+            find_duplicates(&files).is_empty(),
+            "content differs, so these are not copies"
+        );
         assert!(!same_content(&a, &b));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -617,7 +697,10 @@ mod tests {
             severity: 3,
             title: "t".into(),
             detail: "d".into(),
-            paths: vec![home.join("Downloads/song.mp3"), home.join("Downloads/clip.mp4")],
+            paths: vec![
+                home.join("Downloads/song.mp3"),
+                home.join("Downloads/clip.mp4"),
+            ],
             bytes: 100,
         };
         let steps = plan_steps(&[f], &home, &[]);
@@ -636,12 +719,18 @@ mod tests {
             severity: 4,
             title: "t".into(),
             detail: "d".into(),
-            paths: vec![home.join("keep.bin"), home.join("dupe1.bin"), home.join("dupe2.bin")],
+            paths: vec![
+                home.join("keep.bin"),
+                home.join("dupe1.bin"),
+                home.join("dupe2.bin"),
+            ],
             bytes: 20,
         };
         let steps = plan_steps(&[f], &home, &[]);
         assert_eq!(steps.len(), 2, "only the extra copies move");
-        assert!(steps.iter().all(|s| !s.args.str_or("from", "").ends_with("keep.bin")));
+        assert!(steps
+            .iter()
+            .all(|s| !s.args.str_or("from", "").ends_with("keep.bin")));
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -670,16 +759,23 @@ mod tests {
         };
 
         let steps = plan_steps(&[misfiled, duplicate], &home, &[]);
-        let moves_of_dupe: Vec<&Step> =
-            steps.iter().filter(|s| s.args.str_or("from", "").ends_with("album-track-copy.mp3")).collect();
+        let moves_of_dupe: Vec<&Step> = steps
+            .iter()
+            .filter(|s| s.args.str_or("from", "").ends_with("album-track-copy.mp3"))
+            .collect();
         assert_eq!(moves_of_dupe.len(), 1, "one file, one destination");
         assert!(
-            moves_of_dupe[0].args.str_or("to", "").contains("Duplicates"),
+            moves_of_dupe[0]
+                .args
+                .str_or("to", "")
+                .contains("Duplicates"),
             "duplicate handling takes precedence over filing: {}",
             moves_of_dupe[0].args.str_or("to", "")
         );
         // The original is still filed into the library.
-        assert!(steps.iter().any(|s| s.args.str_or("to", "").ends_with("Music/album-track.mp3")));
+        assert!(steps
+            .iter()
+            .any(|s| s.args.str_or("to", "").ends_with("Music/album-track.mp3")));
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -691,12 +787,18 @@ mod tests {
             severity: 2,
             title: "t".into(),
             detail: "d".into(),
-            paths: vec![home.join("Desktop/shot.png"), home.join("Downloads/shot.png")],
+            paths: vec![
+                home.join("Desktop/shot.png"),
+                home.join("Downloads/shot.png"),
+            ],
             bytes: 2,
         };
         let steps = plan_steps(&[f], &home, &[]);
         assert_eq!(steps.len(), 2, "both files should still be moved");
-        let dests: Vec<String> = steps.iter().map(|s| s.args.str_or("to", "").to_string()).collect();
+        let dests: Vec<String> = steps
+            .iter()
+            .map(|s| s.args.str_or("to", "").to_string())
+            .collect();
         assert_ne!(dests[0], dests[1], "two files cannot land on the same path");
         assert!(dests[1].contains("shot (2).png"), "{}", dests[1]);
         let _ = fs::remove_dir_all(&home);
@@ -771,13 +873,20 @@ mod tests {
         let dir = scratch("sort");
         fs::create_dir_all(dir.join("Downloads")).unwrap();
         for i in 0..6 {
-            fs::write(dir.join("Downloads").join(format!("screenshot{}.png", i)), b"x").unwrap();
+            fs::write(
+                dir.join("Downloads").join(format!("screenshot{}.png", i)),
+                b"x",
+            )
+            .unwrap();
         }
         fs::write(dir.join("Downloads/track.mp3"), vec![1u8; 5000]).unwrap();
         let out = analyse(&[dir.join("Downloads")], &[], now_secs());
         assert!(!out.is_empty());
         for pair in out.windows(2) {
-            assert!(pair[0].severity >= pair[1].severity, "findings must be ordered by severity");
+            assert!(
+                pair[0].severity >= pair[1].severity,
+                "findings must be ordered by severity"
+            );
         }
         let _ = fs::remove_dir_all(&dir);
     }

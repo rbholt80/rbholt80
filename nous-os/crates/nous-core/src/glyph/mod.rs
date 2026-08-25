@@ -115,7 +115,10 @@ flow tidy-downloads {
 
     #[test]
     fn render_literal_refuses_interpolated_pieces() {
-        assert_eq!(render_literal(&[Piece::Lit("abc".into())]), Some("abc".to_string()));
+        assert_eq!(
+            render_literal(&[Piece::Lit("abc".into())]),
+            Some("abc".to_string())
+        );
         assert_eq!(render_literal(&[Piece::Ref("x.y".into())]), None);
     }
 }

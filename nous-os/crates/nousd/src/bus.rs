@@ -6,8 +6,8 @@
 
 use nous_core::proto::Event;
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, Sender, TrySendError};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender, TrySendError};
 use std::sync::Mutex;
 
 /// A slow subscriber must not be able to stall the daemon. Once this many
@@ -25,7 +25,9 @@ struct Subscriber {
 
 impl Subscriber {
     fn wants(&self, topic: &str) -> bool {
-        self.topics.iter().any(|t| t == "*" || t == topic || topic.starts_with(&format!("{}.", t)))
+        self.topics
+            .iter()
+            .any(|t| t == "*" || t == topic || topic.starts_with(&format!("{}.", t)))
     }
 }
 
@@ -53,11 +55,20 @@ impl Bus {
     pub fn subscribe(&self, topics: Vec<String>) -> (u64, Receiver<Event>) {
         let (tx, rx) = channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let topics = if topics.is_empty() { vec!["*".to_string()] } else { topics };
-        self.subs
-            .lock()
-            .unwrap()
-            .insert(id, Subscriber { topics, tx, dropped: 0, queued: 0 });
+        let topics = if topics.is_empty() {
+            vec!["*".to_string()]
+        } else {
+            topics
+        };
+        self.subs.lock().unwrap().insert(
+            id,
+            Subscriber {
+                topics,
+                tx,
+                dropped: 0,
+                queued: 0,
+            },
+        );
         (id, rx)
     }
 
@@ -162,7 +173,11 @@ mod tests {
         assert_eq!(bus.subscriber_count(), 1);
         drop(rx);
         bus.publish(evt("log"));
-        assert_eq!(bus.subscriber_count(), 0, "a hung-up subscriber should be removed");
+        assert_eq!(
+            bus.subscriber_count(),
+            0,
+            "a hung-up subscriber should be removed"
+        );
     }
 
     #[test]
@@ -172,7 +187,11 @@ mod tests {
         for _ in 0..(QUEUE_LIMIT + 25) {
             bus.publish(evt("log"));
         }
-        assert_eq!(bus.dropped_count(), 25, "backpressure should shed, not stall");
+        assert_eq!(
+            bus.dropped_count(),
+            25,
+            "backpressure should shed, not stall"
+        );
     }
 
     #[test]

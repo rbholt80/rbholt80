@@ -42,7 +42,11 @@ fn arg_path(step: &Step, key: &str) -> Result<PathBuf, String> {
 /// Describe one directory entry richly enough for a file manager to render it
 /// without a second round trip.
 pub fn entry_json(path: &Path) -> Json {
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     let md = fs::symlink_metadata(path).ok();
     let (size, modified, is_dir, is_link) = match &md {
         Some(m) => (
@@ -80,7 +84,9 @@ pub fn classify(path: &Path, is_dir: bool) -> &'static str {
     match extension(path).as_str() {
         "mp3" | "flac" | "wav" | "m4a" | "ogg" | "opus" | "aac" | "wma" | "aiff" => "audio",
         "mp4" | "mkv" | "mov" | "avi" | "webm" | "m4v" | "wmv" | "flv" | "mpg" | "mpeg" => "video",
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "heic" | "svg" | "avif" => "image",
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "heic" | "svg" | "avif" => {
+            "image"
+        }
         "pdf" | "epub" | "mobi" | "djvu" => "document",
         "doc" | "docx" | "odt" | "rtf" | "pages" => "document",
         "xls" | "xlsx" | "ods" | "csv" | "tsv" | "numbers" => "sheet",
@@ -97,7 +103,10 @@ pub fn classify(path: &Path, is_dir: bool) -> &'static str {
 }
 
 pub fn extension(path: &Path) -> String {
-    path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase()
+    path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 fn list(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
@@ -131,7 +140,9 @@ fn list(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
     entries.sort_by(|a, b| {
         let (ad, bd) = (a.bool_or("is_dir", false), b.bool_or("is_dir", false));
         bd.cmp(&ad).then_with(|| {
-            a.str_or("name", "").to_lowercase().cmp(&b.str_or("name", "").to_lowercase())
+            a.str_or("name", "")
+                .to_lowercase()
+                .cmp(&b.str_or("name", "").to_lowercase())
         })
     });
 
@@ -152,19 +163,30 @@ fn stat(step: &Step) -> Result<Effect, String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
-    Ok(Effect::read_only(entry_json(&path), format!("described {}", path.display())))
+    Ok(Effect::read_only(
+        entry_json(&path),
+        format!("described {}", path.display()),
+    ))
 }
 
 fn read(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
     let path = arg_path(step, "path")?;
-    let limit = step.args.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_READ_LIMIT);
+    let limit = step
+        .args
+        .get("max_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_READ_LIMIT);
     let md = fs::metadata(&path).map_err(|e| format!("cannot stat {}: {}", path.display(), e))?;
     if md.is_dir() {
         return Err(format!("{} is a directory", path.display()));
     }
     let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
     let truncated = bytes.len() as u64 > limit;
-    let slice = if truncated { &bytes[..limit as usize] } else { &bytes[..] };
+    let slice = if truncated {
+        &bytes[..limit as usize]
+    } else {
+        &bytes[..]
+    };
 
     // Binary files are reported as such rather than mangled into replacement
     // characters and fed to a model as if they were prose.
@@ -190,7 +212,12 @@ fn read(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
             ("truncated", truncated.into()),
             ("binary", false.into()),
         ]),
-        format!("read {} ({} bytes{})", path.display(), md.len(), if truncated { ", truncated" } else { "" }),
+        format!(
+            "read {} ({} bytes{})",
+            path.display(),
+            md.len(),
+            if truncated { ", truncated" } else { "" }
+        ),
     ))
 }
 
@@ -218,7 +245,8 @@ fn write(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     // Snapshot first: the undo record has to exist before the damage does.
     let backup = ctx.journal.snapshot(&path)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
     }
     // Write to a sibling temp file and rename, so a crash mid-write cannot
     // leave a half-written file where a whole one used to be.
@@ -236,7 +264,11 @@ fn write(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             ("bytes", content.len().into()),
             ("created", (!existed).into()),
         ]),
-        Undo::RestoreFile { path: path.to_string_lossy().to_string(), backup, existed },
+        Undo::RestoreFile {
+            path: path.to_string_lossy().to_string(),
+            backup,
+            existed,
+        },
         format!(
             "{} {} ({} bytes)",
             if existed { "overwrote" } else { "created" },
@@ -250,7 +282,10 @@ fn mkdir(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let path = arg_path(step, "path")?;
     if path.exists() {
         return Ok(Effect::read_only(
-            json_obj([("path", path.to_string_lossy().to_string().into()), ("existed", true.into())]),
+            json_obj([
+                ("path", path.to_string_lossy().to_string().into()),
+                ("existed", true.into()),
+            ]),
             format!("{} already exists", path.display()),
         ));
     }
@@ -260,11 +295,15 @@ fn mkdir(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             format!("would create directory {}", path.display()),
         ));
     }
-    fs::create_dir_all(&path)
-        .map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
+    fs::create_dir_all(&path).map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
     Ok(Effect::with_undo(
-        json_obj([("path", path.to_string_lossy().to_string().into()), ("existed", false.into())]),
-        Undo::RemoveDir { path: path.to_string_lossy().to_string() },
+        json_obj([
+            ("path", path.to_string_lossy().to_string().into()),
+            ("existed", false.into()),
+        ]),
+        Undo::RemoveDir {
+            path: path.to_string_lossy().to_string(),
+        },
         format!("created directory {}", path.display()),
     ))
 }
@@ -286,8 +325,9 @@ pub fn move_path(from: &Path, to: &Path) -> Result<(), String> {
                 fs::remove_dir_all(from)
                     .map_err(|e| format!("cannot remove {}: {}", from.display(), e))
             } else {
-                fs::copy(from, to)
-                    .map_err(|e| format!("cannot copy {} to {}: {}", from.display(), to.display(), e))?;
+                fs::copy(from, to).map_err(|e| {
+                    format!("cannot copy {} to {}: {}", from.display(), to.display(), e)
+                })?;
                 fs::remove_file(from)
                     .map_err(|e| format!("cannot remove {}: {}", from.display(), e))
             }
@@ -304,8 +344,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
         if src.is_dir() {
             copy_tree(&src, &dst)?;
         } else {
-            fs::copy(&src, &dst)
-                .map_err(|e| format!("cannot copy {}: {}", src.display(), e))?;
+            fs::copy(&src, &dst).map_err(|e| format!("cannot copy {}: {}", src.display(), e))?;
         }
     }
     Ok(())
@@ -318,7 +357,10 @@ fn rename(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         return Err(format!("{} does not exist", from.display()));
     }
     if to.exists() {
-        return Err(format!("{} already exists — refusing to clobber it", to.display()));
+        return Err(format!(
+            "{} already exists — refusing to clobber it",
+            to.display()
+        ));
     }
     if ctx.dry_run {
         return Ok(Effect::read_only(
@@ -436,7 +478,12 @@ mod tests {
             let dir = root.join("work");
             fs::create_dir_all(&dir).unwrap();
             let journal = Journal::open(&root.join("journal")).unwrap();
-            Fixture { root, dir, cfg: Config::with_defaults(), journal }
+            Fixture {
+                root,
+                dir,
+                cfg: Config::with_defaults(),
+                journal,
+            }
         }
         fn ctx(&self, dry: bool) -> ExecCtx<'_> {
             ExecCtx::rooted(
@@ -470,10 +517,20 @@ mod tests {
         fs::write(f.dir.join("alpha.txt"), b"x").unwrap();
         fs::write(f.dir.join(".hidden"), b"x").unwrap();
 
-        let e = run(&f, "fs.list", json_obj([("path", f.dir.to_string_lossy().to_string().into())]), false).unwrap();
+        let e = run(
+            &f,
+            "fs.list",
+            json_obj([("path", f.dir.to_string_lossy().to_string().into())]),
+            false,
+        )
+        .unwrap();
         let entries = e.result.arr_or_empty("entries");
         assert_eq!(entries.len(), 2, "hidden files are excluded by default");
-        assert_eq!(entries[0].str_or("name", ""), "zeta-dir", "directories sort first");
+        assert_eq!(
+            entries[0].str_or("name", ""),
+            "zeta-dir",
+            "directories sort first"
+        );
         assert_eq!(entries[1].str_or("kind", ""), "text");
     }
 
@@ -503,7 +560,10 @@ mod tests {
             .flatten()
             .filter(|d| d.file_name().to_string_lossy().contains("nous-tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "atomic write must not leave temp files");
+        assert!(
+            leftovers.is_empty(),
+            "atomic write must not leave temp files"
+        );
     }
 
     #[test]
@@ -531,7 +591,13 @@ mod tests {
         let victim = f.dir.join("important.txt");
         fs::write(&victim, b"do not lose me").unwrap();
 
-        let e = run(&f, "fs.delete", json_obj([("path", victim.to_string_lossy().to_string().into())]), false).unwrap();
+        let e = run(
+            &f,
+            "fs.delete",
+            json_obj([("path", victim.to_string_lossy().to_string().into())]),
+            false,
+        )
+        .unwrap();
         assert!(!victim.exists());
         assert!(e.result.bool_or("recoverable", false));
         let trashed = PathBuf::from(e.result.str_or("trash", ""));
@@ -567,10 +633,19 @@ mod tests {
         let f = Fixture::new("binary");
         let bin = f.dir.join("clip.mp4");
         fs::write(&bin, [0xffu8, 0xd8, 0x00, 0x01, 0xfe]).unwrap();
-        let e = run(&f, "fs.read", json_obj([("path", bin.to_string_lossy().to_string().into())]), false).unwrap();
+        let e = run(
+            &f,
+            "fs.read",
+            json_obj([("path", bin.to_string_lossy().to_string().into())]),
+            false,
+        )
+        .unwrap();
         assert!(e.result.bool_or("binary", false));
         assert_eq!(e.result.str_or("kind", ""), "video");
-        assert!(e.result.get("content").is_none(), "binary content must not be inlined");
+        assert!(
+            e.result.get("content").is_none(),
+            "binary content must not be inlined"
+        );
     }
 
     #[test]

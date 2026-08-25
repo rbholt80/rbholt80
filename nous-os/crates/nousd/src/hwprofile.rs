@@ -242,7 +242,11 @@ fn detect_gpus() -> Vec<Gpu> {
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .map(|b| b / 1024 / 1024)
                 .unwrap_or(0);
-            out.push(Gpu { vendor: vendor.to_string(), name: name.clone(), vram_mb });
+            out.push(Gpu {
+                vendor: vendor.to_string(),
+                name: name.clone(),
+                vram_mb,
+            });
         }
     }
 
@@ -250,20 +254,30 @@ fn detect_gpus() -> Vec<Gpu> {
     if have("nvidia-smi") {
         if let Ok(r) = run(
             "nvidia-smi",
-            &["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            &[
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
             Duration::from_secs(5),
         ) {
             if r.ok() {
                 for (i, line) in r.stdout.lines().enumerate() {
                     let mut parts = line.split(',');
                     let name = parts.next().unwrap_or("nvidia").trim().to_string();
-                    let mb: u64 = parts.next().and_then(|m| m.trim().parse().ok()).unwrap_or(0);
+                    let mb: u64 = parts
+                        .next()
+                        .and_then(|m| m.trim().parse().ok())
+                        .unwrap_or(0);
                     match out.iter_mut().filter(|g| g.vendor == "nvidia").nth(i) {
                         Some(g) => {
                             g.name = name;
                             g.vram_mb = mb;
                         }
-                        None => out.push(Gpu { vendor: "nvidia".into(), name, vram_mb: mb }),
+                        None => out.push(Gpu {
+                            vendor: "nvidia".into(),
+                            name,
+                            vram_mb: mb,
+                        }),
                     }
                 }
             }
@@ -279,7 +293,13 @@ impl HardwareProfile {
             ("explain", self.profile.explain().into()),
             ("route", self.profile.route().into()),
             ("route_small", self.profile.small_route().into()),
-            ("local_model", self.profile.local_model().map(Json::from).unwrap_or(Json::Null)),
+            (
+                "local_model",
+                self.profile
+                    .local_model()
+                    .map(Json::from)
+                    .unwrap_or(Json::Null),
+            ),
             ("cpus", self.cpus.into()),
             ("cpu_model", self.cpu_model.clone().into()),
             ("ram_mb", self.ram_mb.into()),
@@ -300,14 +320,20 @@ impl HardwareProfile {
                         .collect(),
                 ),
             ),
-            ("notes", Json::Arr(self.notes.iter().map(|n| Json::Str(n.clone())).collect())),
+            (
+                "notes",
+                Json::Arr(self.notes.iter().map(|n| Json::Str(n.clone())).collect()),
+            ),
         ])
     }
 
     /// A short report for `nousctl doctor`.
     pub fn report(&self) -> String {
         let mut s = String::new();
-        s.push_str(&format!("  CPU     {} ({} cores, {})\n", self.cpu_model, self.cpus, self.arch));
+        s.push_str(&format!(
+            "  CPU     {} ({} cores, {})\n",
+            self.cpu_model, self.cpus, self.arch
+        ));
         s.push_str(&format!("  Memory  {} MB\n", self.ram_mb));
         s.push_str(&format!("  Disk    {} MB free on /\n", self.disk_free_mb));
         if self.gpus.is_empty() {
@@ -392,7 +418,10 @@ mod tests {
 
         let mut single = Vec::new();
         classify(8_192, 1, 0, &mut single);
-        assert!(single.iter().any(|n| n.contains("single core")), "{single:?}");
+        assert!(
+            single.iter().any(|n| n.contains("single core")),
+            "{single:?}"
+        );
     }
 
     #[test]
@@ -400,7 +429,11 @@ mod tests {
         let hw = detect();
         assert!(hw.ram_mb > 0, "should read total memory");
         assert!(hw.cpus >= 1);
-        assert_ne!(hw.profile, Profile::Unsupported, "the test machine should clear the floor");
+        assert_ne!(
+            hw.profile,
+            Profile::Unsupported,
+            "the test machine should clear the floor"
+        );
         assert!(hw.report().contains("Profile"));
         assert!(!hw.to_json().str_or("route", "").is_empty());
     }

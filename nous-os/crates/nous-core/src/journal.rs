@@ -64,7 +64,11 @@ pub enum Undo {
     None,
     /// Restore `path` from the snapshot at `backup`. `existed: false` means the
     /// undo is a delete, because the file did not exist beforehand.
-    RestoreFile { path: String, backup: Option<String>, existed: bool },
+    RestoreFile {
+        path: String,
+        backup: Option<String>,
+        existed: bool,
+    },
     /// Move `to` back to `from`.
     MovePath { from: String, to: String },
     /// Remove a directory the action created.
@@ -83,10 +87,17 @@ impl Undo {
     pub fn to_json(&self) -> Json {
         match self {
             Undo::None => Json::Null,
-            Undo::RestoreFile { path, backup, existed } => json_obj([
+            Undo::RestoreFile {
+                path,
+                backup,
+                existed,
+            } => json_obj([
                 ("kind", "restore_file".into()),
                 ("path", path.clone().into()),
-                ("backup", backup.clone().map(Json::Str).unwrap_or(Json::Null)),
+                (
+                    "backup",
+                    backup.clone().map(Json::Str).unwrap_or(Json::Null),
+                ),
                 ("existed", (*existed).into()),
             ]),
             Undo::MovePath { from, to } => json_obj([
@@ -112,19 +123,26 @@ impl Undo {
         match v.str_or("kind", "") {
             "restore_file" => Undo::RestoreFile {
                 path: v.str_or("path", "").to_string(),
-                backup: v.get("backup").and_then(|b| b.as_str()).map(|s| s.to_string()),
+                backup: v
+                    .get("backup")
+                    .and_then(|b| b.as_str())
+                    .map(|s| s.to_string()),
                 existed: v.bool_or("existed", false),
             },
             "move_path" => Undo::MovePath {
                 from: v.str_or("from", "").to_string(),
                 to: v.str_or("to", "").to_string(),
             },
-            "remove_dir" => Undo::RemoveDir { path: v.str_or("path", "").to_string() },
+            "remove_dir" => Undo::RemoveDir {
+                path: v.str_or("path", "").to_string(),
+            },
             "service_state" => Undo::ServiceState {
                 unit: v.str_or("unit", "").to_string(),
                 was_active: v.bool_or("was_active", false),
             },
-            "manual" => Undo::Manual { note: v.str_or("note", "").to_string() },
+            "manual" => Undo::Manual {
+                note: v.str_or("note", "").to_string(),
+            },
             _ => Undo::None,
         }
     }
@@ -133,10 +151,18 @@ impl Undo {
     pub fn describe(&self) -> String {
         match self {
             Undo::None => "nothing to undo".to_string(),
-            Undo::RestoreFile { path, existed: true, .. } => {
+            Undo::RestoreFile {
+                path,
+                existed: true,
+                ..
+            } => {
                 format!("restore previous contents of {}", path)
             }
-            Undo::RestoreFile { path, existed: false, .. } => format!("remove {}", path),
+            Undo::RestoreFile {
+                path,
+                existed: false,
+                ..
+            } => format!("remove {}", path),
             Undo::MovePath { from, to } => format!("move {} back to {}", to, from),
             Undo::RemoveDir { path } => format!("remove directory {}", path),
             Undo::ServiceState { unit, was_active } => {
@@ -176,7 +202,10 @@ impl Record {
             ("intent", self.intent.clone().into()),
             ("detail", self.detail.clone().into()),
             ("undo", self.undo.to_json()),
-            ("undone_by", self.undone_by.map(Json::from).unwrap_or(Json::Null)),
+            (
+                "undone_by",
+                self.undone_by.map(Json::from).unwrap_or(Json::Null),
+            ),
         ])
     }
 
@@ -202,6 +231,89 @@ impl Record {
     }
 }
 
+/// How much history to keep.
+///
+/// A system that warns you your disk is filling up must not be the thing
+/// filling it. Every mutation snapshots the file it is about to change, so an
+/// unbounded journal is an unbounded copy of everything you have ever edited.
+#[derive(Debug, Clone, Copy)]
+pub struct Retention {
+    /// Entries in the live journal before it is rotated.
+    pub max_records: usize,
+    /// How many rotated journals to keep. Older ones are deleted.
+    pub max_archives: usize,
+    /// Ceiling on the snapshot store. The oldest unreferenced snapshots go
+    /// first.
+    pub max_backup_bytes: u64,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Retention {
+            max_records: 20_000,
+            max_archives: 4,
+            max_backup_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// What a prune actually did. Reported, never silent: deleting history the user
+/// did not ask to lose should be visible.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PruneReport {
+    pub rotated: bool,
+    pub archives_removed: usize,
+    pub records_dropped: usize,
+    pub backups_removed: usize,
+    pub bytes_reclaimed: u64,
+    /// Snapshots kept because an action that can still be undone needs them.
+    pub kept_for_undo: usize,
+}
+
+impl PruneReport {
+    pub fn is_empty(&self) -> bool {
+        *self == PruneReport::default()
+    }
+
+    pub fn describe(&self) -> String {
+        if self.is_empty() {
+            return "nothing to prune".to_string();
+        }
+        let mut parts = Vec::new();
+        if self.rotated {
+            parts.push("rotated the journal".to_string());
+        }
+        if self.archives_removed > 0 {
+            parts.push(format!("dropped {} old journal(s)", self.archives_removed));
+        }
+        if self.backups_removed > 0 {
+            parts.push(format!("removed {} snapshot(s)", self.backups_removed));
+        }
+        if self.bytes_reclaimed > 0 {
+            parts.push(format!("reclaimed {}", human_bytes(self.bytes_reclaimed)));
+        }
+        if self.kept_for_undo > 0 {
+            parts.push(format!("kept {} still undoable", self.kept_for_undo));
+        }
+        parts.join(", ")
+    }
+}
+
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", n, UNITS[0])
+    } else {
+        format!("{:.1} {}", v, UNITS[i])
+    }
+}
+
 pub struct Journal {
     path: PathBuf,
     /// Snapshots taken before mutations live here.
@@ -224,13 +336,15 @@ impl Journal {
             .map_err(|e| format!("cannot create journal dir {}: {}", backups.display(), e))?;
         let path = dir.join("journal.jsonl");
         if !path.exists() {
-            File::create(&path)
-                .map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
+            File::create(&path).map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
         }
         let j = Journal {
             path,
             backups,
-            state: Mutex::new(JournalState { next_seq: 1, reverted: Vec::new() }),
+            state: Mutex::new(JournalState {
+                next_seq: 1,
+                reverted: Vec::new(),
+            }),
         };
         let existing = j.read_all()?;
         let mut st = j.state.lock().unwrap();
@@ -248,6 +362,38 @@ impl Journal {
         &self.backups
     }
 
+    fn dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Rotated journals, oldest first.
+    ///
+    /// Rotation preserves the append-only property that makes the journal worth
+    /// having: a rotated file is moved whole and never rewritten. History ages
+    /// out by whole files, and everything still on disk is still readable and
+    /// still undoable.
+    fn archives(&self) -> Vec<PathBuf> {
+        let mut found: Vec<(u64, PathBuf)> = Vec::new();
+        if let Ok(entries) = fs::read_dir(self.dir()) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(n) = name
+                    .strip_prefix("journal.")
+                    .and_then(|r| r.strip_suffix(".jsonl"))
+                    .and_then(|n| n.parse::<u64>().ok())
+                {
+                    found.push((n, e.path()));
+                }
+            }
+        }
+        // Higher index means older, so oldest first is descending.
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.into_iter().map(|(_, p)| p).collect()
+    }
+
     /// Snapshot a file before it is modified, returning the backup path.
     /// Returns `Ok(None)` when the file does not exist yet.
     pub fn snapshot(&self, path: &Path) -> Result<Option<String>, String> {
@@ -257,8 +403,7 @@ impl Journal {
         let seq = { self.state.lock().unwrap().next_seq };
         let stamp = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
         let dest = self.backups.join(format!("{:08}-{}", seq, stamp));
-        fs::copy(path, &dest)
-            .map_err(|e| format!("cannot snapshot {}: {}", path.display(), e))?;
+        fs::copy(path, &dest).map_err(|e| format!("cannot snapshot {}: {}", path.display(), e))?;
         Ok(Some(dest.to_string_lossy().to_string()))
     }
 
@@ -277,27 +422,38 @@ impl Journal {
             .append(true)
             .open(&self.path)
             .map_err(|e| format!("cannot open journal: {}", e))?;
-        f.write_all(line.as_bytes()).map_err(|e| format!("cannot write journal: {}", e))?;
+        f.write_all(line.as_bytes())
+            .map_err(|e| format!("cannot write journal: {}", e))?;
         // Durability matters here: the undo record must survive the crash that
         // the action it describes might cause.
-        f.sync_data().map_err(|e| format!("cannot sync journal: {}", e))?;
+        f.sync_data()
+            .map_err(|e| format!("cannot sync journal: {}", e))?;
         Ok(rec.seq)
     }
 
-    /// All records, oldest first, with `undone_by` resolved from the in-memory
-    /// revert index.
+    /// All records, oldest first, across rotated journals as well as the live
+    /// one, with `undone_by` resolved from the in-memory revert index.
     pub fn read_all(&self) -> Result<Vec<Record>, String> {
-        let f = File::open(&self.path).map_err(|e| format!("cannot read journal: {}", e))?;
         let mut out = Vec::new();
-        for line in BufReader::new(f).lines() {
-            let line = line.map_err(|e| format!("cannot read journal: {}", e))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            // A corrupt line is skipped rather than fatal: a truncated final
-            // write must not make the whole history unreadable.
-            if let Ok(v) = parse(&line) {
-                out.push(Record::from_json(&v));
+        let mut files = self.archives();
+        files.push(self.path.clone());
+        for file in files {
+            let f = match File::open(&file) {
+                Ok(f) => f,
+                // An archive that vanished between listing and opening is not
+                // an error; a missing live journal is handled by `open`.
+                Err(_) => continue,
+            };
+            for line in BufReader::new(f).lines() {
+                let line = line.map_err(|e| format!("cannot read journal: {}", e))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                // A corrupt line is skipped rather than fatal: a truncated final
+                // write must not make the whole history unreadable.
+                if let Ok(v) = parse(&line) {
+                    out.push(Record::from_json(&v));
+                }
             }
         }
         if let Ok(st) = self.state.lock() {
@@ -322,8 +478,180 @@ impl Journal {
 
     /// The most recent record that can still be reverted.
     pub fn last_revertible(&self) -> Result<Option<Record>, String> {
-        Ok(self.read_all()?.into_iter().rev().find(|r| r.is_revertible()))
+        Ok(self
+            .read_all()?
+            .into_iter()
+            .rev()
+            .find(|r| r.is_revertible()))
     }
+}
+
+impl Journal {
+    /// Age out history and reclaim snapshot space.
+    ///
+    /// The invariant, and the only one that matters: **a snapshot is never
+    /// removed while an action that can still be undone depends on it.** Undo
+    /// degrades by losing the oldest history, never by finding a journal entry
+    /// whose backup has gone.
+    pub fn prune(&self, keep: Retention) -> Result<PruneReport, String> {
+        self.prune_with(keep, false)
+    }
+
+    /// Same, but `dry_run` computes the report and removes nothing.
+    ///
+    /// This exists because a preview that under-reports is worse than no
+    /// preview: it teaches you the operation is harmless and then it is not.
+    pub fn prune_with(&self, keep: Retention, dry_run: bool) -> Result<PruneReport, String> {
+        let mut report = PruneReport::default();
+
+        // 1. Rotate the live journal if it has grown past the limit.
+        let live = count_lines(&self.path);
+        if live > keep.max_records {
+            report.rotated = true;
+            if !dry_run {
+                // Shift the existing archives down one, then move the live
+                // journal into slot 1. Nothing is ever rewritten in place --
+                // that is what keeps the log append-only.
+                let mut existing = self.archives();
+                existing.reverse(); // newest first, so shifting starts at the top
+                for path in existing {
+                    let n: u64 = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.strip_prefix("journal."))
+                        .and_then(|s| s.strip_suffix(".jsonl"))
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let next = self.dir().join(format!("journal.{}.jsonl", n + 1));
+                    let _ = fs::rename(&path, &next);
+                }
+                let first = self.dir().join("journal.1.jsonl");
+                fs::rename(&self.path, &first)
+                    .map_err(|e| format!("cannot rotate the journal: {}", e))?;
+                File::create(&self.path)
+                    .map_err(|e| format!("cannot start a new journal: {}", e))?;
+            }
+        }
+
+        // 2. Drop archives beyond the limit, oldest first.
+        let archives = self.archives();
+        if archives.len() > keep.max_archives {
+            for path in &archives[..archives.len() - keep.max_archives] {
+                report.records_dropped += count_lines(path);
+                report.bytes_reclaimed += fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                if dry_run || fs::remove_file(path).is_ok() {
+                    report.archives_removed += 1;
+                }
+            }
+        }
+
+        // 3. Remove snapshots nothing can still restore from.
+        let records = self.read_all()?;
+        let mut needed: Vec<String> = Vec::new();
+        for r in &records {
+            if let Undo::RestoreFile {
+                backup: Some(b), ..
+            } = &r.undo
+            {
+                if r.is_revertible() {
+                    needed.push(b.clone());
+                }
+            }
+        }
+        report.kept_for_undo = needed.len();
+
+        let mut orphans: Vec<(u64, u64, PathBuf)> = Vec::new(); // (mtime, size, path)
+        if let Ok(entries) = fs::read_dir(&self.backups) {
+            for e in entries.flatten() {
+                let path = e.path();
+                let as_str = path.to_string_lossy().to_string();
+                if needed.iter().any(|n| n == &as_str) {
+                    continue;
+                }
+                let md = match e.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                orphans.push((mtime, md.len(), path));
+            }
+        }
+        // Unreferenced snapshots go regardless of size: nothing can restore
+        // from them, so they are pure cost.
+        orphans.sort_by_key(|(mtime, _, _)| *mtime);
+        for (_, size, path) in &orphans {
+            if dry_run || fs::remove_file(path).is_ok() {
+                report.backups_removed += 1;
+                report.bytes_reclaimed += size;
+            }
+        }
+
+        // 4. If the snapshots that *are* still needed exceed the ceiling, drop
+        //    the oldest of them too, and accept that those actions can no
+        //    longer be undone. Running out of disk is the worse failure.
+        let mut live_backups: Vec<(u64, u64, PathBuf)> = Vec::new();
+        let mut total = 0u64;
+        for b in &needed {
+            let path = PathBuf::from(b);
+            if let Ok(md) = fs::metadata(&path) {
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                total += md.len();
+                live_backups.push((mtime, md.len(), path));
+            }
+        }
+        if total > keep.max_backup_bytes {
+            live_backups.sort_by_key(|(mtime, _, _)| *mtime);
+            for (_, size, path) in &live_backups {
+                if total <= keep.max_backup_bytes {
+                    break;
+                }
+                if dry_run || fs::remove_file(path).is_ok() {
+                    report.backups_removed += 1;
+                    report.bytes_reclaimed += size;
+                    report.kept_for_undo = report.kept_for_undo.saturating_sub(1);
+                    total = total.saturating_sub(*size);
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Total bytes the journal and its snapshots occupy.
+    pub fn disk_usage(&self) -> u64 {
+        let mut total = fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        for a in self.archives() {
+            total += fs::metadata(&a).map(|m| m.len()).unwrap_or(0);
+        }
+        if let Ok(entries) = fs::read_dir(&self.backups) {
+            for e in entries.flatten() {
+                total += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        total
+    }
+}
+
+fn count_lines(path: &Path) -> usize {
+    File::open(path)
+        .map(|f| {
+            BufReader::new(f)
+                .lines()
+                .map_while(Result::ok)
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// If this record is itself a revert, which sequence did it revert?
@@ -335,7 +663,10 @@ fn revert_target(rec: &Record) -> Option<u64> {
 }
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Format a unix timestamp as `YYYY-MM-DD HH:MM:SS` in UTC.
@@ -367,7 +698,8 @@ mod tests {
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("nous-journal-test-{}-{}", tag, std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("nous-journal-test-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
@@ -394,11 +726,23 @@ mod tests {
         let dir = tmpdir("seq");
         {
             let j = Journal::open(&dir).unwrap();
-            assert_eq!(j.append(rec("fs.read:/a", Outcome::Executed, Undo::None)).unwrap(), 1);
-            assert_eq!(j.append(rec("fs.read:/b", Outcome::Executed, Undo::None)).unwrap(), 2);
+            assert_eq!(
+                j.append(rec("fs.read:/a", Outcome::Executed, Undo::None))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                j.append(rec("fs.read:/b", Outcome::Executed, Undo::None))
+                    .unwrap(),
+                2
+            );
         }
         let j2 = Journal::open(&dir).unwrap();
-        assert_eq!(j2.append(rec("fs.read:/c", Outcome::Executed, Undo::None)).unwrap(), 3);
+        assert_eq!(
+            j2.append(rec("fs.read:/c", Outcome::Executed, Undo::None))
+                .unwrap(),
+            3
+        );
         assert_eq!(j2.read_all().unwrap().len(), 3);
         fs::remove_dir_all(&dir).ok();
     }
@@ -412,7 +756,12 @@ mod tests {
             backup: Some("/var/lib/nous/backups/1-a.txt".into()),
             existed: true,
         };
-        j.append(rec("fs.write:/home/joey/a.txt", Outcome::Confirmed, undo.clone())).unwrap();
+        j.append(rec(
+            "fs.write:/home/joey/a.txt",
+            Outcome::Confirmed,
+            undo.clone(),
+        ))
+        .unwrap();
         let back = &j.read_all().unwrap()[0];
         assert_eq!(back.undo, undo);
         assert_eq!(back.outcome, Outcome::Confirmed);
@@ -424,8 +773,11 @@ mod tests {
     fn refused_actions_are_not_revertible() {
         let dir = tmpdir("refused");
         let j = Journal::open(&dir).unwrap();
-        let u = Undo::RemoveDir { path: "/tmp/x".into() };
-        j.append(rec("fs.mkdir:/tmp/x", Outcome::Refused, u)).unwrap();
+        let u = Undo::RemoveDir {
+            path: "/tmp/x".into(),
+        };
+        j.append(rec("fs.mkdir:/tmp/x", Outcome::Refused, u))
+            .unwrap();
         assert!(!j.read_all().unwrap()[0].is_revertible());
         assert!(j.last_revertible().unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
@@ -439,16 +791,28 @@ mod tests {
             .append(rec(
                 "fs.write:/tmp/a",
                 Outcome::Executed,
-                Undo::RestoreFile { path: "/tmp/a".into(), backup: None, existed: false },
+                Undo::RestoreFile {
+                    path: "/tmp/a".into(),
+                    backup: None,
+                    existed: false,
+                },
             ))
             .unwrap();
         assert!(j.last_revertible().unwrap().is_some());
 
-        j.append(rec(&format!("journal.revert:{}", target), Outcome::Executed, Undo::None)).unwrap();
+        j.append(rec(
+            &format!("journal.revert:{}", target),
+            Outcome::Executed,
+            Undo::None,
+        ))
+        .unwrap();
 
         let original = j.get(target).unwrap().unwrap();
         assert_eq!(original.undone_by, Some(2));
-        assert!(!original.is_revertible(), "an undone action must not be undoable twice");
+        assert!(
+            !original.is_revertible(),
+            "an undone action must not be undoable twice"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -459,7 +823,10 @@ mod tests {
         let src = dir.join("subject.txt");
         assert_eq!(j.snapshot(&src).unwrap(), None);
         fs::write(&src, b"before").unwrap();
-        let backup = j.snapshot(&src).unwrap().expect("existing file yields a backup");
+        let backup = j
+            .snapshot(&src)
+            .unwrap()
+            .expect("existing file yields a backup");
         assert_eq!(fs::read_to_string(&backup).unwrap(), "before");
         fs::remove_dir_all(&dir).ok();
     }
@@ -468,13 +835,342 @@ mod tests {
     fn corrupt_lines_do_not_poison_the_log() {
         let dir = tmpdir("corrupt");
         let j = Journal::open(&dir).unwrap();
-        j.append(rec("fs.read:/a", Outcome::Executed, Undo::None)).unwrap();
-        let mut f = OpenOptions::new().append(true).open(dir.join("journal.jsonl")).unwrap();
+        j.append(rec("fs.read:/a", Outcome::Executed, Undo::None))
+            .unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(dir.join("journal.jsonl"))
+            .unwrap();
         f.write_all(b"{\"seq\": trunca\n").unwrap();
         drop(f);
-        j.append(rec("fs.read:/b", Outcome::Executed, Undo::None)).unwrap();
+        j.append(rec("fs.read:/b", Outcome::Executed, Undo::None))
+            .unwrap();
         assert_eq!(j.read_all().unwrap().len(), 2);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------------------ retention
+
+    /// A record that snapshots a real file, so pruning has something to weigh.
+    fn rec_with_backup(j: &Journal, dir: &Path, name: &str, bytes: usize) -> Record {
+        let src = dir.join(name);
+        fs::write(&src, vec![b'x'; bytes]).unwrap();
+        let backup = j.snapshot(&src).unwrap();
+        Record {
+            undo: Undo::RestoreFile {
+                path: src.to_string_lossy().to_string(),
+                backup,
+                existed: true,
+            },
+            ..rec(
+                &format!("fs.write:{}", src.display()),
+                Outcome::Executed,
+                Undo::None,
+            )
+        }
+    }
+
+    #[test]
+    fn rotation_ages_history_out_without_losing_it() {
+        let dir = tmpdir("rotate");
+        let j = Journal::open(&dir).unwrap();
+        for i in 0..30 {
+            j.append(rec(
+                &format!("fs.read:/a{}", i),
+                Outcome::Executed,
+                Undo::None,
+            ))
+            .unwrap();
+        }
+
+        let keep = Retention {
+            max_records: 10,
+            max_archives: 4,
+            ..Default::default()
+        };
+        let report = j.prune(keep).unwrap();
+        assert!(report.rotated);
+
+        // Everything is still readable, and still in order.
+        let all = j.read_all().unwrap();
+        assert_eq!(all.len(), 30, "rotation must not lose history");
+        assert_eq!(all[0].seq, 1);
+        assert_eq!(all[29].seq, 30);
+
+        // And new records keep counting from where they left off.
+        assert_eq!(
+            j.append(rec("fs.read:/new", Outcome::Executed, Undo::None))
+                .unwrap(),
+            31
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn archives_beyond_the_limit_are_dropped_oldest_first() {
+        let dir = tmpdir("archives");
+        let j = Journal::open(&dir).unwrap();
+        let keep = Retention {
+            max_records: 5,
+            max_archives: 2,
+            ..Default::default()
+        };
+
+        // Five rotations, so three archives should be discarded.
+        for round in 0..5 {
+            for i in 0..6 {
+                j.append(rec(
+                    &format!("fs.read:/r{}-{}", round, i),
+                    Outcome::Executed,
+                    Undo::None,
+                ))
+                .unwrap();
+            }
+            j.prune(keep).unwrap();
+        }
+
+        let archives: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("journal."))
+            .filter(|e| e.file_name().to_string_lossy() != "journal.jsonl")
+            .collect();
+        assert!(
+            archives.len() <= 2,
+            "kept {} archives, expected at most 2",
+            archives.len()
+        );
+
+        // The most recent history survives; the oldest is what went.
+        let all = j.read_all().unwrap();
+        assert!(
+            all.iter().any(|r| r.capability.contains("/r4-")),
+            "recent history must remain"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_snapshot_needed_for_undo_is_never_removed() {
+        // The invariant the whole design rests on. Pruning may lose old
+        // history; it may never leave a journal entry pointing at a snapshot
+        // that is gone.
+        let dir = tmpdir("undo-safety");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let j = Journal::open(&dir).unwrap();
+
+        let live = rec_with_backup(&j, &work, "still-undoable.txt", 4096);
+        let backup_path = match &live.undo {
+            Undo::RestoreFile {
+                backup: Some(b), ..
+            } => PathBuf::from(b),
+            _ => panic!("expected a snapshot"),
+        };
+        let seq = j.append(live).unwrap();
+
+        let report = j
+            .prune(Retention {
+                max_records: 1,
+                max_archives: 0,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!(
+            backup_path.exists(),
+            "a snapshot backing a revertible action must survive"
+        );
+        assert_eq!(report.kept_for_undo, 1);
+        assert!(j.get(seq).unwrap().unwrap().is_revertible());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshots_nothing_can_restore_from_are_reclaimed() {
+        let dir = tmpdir("orphans");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let j = Journal::open(&dir).unwrap();
+
+        // An action that has already been undone no longer needs its snapshot.
+        let done = rec_with_backup(&j, &work, "already-undone.txt", 8192);
+        let orphan = match &done.undo {
+            Undo::RestoreFile {
+                backup: Some(b), ..
+            } => PathBuf::from(b),
+            _ => panic!("expected a snapshot"),
+        };
+        let seq = j.append(done).unwrap();
+        j.append(rec(
+            &format!("journal.revert:{}", seq),
+            Outcome::Executed,
+            Undo::None,
+        ))
+        .unwrap();
+
+        assert!(orphan.exists());
+        let report = j.prune(Retention::default()).unwrap();
+
+        assert!(
+            !orphan.exists(),
+            "an undone action's snapshot is dead weight"
+        );
+        assert_eq!(report.backups_removed, 1);
+        assert!(report.bytes_reclaimed >= 8192);
+        assert_eq!(report.kept_for_undo, 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn undo_still_works_after_a_prune() {
+        let dir = tmpdir("prune-then-undo");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let j = Journal::open(&dir).unwrap();
+
+        let target = work.join("notes.md");
+        fs::write(&target, b"original").unwrap();
+        let backup = j.snapshot(&target).unwrap();
+        fs::write(&target, b"changed").unwrap();
+        j.append(Record {
+            undo: Undo::RestoreFile {
+                path: target.to_string_lossy().to_string(),
+                backup: backup.clone(),
+                existed: true,
+            },
+            ..rec("fs.write:/notes", Outcome::Executed, Undo::None)
+        })
+        .unwrap();
+
+        // Fill the journal so a prune definitely runs, then undo.
+        for i in 0..50 {
+            j.append(rec(
+                &format!("fs.read:/n{}", i),
+                Outcome::Executed,
+                Undo::None,
+            ))
+            .unwrap();
+        }
+        j.prune(Retention {
+            max_records: 10,
+            max_archives: 2,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let record = j
+            .last_revertible()
+            .unwrap()
+            .expect("the write should still be undoable");
+        match &record.undo {
+            Undo::RestoreFile {
+                backup: Some(b), ..
+            } => {
+                fs::copy(b, &target).unwrap();
+            }
+            other => panic!("unexpected undo: {:?}", other),
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_backup_ceiling_is_enforced_even_against_undoable_actions() {
+        // Running out of disk is the worse failure. When the snapshot store
+        // exceeds its ceiling the oldest go, and those actions stop being
+        // undoable -- deliberately, and reported.
+        let dir = tmpdir("ceiling");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let j = Journal::open(&dir).unwrap();
+
+        for i in 0..5 {
+            let r = rec_with_backup(&j, &work, &format!("big{}.bin", i), 20_000);
+            j.append(r).unwrap();
+        }
+        let before = j.disk_usage();
+        assert!(
+            before > 90_000,
+            "expected the snapshots to be sizeable, got {}",
+            before
+        );
+
+        let report = j
+            .prune(Retention {
+                max_backup_bytes: 40_000,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!(report.backups_removed > 0);
+        assert!(j.disk_usage() < before);
+        assert!(
+            report.describe().contains("reclaimed"),
+            "{}",
+            report.describe()
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_preview_reports_exactly_what_the_real_prune_would_do() {
+        // The bug this was written for: the preview skipped the journal
+        // entirely, said "nothing to clean up", and then the real run
+        // reclaimed a megabyte. A preview that under-reports is worse than
+        // none -- it teaches you the operation is harmless.
+        let dir = tmpdir("dryrun");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let j = Journal::open(&dir).unwrap();
+
+        for i in 0..4 {
+            let r = rec_with_backup(&j, &work, &format!("f{}.bin", i), 10_000);
+            let seq = j.append(r).unwrap();
+            // Undo it, so its snapshot becomes reclaimable.
+            j.append(rec(
+                &format!("journal.revert:{}", seq),
+                Outcome::Executed,
+                Undo::None,
+            ))
+            .unwrap();
+        }
+
+        let before = j.disk_usage();
+        let preview = j.prune_with(Retention::default(), true).unwrap();
+        assert!(
+            preview.backups_removed > 0,
+            "the preview must see the reclaimable snapshots"
+        );
+        assert_eq!(j.disk_usage(), before, "a preview must remove nothing");
+
+        let real = j.prune_with(Retention::default(), false).unwrap();
+        assert_eq!(
+            real.backups_removed, preview.backups_removed,
+            "preview must match reality"
+        );
+        assert_eq!(real.bytes_reclaimed, preview.bytes_reclaimed);
+        assert!(j.disk_usage() < before);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pruning_a_healthy_journal_does_nothing() {
+        let dir = tmpdir("noop");
+        let j = Journal::open(&dir).unwrap();
+        j.append(rec("fs.read:/a", Outcome::Executed, Undo::None))
+            .unwrap();
+        let report = j.prune(Retention::default()).unwrap();
+        assert!(report.is_empty(), "{:?}", report);
+        assert_eq!(report.describe(), "nothing to prune");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn formats_byte_counts_readably() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
     #[test]

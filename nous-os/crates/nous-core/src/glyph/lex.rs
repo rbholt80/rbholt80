@@ -12,7 +12,10 @@ pub enum Tok {
     Ident(String),
     /// A number, already scaled by any unit suffix, with the suffix retained
     /// so the checker can report `1GB` rather than `1073741824`.
-    Num { value: f64, unit: Option<String> },
+    Num {
+        value: f64,
+        unit: Option<String>,
+    },
     /// A quoted string, split into literal and `${...}` interpolation pieces.
     Str(Vec<Piece>),
     /// A path literal: `~/Downloads`, `/etc/nous`, `./out.mp4`.
@@ -116,7 +119,13 @@ pub struct Lexer<'a> {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, String> {
-    Lexer { src: src.as_bytes(), i: 0, line: 1, col: 1 }.run()
+    Lexer {
+        src: src.as_bytes(),
+        i: 0,
+        line: 1,
+        col: 1,
+    }
+    .run()
 }
 
 impl<'a> Lexer<'a> {
@@ -150,7 +159,11 @@ impl<'a> Lexer<'a> {
             let (line, col) = (self.line, self.col);
             let c = match self.peek() {
                 None => {
-                    out.push(Token { tok: Tok::Eof, line, col });
+                    out.push(Token {
+                        tok: Tok::Eof,
+                        line,
+                        col,
+                    });
                     return Ok(out);
                 }
                 Some(c) => c,
@@ -220,10 +233,15 @@ impl<'a> Lexer<'a> {
                 }
                 b'"' | b'\'' => self.string(c)?,
                 b'~' | b'/' | b'.' => self.path()?,
-                c if c.is_ascii_digit() || (c == b'-' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit())) => {
+                c if c.is_ascii_digit()
+                    || (c == b'-' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit())) =>
+                {
                     self.number()?
                 }
-                b'-' if self.peek_at(1).is_some_and(|d| is_ident_start(d) || d == b'-') => {
+                b'-' if self
+                    .peek_at(1)
+                    .is_some_and(|d| is_ident_start(d) || d == b'-') =>
+                {
                     self.flag()
                 }
                 c if is_ident_start(c) => self.ident(),
@@ -299,7 +317,9 @@ impl<'a> Lexer<'a> {
             }
         }
         let text = String::from_utf8_lossy(&self.src[start..self.i]).to_string();
-        let value: f64 = text.parse().map_err(|_| self.err(&format!("bad number '{}'", text)))?;
+        let value: f64 = text
+            .parse()
+            .map_err(|_| self.err(&format!("bad number '{}'", text)))?;
 
         let unit_start = self.i;
         if self.peek() == Some(b'%') {
@@ -317,9 +337,16 @@ impl<'a> Lexer<'a> {
             return Ok(Tok::Num { value, unit: None });
         }
         let unit = String::from_utf8_lossy(&self.src[unit_start..self.i]).to_string();
-        let scale = unit_scale(&unit)
-            .ok_or_else(|| self.err(&format!("unknown unit '{}' (try KB, MB, GB, s, m, h, d)", unit)))?;
-        Ok(Tok::Num { value: value * scale, unit: Some(unit) })
+        let scale = unit_scale(&unit).ok_or_else(|| {
+            self.err(&format!(
+                "unknown unit '{}' (try KB, MB, GB, s, m, h, d)",
+                unit
+            ))
+        })?;
+        Ok(Tok::Num {
+            value: value * scale,
+            unit: Some(unit),
+        })
     }
 
     fn path(&mut self) -> Result<Tok, String> {
@@ -438,10 +465,34 @@ mod tests {
 
     #[test]
     fn scales_unit_suffixes() {
-        assert_eq!(toks("1GB")[0], Tok::Num { value: 1073741824.0, unit: Some("GB".into()) });
-        assert_eq!(toks("30s")[0], Tok::Num { value: 30.0, unit: Some("s".into()) });
-        assert_eq!(toks("1.5m")[0], Tok::Num { value: 90.0, unit: Some("m".into()) });
-        assert_eq!(toks("42")[0], Tok::Num { value: 42.0, unit: None });
+        assert_eq!(
+            toks("1GB")[0],
+            Tok::Num {
+                value: 1073741824.0,
+                unit: Some("GB".into())
+            }
+        );
+        assert_eq!(
+            toks("30s")[0],
+            Tok::Num {
+                value: 30.0,
+                unit: Some("s".into())
+            }
+        );
+        assert_eq!(
+            toks("1.5m")[0],
+            Tok::Num {
+                value: 90.0,
+                unit: Some("m".into())
+            }
+        );
+        assert_eq!(
+            toks("42")[0],
+            Tok::Num {
+                value: 42.0,
+                unit: None
+            }
+        );
     }
 
     #[test]
@@ -449,7 +500,13 @@ mod tests {
         let err = lex("5parsecs").unwrap_err();
         assert!(err.contains("unknown unit"), "{err}");
         // With a space it is simply a number followed by a word.
-        assert_eq!(toks("5 parsecs")[0], Tok::Num { value: 5.0, unit: None });
+        assert_eq!(
+            toks("5 parsecs")[0],
+            Tok::Num {
+                value: 5.0,
+                unit: None
+            }
+        );
     }
 
     #[test]
@@ -525,12 +582,21 @@ mod tests {
         assert_eq!(t[3], Tok::Ident("--preset".into()));
         assert_eq!(t[5], Tok::Ident("-vf".into()));
         // Negative numbers are still numbers.
-        assert_eq!(toks("-5")[0], Tok::Num { value: -5.0, unit: None });
+        assert_eq!(
+            toks("-5")[0],
+            Tok::Num {
+                value: -5.0,
+                unit: None
+            }
+        );
     }
 
     #[test]
     fn dotted_identifiers_stay_whole() {
-        assert_eq!(toks("curate.propose")[0], Tok::Ident("curate.propose".into()));
+        assert_eq!(
+            toks("curate.propose")[0],
+            Tok::Ident("curate.propose".into())
+        );
         assert_eq!(toks("plan.steps")[0], Tok::Ident("plan.steps".into()));
     }
 }

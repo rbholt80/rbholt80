@@ -47,6 +47,11 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* `display: flex` on a class beats the `hidden` attribute's `display: none`,
+ * so anything hidden in the markup reappears the moment it is given a layout.
+ * This is the rule that stops that, and it has to come before the components. */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   background: var(--bg);

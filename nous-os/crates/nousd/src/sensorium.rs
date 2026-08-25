@@ -7,8 +7,8 @@
 
 use crate::bus::Bus;
 use crate::exec::sysops;
-use nous_core::json::{json_obj, Json};
 use nous_core::journal::now_secs;
+use nous_core::json::{json_obj, Json};
 use nous_core::proto::topic;
 use nous_core::{Config, Event};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,7 +43,12 @@ pub fn evaluate(metrics: &Json, cfg: &Config) -> Vec<Alert> {
     let disk_pct = metrics.f64_or("disk_used_pct", 0.0);
     let disk_threshold = cfg.f64_or("sensor.disk_alert_pct", 92.0);
     if disk_pct >= disk_threshold {
-        let free_gb = metrics.get("disk_free_kb").and_then(|v| v.as_u64()).unwrap_or(0) / 1024 / 1024;
+        let free_gb = metrics
+            .get("disk_free_kb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            / 1024
+            / 1024;
         out.push(Alert {
             kind: "disk",
             severity: if disk_pct >= 97.0 { 4 } else { 3 },
@@ -61,7 +66,11 @@ pub fn evaluate(metrics: &Json, cfg: &Config) -> Vec<Alert> {
     }
 
     // Load is only meaningful relative to core count, so normalise it.
-    let cpus = metrics.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as f64;
+    let cpus = metrics
+        .get("cpus")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as f64;
     let load = metrics.f64_or("load1", 0.0);
     if load / cpus >= cfg.f64_or("sensor.load_alert", 4.0) {
         out.push(Alert {
@@ -82,11 +91,11 @@ pub struct Sensorium {
 
 impl Sensorium {
     pub fn new(bus: Arc<Bus>, cfg: Config) -> Sensorium {
-        Sensorium { bus, cfg, running: Arc::new(AtomicBool::new(true)) }
-    }
-
-    pub fn stop_handle(&self) -> Arc<AtomicBool> {
-        self.running.clone()
+        Sensorium {
+            bus,
+            cfg,
+            running: Arc::new(AtomicBool::new(true)),
+        }
     }
 
     /// Sample once and publish. Returns the alerts raised.
@@ -206,7 +215,10 @@ mod tests {
         s.tick(&mut last);
         assert!(rx.try_recv().is_ok(), "the first occurrence should notify");
         s.tick(&mut last);
-        assert!(rx.try_recv().is_err(), "a standing condition must not notify again");
+        assert!(
+            rx.try_recv().is_err(),
+            "a standing condition must not notify again"
+        );
     }
 
     #[test]

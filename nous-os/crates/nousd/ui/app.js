@@ -519,6 +519,28 @@ function refreshSystem() {
       Keys: ${creds.filter((c) => c.configured).map((c) => esc(c.provider)).join(', ') || 'none set'} ·
       add one with <span class="num">nousctl key set &lt;provider&gt;</span>
     </p>`;
+
+  renderStorage();
+}
+
+/* What the system stores on your behalf. Shown because it is the user's disk,
+ * and because a system that warns about disk space should account for its own. */
+function renderStorage() {
+  const s = (state.status && state.status.storage) || {};
+  const rows = [
+    ['Journal and snapshots', s.journal_bytes],
+    ['Trash store', s.trash_bytes],
+    ['Thumbnails', s.thumbnail_bytes],
+    ['Screenshots', s.screenshot_bytes],
+    ['Search index', s.index_bytes],
+  ];
+  $('#sys-storage').innerHTML = `
+    <div class="rows">${rows.map(([k, v]) => kv(k, bytes(v || 0))).join('')}</div>
+    <p class="faint mt-14 fs-125">
+      ${esc(s.total || '0 B')} in ${esc(s.path || '')}.
+      Old history is aged out automatically; a snapshot is never removed while the
+      action it would undo can still be undone.
+    </p>`;
 }
 
 const kv = (k, v, raw = false) => `
@@ -617,6 +639,18 @@ async function boot() {
     } catch (e) { toast(e.message, 'bad'); }
   };
   $('#btn-render').onclick = () => toast('Say “render my edit” to compile the timeline.');
+  $('#btn-storage').onclick = async () => {
+    try {
+      // Preview first, apply second. The preview reports exactly what the real
+      // pass would reclaim, so the number in the prompt is the true number.
+      const preview = await rpc('sys.maintenance', { apply: false });
+      if (!preview.bytes_reclaimed) { toast('Nothing to reclaim.'); return; }
+      if (!confirm(`${preview.summary}\n\nGo ahead?`)) return;
+      const done = await rpc('sys.maintenance', { apply: true });
+      toast(done.summary);
+      applyStatus(await rpc('sys.status'));
+    } catch (e) { toast(e.message, 'bad'); }
+  };
   $$('[data-media]').forEach((b) => { b.onclick = () => mediaControl(b.dataset.media); });
 
   // What kind of window is this? Decided before anything else, because the

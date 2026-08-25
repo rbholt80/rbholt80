@@ -55,7 +55,10 @@ impl Requested {
             ("scope_known", self.scope_known.into()),
             ("line", self.line.into()),
             ("summary", self.summary.clone().into()),
-            ("platform", self.platform.clone().map(Json::Str).unwrap_or(Json::Null)),
+            (
+                "platform",
+                self.platform.clone().map(Json::Str).unwrap_or(Json::Null),
+            ),
         ])
     }
 }
@@ -74,16 +77,26 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn is_valid(&self) -> bool {
-        !self.diagnostics.iter().any(|d| d.severity == Severity::Error)
+        !self
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
     }
 
     pub fn errors(&self) -> Vec<&Diagnostic> {
-        self.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect()
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect()
     }
 
     /// The highest risk anything in this flow can reach.
     pub fn peak_risk(&self) -> Risk {
-        self.requests.iter().map(|r| r.capability.risk()).max().unwrap_or(Risk::Read)
+        self.requests
+            .iter()
+            .map(|r| r.capability.risk())
+            .max()
+            .unwrap_or(Risk::Read)
     }
 
     /// True when nothing in the flow can change the machine.
@@ -111,14 +124,21 @@ impl Manifest {
         if self.requests.is_empty() {
             return "does nothing".to_string();
         }
-        let mut domains: Vec<&str> =
-            self.requests.iter().map(|r| r.capability.domain.as_str()).collect();
+        let mut domains: Vec<&str> = self
+            .requests
+            .iter()
+            .map(|r| r.capability.domain.as_str())
+            .collect();
         domains.sort_unstable();
         domains.dedup();
         format!(
             "{} {} across {} ({} risk)",
             self.requests.len(),
-            if self.requests.len() == 1 { "action" } else { "actions" },
+            if self.requests.len() == 1 {
+                "action"
+            } else {
+                "actions"
+            },
             domains.join(", "),
             self.peak_risk()
         )
@@ -134,7 +154,10 @@ impl Manifest {
             ("blast_radius", self.blast_radius().into()),
             ("asks", self.asks.into()),
             ("gates", self.gates.into()),
-            ("requests", Json::Arr(self.requests.iter().map(|r| r.to_json()).collect())),
+            (
+                "requests",
+                Json::Arr(self.requests.iter().map(|r| r.to_json()).collect()),
+            ),
             (
                 "diagnostics",
                 Json::Arr(
@@ -142,7 +165,15 @@ impl Manifest {
                         .iter()
                         .map(|d| {
                             json_obj([
-                                ("severity", if d.severity == Severity::Error { "error" } else { "warning" }.into()),
+                                (
+                                    "severity",
+                                    if d.severity == Severity::Error {
+                                        "error"
+                                    } else {
+                                        "warning"
+                                    }
+                                    .into(),
+                                ),
                                 ("line", d.line.into()),
                                 ("message", d.message.clone().into()),
                             ])
@@ -179,7 +210,9 @@ fn walk(
 ) {
     for stmt in stmts {
         match stmt {
-            Stmt::On { platform: p, body, .. } => {
+            Stmt::On {
+                platform: p, body, ..
+            } => {
                 // Blocks for other platforms are still checked — a flow that is
                 // broken on Windows should say so when you lint it on Linux.
                 walk(flow, body, platform, Some(p.clone()), bound, m);
@@ -228,7 +261,9 @@ fn check_call(
     // A foreign tool compiles to shell.exec, and so is governed like any other
     // capability rather than escaping the model.
     if flow.foreigns.contains_key(&call.target) {
-        let effective = active_platform.clone().unwrap_or_else(|| platform.to_string());
+        let effective = active_platform
+            .clone()
+            .unwrap_or_else(|| platform.to_string());
         match flow.foreign_for(&call.target, &effective) {
             Some(f) => {
                 m.requests.push(Requested {
@@ -294,12 +329,21 @@ fn check_call(
     let summary = if call.args.is_empty() {
         call.target.clone()
     } else {
-        let rendered: Vec<String> =
-            call.args.iter().map(|(k, v)| format!("{}: {}", k, v.render())).collect();
+        let rendered: Vec<String> = call
+            .args
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v.render()))
+            .collect();
         format!("{} {}", call.target, rendered.join(", "))
     };
 
-    m.requests.push(Requested { capability: cap, scope_known, line: call.line, summary, platform: active_platform });
+    m.requests.push(Requested {
+        capability: cap,
+        scope_known,
+        line: call.line,
+        summary,
+        platform: active_platform,
+    });
 }
 
 fn check_refs(v: &Value, line: usize, bound: &[String], m: &mut Manifest) {
@@ -350,9 +394,15 @@ mod tests {
                fs.write path: listing.first content: \"x\"
              }",
         );
-        assert!(m.requests[0].scope_known, "a literal path is known statically");
+        assert!(
+            m.requests[0].scope_known,
+            "a literal path is known statically"
+        );
         assert_eq!(m.requests[0].capability.scope, "~/Downloads");
-        assert!(!m.requests[1].scope_known, "a path from a prior result is not");
+        assert!(
+            !m.requests[1].scope_known,
+            "a path from a prior result is not"
+        );
     }
 
     #[test]
@@ -367,21 +417,33 @@ mod tests {
         let m = manifest("flow t { fs.list path: /tmp\n pkg.install name: mpv }");
         assert_eq!(m.peak_risk(), Risk::Elevated);
         assert!(!m.is_read_only());
-        assert!(m.blast_radius().contains("elevated"), "{}", m.blast_radius());
+        assert!(
+            m.blast_radius().contains("elevated"),
+            "{}",
+            m.blast_radius()
+        );
     }
 
     #[test]
     fn rejects_capabilities_that_do_not_exist() {
         let m = manifest("flow t { fs.incinerate path: /home }");
         assert!(!m.is_valid());
-        assert!(m.errors()[0].message.contains("no such capability"), "{:?}", m.errors());
+        assert!(
+            m.errors()[0].message.contains("no such capability"),
+            "{:?}",
+            m.errors()
+        );
     }
 
     #[test]
     fn rejects_references_to_unbound_names() {
         let m = manifest("flow t { curate.apply steps: plan.steps }");
         assert!(!m.is_valid());
-        assert!(m.errors()[0].message.contains("not bound above it"), "{:?}", m.errors());
+        assert!(
+            m.errors()[0].message.contains("not bound above it"),
+            "{:?}",
+            m.errors()
+        );
     }
 
     #[test]
@@ -395,8 +457,12 @@ mod tests {
         let ok = manifest("flow t { plan = curate.propose\n curate.apply steps: plan.steps }");
         assert!(ok.is_valid(), "{:?}", ok.diagnostics);
 
-        let backwards = manifest("flow t { curate.apply steps: plan.steps\n plan = curate.propose }");
-        assert!(!backwards.is_valid(), "order matters: a flow is not a graph you can reorder");
+        let backwards =
+            manifest("flow t { curate.apply steps: plan.steps\n plan = curate.propose }");
+        assert!(
+            !backwards.is_valid(),
+            "order matters: a flow is not a graph you can reorder"
+        );
     }
 
     #[test]
@@ -408,7 +474,10 @@ mod tests {
                }"#,
         );
         assert!(m.is_valid(), "{:?}", m.diagnostics);
-        assert_eq!(m.requests[0].capability.to_string(), "shell.exec:HandBrakeCLI");
+        assert_eq!(
+            m.requests[0].capability.to_string(),
+            "shell.exec:HandBrakeCLI"
+        );
         assert_eq!(m.requests[0].capability.risk(), Risk::Elevated);
     }
 
@@ -421,7 +490,11 @@ mod tests {
                }"#,
         );
         assert!(!m.is_valid());
-        assert!(m.errors()[0].message.contains("no binding for linux"), "{:?}", m.errors());
+        assert!(
+            m.errors()[0].message.contains("no binding for linux"),
+            "{:?}",
+            m.errors()
+        );
     }
 
     #[test]

@@ -178,7 +178,9 @@ impl Call {
     /// Convention, checked in order, so that `fs.write path: ~/a` yields
     /// `fs.write:~/a` without the author restating it.
     pub fn scope_value(&self) -> Option<&Value> {
-        for key in ["path", "from", "target", "name", "unit", "output", "project"] {
+        for key in [
+            "path", "from", "target", "name", "unit", "output", "project",
+        ] {
             if let Some(v) = self.arg(key) {
                 return Some(v);
             }
@@ -198,7 +200,11 @@ pub enum Stmt {
     /// Require an explicit human yes before continuing.
     Ask { prompt: Value, line: usize },
     /// `on linux { ... }` — a platform-conditional block.
-    On { platform: String, body: Vec<Stmt>, line: usize },
+    On {
+        platform: String,
+        body: Vec<Stmt>,
+        line: usize,
+    },
 }
 
 /// A foreign tool: an existing program made callable as a GLYPH node.
@@ -227,7 +233,10 @@ pub struct Flow {
 
 impl Flow {
     pub fn description(&self) -> &str {
-        self.meta.get("description").map(|s| s.as_str()).unwrap_or("")
+        self.meta
+            .get("description")
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     /// Pick the foreign binding that applies to `platform`.

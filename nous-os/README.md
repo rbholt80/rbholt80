@@ -195,7 +195,7 @@ Build the image yourself with `sudo dist/build-iso.sh`.
 git clone <this repository>
 cd nous-os
 cargo build --release        # no network needed: there are no dependencies
-cargo test                   # 290 tests
+cargo test                   # 308 tests
 dist/mint/selftest.sh        # 24 more, for the desktop shell scripts
 
 ./target/release/nousd &     # the daemon
@@ -235,6 +235,10 @@ one back.
   an over-broad grant to a confirmation rather than honouring it.
 - **Refusals are journalled too**, so a misbehaving agent cannot erase the
   evidence through the API it misused.
+- **It cleans up after itself.** The journal, the snapshots behind undo, the
+  trash store and the caches all have bounds, pruned on a timer — and a
+  snapshot is never removed while the action it would undo can still be undone.
+  A system that warns you about disk space has no business being the reason.
 
 ```console
 $ nousctl check fs.write:/boot/grub/grub.cfg
@@ -246,7 +250,7 @@ denied — '/boot/grub/grub.cfg' is on the protected list (/boot/**) [protected-
 
 ## Where it stands
 
-This is `0.1.0`: a real system you can run, install and dual-boot, with 290 Rust tests and 24 shell tests. It is not a finished consumer OS. Honest gaps:
+This is `0.1.0`: a real system you can run, install and dual-boot, with 308 Rust tests and 24 shell tests. It is not a finished consumer OS. Honest gaps:
 
 - The media Studio's edit graph compiles and renders; its UI is a timeline view,
   not a full editor yet.
