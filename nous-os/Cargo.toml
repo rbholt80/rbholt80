@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nous-core",
+    "crates/nousd",
+    "crates/nsh",
+    "crates/nousctl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["NOUS OS contributors"]
+repository = "https://github.com/rbholt80/rbholt80"
+rust-version = "1.74"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
