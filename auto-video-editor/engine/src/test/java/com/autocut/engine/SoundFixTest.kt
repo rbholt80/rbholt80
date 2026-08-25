@@ -8,6 +8,7 @@ import com.autocut.engine.plan.EditPlanner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -65,6 +66,47 @@ class SoundFixTest {
 
         assertTrue(plan.notes.any { it.id == "audio_clipped" })
         assertTrue("clipped audio must never be boosted", plan.audio.gainDb <= 0f)
+    }
+
+    @Test
+    fun `no limiter is offered when the gain it protects is not applied`() {
+        // Recorded 0.6 dB under target with only 0.4 dB of headroom, so a limiter
+        // would be needed for that gain — but 0.6 dB is inside the deadband, so
+        // no gain is applied. Offering the limiter anyway would list an IMPORTANT
+        // fix, switched on, that reaches nothing: the plan's audio adjustment is
+        // identity, so the renderer adds no audio processor at all.
+        val duration = seconds(20.0)
+        val plan = EditPlanner.plan(
+            MediaAnalyzer.analyze(
+                Fixtures.signals(
+                    duration,
+                    audio = Fixtures.speechWithSilences(
+                        duration,
+                        listOf(range(0.0, 4.0)),
+                        speechRms = 0.1479f,  // -16.6 dBFS, 0.6 dB under target
+                        speechPeak = 0.8511f, // -1.4 dBFS, only 0.4 dB of headroom
+                    ),
+                )
+            )
+        )
+
+        assertNull(plan.fix(EditPlanner.ID_NORMALIZE_LOUDNESS))
+        assertNull(plan.fix(EditPlanner.ID_LIMIT_PEAKS))
+        assertTrue(plan.audio.isIdentity)
+    }
+
+    @Test
+    fun `switching the gain off takes the limiter with it`() {
+        val analysis = MediaAnalyzer.analyze(quietWithHotPeaks())
+        val plan = EditPlanner.plan(
+            analysis,
+            EditPreferences().withFix(EditPlanner.ID_NORMALIZE_LOUDNESS, false),
+        )
+
+        // Nothing left for a limiter to protect, so it stops being offered
+        // rather than sitting there enabled and inert.
+        assertNull(plan.fix(EditPlanner.ID_LIMIT_PEAKS))
+        assertTrue(plan.audio.isIdentity)
     }
 
     @Test

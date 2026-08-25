@@ -30,10 +30,16 @@ class StabilizationEffect(
     private val matrix = Matrix()
 
     override fun getMatrix(presentationTimeUs: Long): Matrix {
-        val (offsetX, offsetY) = track.offsetAt(presentationTimeUs - clipStartInCompositionUs)
+        // Media3's matrix space is y-up — Crop documents its top edge as greater
+        // than its bottom — while the track is measured in raster order. The
+        // conversion between the two lives in the engine, where it is a pure
+        // function with a test on it, because nothing that touches a graphics
+        // Matrix can be unit tested off a device.
+        val (translateX, translateY) =
+            track.ndcTranslationAt(presentationTimeUs - clipStartInCompositionUs)
         matrix.reset()
         matrix.postScale(track.zoom, track.zoom)
-        matrix.postTranslate(2f * offsetX, 2f * offsetY)
+        matrix.postTranslate(translateX, translateY)
         return matrix
     }
 }

@@ -30,7 +30,14 @@ data class StabilizationKeyframe(
     val timeUs: Long,
     /** Positive moves the picture right, in fractions of frame width. */
     val offsetX: Float,
-    /** Positive moves the picture up, in fractions of frame height. */
+    /**
+     * Positive moves the picture DOWN, in fractions of frame height.
+     *
+     * Down-positive because that is the order the measurement arrives in: the
+     * analysis frame is read row-major from the top, so a higher row index is
+     * further down the picture. Renderers whose coordinate space is y-up have to
+     * flip this once, at their own boundary.
+     */
     val offsetY: Float,
 )
 
@@ -60,6 +67,28 @@ data class StabilizationTrack(
         val span = (b.timeUs - a.timeUs).toFloat()
         val t = if (span <= 0f) 0f else (timeUs - a.timeUs) / span
         return (a.offsetX + (b.offsetX - a.offsetX) * t) to (a.offsetY + (b.offsetY - a.offsetY) * t)
+    }
+
+    /**
+     * The correction at [timeUs] as a translation in normalised device
+     * coordinates, where the frame spans -1..1 on both axes and **y points up**.
+     *
+     * Two conversions happen here, and both are easy to get silently wrong:
+     *
+     *  - the frame spans 2 units rather than 1, so a correction expressed as a
+     *    fraction of frame size doubles;
+     *  - [StabilizationKeyframe.offsetY] is measured in raster order, where
+     *    larger means further down the picture, so it has to be negated.
+     *
+     * This lives here rather than in the renderer because a renderer that owns a
+     * graphics matrix cannot be unit tested without a device, and an inverted
+     * sign does not fail loudly — it applies the correction backwards, roughly
+     * doubling the wobble it was meant to remove while still paying for the
+     * stabilisation crop.
+     */
+    fun ndcTranslationAt(timeUs: Long): Pair<Float, Float> {
+        val (offsetX, offsetY) = offsetAt(timeUs)
+        return (2f * offsetX) to (-2f * offsetY)
     }
 
     /**

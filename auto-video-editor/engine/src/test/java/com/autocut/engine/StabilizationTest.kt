@@ -26,12 +26,17 @@ class StabilizationTest {
      * A deliberate pan of [panPerFrame] px per frame with a [jitter] px shake
      * riding on top of it — a handheld tracking shot.
      */
-    private fun handheld(panPerFrame: Float, jitter: Float): MediaSignals {
+    private fun handheld(
+        panPerFrame: Float,
+        jitter: Float,
+        verticalJitter: Float = 0f,
+    ): MediaSignals {
         val frames = (0 until frameCount).map { i ->
+            val sign = if (i % 2 == 0) 1f else -1f
             Fixtures.steadyVideo(seconds(0.1))[0].copy(
                 timeUs = i * intervalUs,
-                shiftX = panPerFrame + if (i % 2 == 0) jitter else -jitter,
-                shiftY = 0f,
+                shiftX = panPerFrame + sign * jitter,
+                shiftY = sign * verticalJitter,
                 motion = 0.05f,
             )
         }
@@ -124,6 +129,50 @@ class StabilizationTest {
         assertEquals(0.08f, maxOffset, 0.005f)
     }
 
+    @Test
+    fun `vertical wobble is corrected as well as horizontal`() {
+        val signals = handheld(panPerFrame = 0f, jitter = 0f, verticalJitter = 2f)
+        val track = VideoAnalyzer.analyze(signals).shake.track!!
+
+        val raw = Dsp.cumulative(FloatArray(signals.video.size) { signals.video[it].shiftY })
+        val corrected = FloatArray(signals.video.size) { i ->
+            raw[i] + track.keyframes[i].offsetY * analysisHeight
+        }
+
+        val rawJitter = Dsp.meanAbsoluteDelta(raw)
+        val correctedJitter = Dsp.meanAbsoluteDelta(corrected)
+        assertTrue(
+            "vertical correction should smooth the path: $rawJitter -> $correctedJitter",
+            correctedJitter < rawJitter / 2f,
+        )
+    }
+
+    @Test
+    fun `a picture that has drifted down is corrected upward`() {
+        // shiftY is measured in raster order — the analysis frame is read from
+        // the top, so positive means the content moved DOWN. Cancelling that has
+        // to be a NEGATIVE offsetY. A renderer whose coordinate space is y-up
+        // must flip this once at its own boundary; applying it unflipped doubles
+        // the wobble instead of removing it, and no test saw that because this
+        // fixture used to hard-code shiftY to zero.
+        val signals = handheld(panPerFrame = 0f, jitter = 0f, verticalJitter = 2f)
+        val track = VideoAnalyzer.analyze(signals).shake.track!!
+        val raw = Dsp.cumulative(FloatArray(signals.video.size) { signals.video[it].shiftY })
+
+        val low = signals.video.size / 2      // even index: content sits lower
+        val high = low + 1                    // odd index: content sits higher
+        assertTrue("fixture assumption", raw[low] > raw[high])
+
+        assertTrue(
+            "content low in frame must be pulled up, got ${track.keyframes[low].offsetY}",
+            track.keyframes[low].offsetY < 0f,
+        )
+        assertTrue(
+            "content high in frame must be pushed down, got ${track.keyframes[high].offsetY}",
+            track.keyframes[high].offsetY > 0f,
+        )
+    }
+
     // ---- rebasing onto a cut timeline --------------------------------------
 
     private val fourSecondTrack = StabilizationTrack(
@@ -141,6 +190,23 @@ class StabilizationTest {
         assertEquals(0.15f, fourSecondTrack.offsetAt(seconds(1.5)).first, 0.001f)
         assertEquals(0f, fourSecondTrack.offsetAt(seconds(-5.0)).first, 0.001f)
         assertEquals(0.3f, fourSecondTrack.offsetAt(seconds(99.0)).first, 0.001f)
+    }
+
+    @Test
+    fun `converting to device coordinates doubles the offset and flips y`() {
+        // The frame spans 2 units in NDC, so a fraction-of-frame correction
+        // doubles. And offsetY is raster-ordered (positive means the content is
+        // lower in the picture) while NDC y points up, so it must be negated.
+        // Applying it unflipped does not fail loudly: it drives the frame the
+        // wrong way and roughly doubles the vertical wobble.
+        val track = StabilizationTrack(
+            keyframes = listOf(StabilizationKeyframe(0L, offsetX = 0.05f, offsetY = 0.04f)),
+            zoom = 1.1f,
+        )
+
+        val (x, y) = track.ndcTranslationAt(0L)
+        assertEquals(0.10f, x, 0.0001f)
+        assertEquals(-0.08f, y, 0.0001f)
     }
 
     @Test

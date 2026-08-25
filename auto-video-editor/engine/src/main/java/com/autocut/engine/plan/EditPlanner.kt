@@ -429,7 +429,13 @@ object EditPlanner {
             draft.gainDb = gainDb
         }
 
-        if (needsLimiter && gainDb > 0f) {
+        // The limiter exists only to make the gain safe, so it is offered only
+        // when a gain is actually being applied. Without this it could be listed
+        // as an enabled, IMPORTANT fix while buildAudioAdjust returned an
+        // identity adjustment and nothing reached the audio chain at all —
+        // either because the gain fell inside the deadband, or because the user
+        // switched the gain off and left this one on.
+        if (draft.isEnabled(ID_NORMALIZE_LOUDNESS) && needsLimiter && gainDb > 0f) {
             draft.addAudioFix(
                 id = ID_LIMIT_PEAKS,
                 kind = FixKind.LIMIT_PEAKS,

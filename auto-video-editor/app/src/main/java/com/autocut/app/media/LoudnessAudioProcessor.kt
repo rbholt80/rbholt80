@@ -37,7 +37,16 @@ class LoudnessAudioProcessor(adjust: AudioAdjust) : BaseAudioProcessor() {
     override fun queueInput(inputBuffer: ByteBuffer) {
         val size = inputBuffer.remaining()
         if (size == 0) return
-        val output = replaceOutputBuffer(size)
+        // Rounded down to whole 16-bit samples. Media3 only ever queues whole
+        // frames, so this should always equal size; asking for an odd number of
+        // bytes and then writing an even number would hand back an output buffer
+        // whose limit disagreed with what was written.
+        val usable = size and 1.inv()
+        if (usable == 0) {
+            inputBuffer.position(inputBuffer.limit())
+            return
+        }
+        val output = replaceOutputBuffer(usable)
         // A duplicate, not the caller's buffer: Media3 documents the input as
         // read-only apart from its position, and it reuses that buffer across
         // processors. Setting the byte order on it would reach outside this
