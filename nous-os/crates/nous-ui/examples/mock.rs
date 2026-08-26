@@ -99,6 +99,7 @@ fn main() {
 
         p.set_body(Body::Done {
             headline: "moved 137 files. nothing was deleted.".into(),
+            detail: "84 images into Pictures/2026\n31 documents into Documents\n22 archives into Archives".into(),
             undo_hint: true,
         });
         shot(&dir, &format!("06-done-{suffix}"), &theme, &p);

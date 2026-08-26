@@ -47,9 +47,12 @@ pub enum Body {
         headline: String,
         steps: Vec<Step>,
     },
-    /// A plan that was carried out.
+    /// A plan that was carried out. `headline` says what happened; `detail`
+    /// is whatever it produced, which is content rather than status and is
+    /// therefore not coloured as one.
     Done {
         headline: String,
+        detail: String,
         undo_hint: bool,
     },
     Error {
@@ -205,7 +208,15 @@ fn body_height(body: &Body, width: f64, c: &Canvas, theme: &Theme) -> f64 {
                 + steps.len() as f64 * Metrics::ROW_HEIGHT
                 + Metrics::GAP
         }
-        Body::Done { headline, .. } => h(headline, &theme.font) + Metrics::GAP,
+        Body::Done {
+            headline, detail, ..
+        } => {
+            let mut n = h(headline, &theme.font);
+            if !detail.is_empty() {
+                n += Metrics::UNIT + h(detail, &theme.font);
+            }
+            n + Metrics::GAP
+        }
         Body::Error { message } => h(message, &theme.font) + Metrics::GAP,
     }
 }
@@ -463,8 +474,20 @@ fn draw_body(c: &Canvas, panel: &Panel, theme: &Theme, layout: &Layout) {
             );
             c.text_wrapped(text, b.x, b.y + 22.0, &theme.font, theme.text, b.w);
         }
-        Body::Done { headline, .. } => {
-            c.text_wrapped(headline, b.x, b.y, &theme.font, theme.ok, b.w);
+        Body::Done {
+            headline, detail, ..
+        } => {
+            let used = c.text_wrapped(headline, b.x, b.y, &theme.font, theme.ok, b.w);
+            if !detail.is_empty() {
+                c.text_wrapped(
+                    detail,
+                    b.x,
+                    b.y + used + Metrics::UNIT,
+                    &theme.font,
+                    theme.text,
+                    b.w,
+                );
+            }
         }
         Body::Error { message } => {
             c.text_wrapped(message, b.x, b.y, &theme.font, theme.danger, b.w);
@@ -595,6 +618,7 @@ mod tests {
         let mut p = Panel::new();
         p.set_body(Body::Done {
             headline: "moved 3 files".into(),
+            detail: String::new(),
             undo_hint: true,
         });
         let small = Layout::compute(&p, Metrics::PANEL_WIDTH, &img.canvas(), &theme);

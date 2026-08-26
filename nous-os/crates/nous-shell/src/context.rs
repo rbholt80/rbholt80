@@ -21,10 +21,6 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn is_empty(&self) -> bool {
-        self.focus.is_none() && self.paths.is_empty() && self.cwd.is_none()
-    }
-
     /// A few words naming what is attached, for the chip on the prompt line.
     ///
     /// Returns `None` when there is nothing worth showing. A focused window
@@ -85,9 +81,11 @@ mod tests {
         let mut only_focus = Context::default();
         only_focus.focus = Some("Firefox".into());
         assert_eq!(only_focus.label(), None);
-        assert!(
-            !only_focus.is_empty(),
-            "but it is still context worth sending"
+        // It is still sent, though: the resolver uses it even when the panel
+        // does not show it.
+        assert_eq!(
+            only_focus.to_json().get("focus").and_then(|v| v.as_str()),
+            Some("Firefox")
         );
     }
 

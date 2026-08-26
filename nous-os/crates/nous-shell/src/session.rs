@@ -8,6 +8,7 @@
 //! testable without a daemon running.
 
 use crate::context::Context;
+use nous_core::journal::human_bytes as human;
 use nous_core::json::{json_obj, Json};
 use nous_core::proto::method;
 use nous_ui::panel::{Body, Step};
@@ -129,10 +130,96 @@ fn origin_note(preflight: &Json) -> String {
     }
 }
 
+/// How many rows of a listing to show before summarising the rest. The panel
+/// scrolls a proposal but not a listing, so this is a real limit and the count
+/// of what was left out is always shown rather than silently dropped.
+const LIST_LIMIT: usize = 12;
+
+fn and_the_rest(shown: usize, total: usize) -> Option<String> {
+    (total > shown).then(|| format!("… and {} more", total - shown))
+}
+
+/// Render whatever a step produced, so a result shows its content and not just
+/// the fact that it happened.
+///
+/// Returns `None` for a shape with nothing to say, which keeps the panel from
+/// growing a blank line under every action.
+fn describe(v: &Json) -> Option<String> {
+    if let Some(entries) = v.get("entries").and_then(|e| e.as_arr()) {
+        if entries.is_empty() {
+            return Some("nothing here".into());
+        }
+        let mut lines: Vec<String> = entries
+            .iter()
+            .take(LIST_LIMIT)
+            .map(|e| {
+                let name = e.str_or("name", "");
+                if e.bool_or("is_dir", false) {
+                    format!("{name}/")
+                } else {
+                    let size = e.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                    format!("{name}  ({})", human(size))
+                }
+            })
+            .collect();
+        lines.extend(and_the_rest(lines.len(), entries.len()));
+        return Some(lines.join("\n"));
+    }
+
+    if let Some(findings) = v.get("findings").and_then(|f| f.as_arr()) {
+        if findings.is_empty() {
+            return None;
+        }
+        let mut lines: Vec<String> = findings
+            .iter()
+            .take(LIST_LIMIT)
+            .map(|f| {
+                let title = f.str_or("title", "");
+                let detail = f.str_or("detail", "");
+                if detail.is_empty() {
+                    title.to_string()
+                } else {
+                    format!("{title} — {detail}")
+                }
+            })
+            .collect();
+        lines.extend(and_the_rest(lines.len(), findings.len()));
+        return Some(lines.join("\n"));
+    }
+
+    if let Some(procs) = v.get("processes").and_then(|p| p.as_arr()) {
+        if procs.is_empty() {
+            return None;
+        }
+        let mut lines: Vec<String> = procs
+            .iter()
+            .take(LIST_LIMIT)
+            .map(|p| {
+                let rss = p.get("rss_kb").and_then(|x| x.as_u64()).unwrap_or(0) * 1024;
+                format!("{}  {}", p.str_or("name", ""), human(rss))
+            })
+            .collect();
+        lines.extend(and_the_rest(lines.len(), procs.len()));
+        return Some(lines.join("\n"));
+    }
+
+    if v.get("load1").is_some() {
+        return Some(format!(
+            "load {:.2} · memory {:.0}% used · disk {:.0}% used",
+            v.f64_or("load1", 0.0),
+            v.f64_or("mem_used_pct", 0.0),
+            v.f64_or("disk_used_pct", 0.0)
+        ));
+    }
+
+    None
+}
+
 /// Turn the response to a submitted intent into a body.
 pub fn read_submission(out: &Json) -> Reply {
     let mut failures = Vec::new();
-    let mut detail = Vec::new();
+    let mut status = Vec::new();
+    let mut produced = Vec::new();
 
     for r in out.arr_or_empty("results") {
         let value = r.get("value").cloned().unwrap_or(Json::Null);
@@ -181,7 +268,13 @@ pub fn read_submission(out: &Json) -> Reply {
         let text = r.str_or("detail", "").to_string();
         if state == "ok" {
             if !text.is_empty() {
-                detail.push(text);
+                status.push(text);
+            }
+            // "sampled machine metrics" is not an answer to "what is my disk
+            // usage". Whatever the step actually produced goes in too, kept
+            // apart from the status line because it is content, not an outcome.
+            if let Some(shown) = describe(&value) {
+                produced.push(shown);
             }
         } else {
             failures.push(if text.is_empty() {
@@ -197,8 +290,8 @@ pub fn read_submission(out: &Json) -> Reply {
     }
 
     let message = out.str_or("message", "");
-    let headline = if !detail.is_empty() {
-        detail.join("\n")
+    let headline = if !status.is_empty() {
+        status.join("\n")
     } else if !message.is_empty() {
         message.to_string()
     } else {
@@ -207,6 +300,7 @@ pub fn read_submission(out: &Json) -> Reply {
     Reply {
         body: Body::Done {
             headline,
+            detail: produced.join("\n"),
             // Only offer undo when the journal actually recorded something to
             // undo; offering it otherwise is a promise the system cannot keep.
             undo_hint: out.bool_or("revertible", false),
@@ -251,6 +345,7 @@ pub fn run(client: &mut nous_core::ipc::Client, job: Job) -> Reply {
                         Reply {
                             body: Body::Done {
                                 headline: format!("applied {n} changes"),
+                                detail: String::new(),
                                 undo_hint: true,
                             },
                             pending: None,
@@ -266,6 +361,7 @@ pub fn run(client: &mut nous_core::ipc::Client, job: Job) -> Reply {
             Ok(out) => Reply {
                 body: Body::Done {
                     headline: out.str_or("detail", "undone").to_string(),
+                    detail: String::new(),
                     undo_hint: false,
                 },
                 pending: None,
@@ -525,6 +621,121 @@ mod tests {
         )]);
         let steps = plan_steps(&pf);
         assert_eq!(steps[0].risk, Risk::Critical);
+    }
+
+    #[test]
+    fn a_result_shows_what_it_produced_not_only_that_it_happened() {
+        // The bug: asking "what is my disk usage" answered "sampled machine
+        // metrics" and showed none of them.
+        let out = json_obj([(
+            "results",
+            arr(vec![json_obj([
+                ("state", "ok".into()),
+                ("detail", "sampled machine metrics".into()),
+                (
+                    "value",
+                    json_obj([
+                        ("load1", 0.44.into()),
+                        ("mem_used_pct", 4.0.into()),
+                        ("disk_used_pct", 88.0.into()),
+                    ]),
+                ),
+            ])]),
+        )]);
+        match read_submission(&out).body {
+            Body::Done {
+                headline, detail, ..
+            } => {
+                assert_eq!(headline, "sampled machine metrics");
+                assert!(
+                    detail.contains("88"),
+                    "the disk figure is missing: {detail}"
+                );
+                assert!(
+                    detail.contains("0.44"),
+                    "the load figure is missing: {detail}"
+                );
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_shows_its_entries_and_says_what_it_left_out() {
+        let entries: Vec<Json> = (0..30)
+            .map(|i| {
+                json_obj([
+                    ("name", format!("file{i}.txt").into()),
+                    ("size", 2048u64.into()),
+                ])
+            })
+            .collect();
+        let out = json_obj([(
+            "results",
+            arr(vec![json_obj([
+                ("state", "ok".into()),
+                ("value", json_obj([("entries", arr(entries))])),
+            ])]),
+        )]);
+        match read_submission(&out).body {
+            Body::Done { detail, .. } => {
+                assert!(detail.contains("file0.txt"));
+                assert!(detail.contains("2.0 KB"), "sizes are unreadable: {detail}");
+                // Truncation that does not say it truncated reads as a
+                // complete list.
+                assert!(detail.contains("18 more"), "left out silently: {detail}");
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_directory_is_marked_as_one_and_carries_no_size() {
+        let v = json_obj([(
+            "entries",
+            arr(vec![
+                json_obj([("name", "Pictures".into()), ("is_dir", true.into())]),
+                json_obj([("name", "a.txt".into()), ("size", 10u64.into())]),
+            ]),
+        )]);
+        let shown = describe(&v).expect("described");
+        assert!(shown.contains("Pictures/"), "got {shown}");
+        assert!(
+            !shown.contains("Pictures  ("),
+            "a folder was given a size: {shown}"
+        );
+        assert!(shown.contains("a.txt  (10 B)"), "got {shown}");
+    }
+
+    #[test]
+    fn an_empty_listing_says_so_rather_than_showing_nothing() {
+        assert_eq!(
+            describe(&json_obj([("entries", arr(vec![]))])).as_deref(),
+            Some("nothing here")
+        );
+    }
+
+    #[test]
+    fn a_shape_with_nothing_to_say_adds_no_blank_line() {
+        assert_eq!(describe(&Json::Null), None);
+        assert_eq!(describe(&json_obj([("ok", true.into())])), None);
+        // An empty findings list is not "nothing here": the step that produced
+        // it already said what it did.
+        assert_eq!(describe(&json_obj([("findings", arr(vec![]))])), None);
+    }
+
+    /// Sizes come from nous-core so every surface agrees. These cases pin the
+    /// behaviour this module depends on, in particular that a very large number
+    /// does not come out in the wrong unit.
+    #[test]
+    fn sizes_read_in_units_a_person_uses() {
+        assert_eq!(human(0), "0 B");
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(1024), "1.0 KB");
+        assert_eq!(human(1536), "1.5 KB");
+        assert_eq!(human(1024 * 1024 * 3), "3.0 MB");
+        // Past the last unit it must keep counting, not wrap or panic.
+        assert_eq!(human(u64::MAX), "16.0 EB");
     }
 
     #[test]

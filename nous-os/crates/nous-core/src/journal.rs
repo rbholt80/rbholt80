@@ -299,8 +299,13 @@ impl PruneReport {
     }
 }
 
+/// A byte count in the units a person reads.
+///
+/// The table runs to exabytes so that a large number never comes out as
+/// "16777216.0 TB", which is the shape a too-short table produces: correct,
+/// and unreadable.
 pub fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     let mut v = n as f64;
     let mut i = 0;
     while v >= 1024.0 && i < UNITS.len() - 1 {

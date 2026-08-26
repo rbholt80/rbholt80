@@ -32,12 +32,14 @@ fn main() {
     let mut args = std::env::args().skip(1).peekable();
     let mut once = false;
     let mut initial = String::new();
+    let mut capture = String::new();
     let mut context = Context::default();
 
     while let Some(a) = args.next() {
         match a.as_str() {
             "--once" => once = true,
             "--ask" => initial = args.next().unwrap_or_default(),
+            "--capture" => capture = args.next().unwrap_or_default(),
             "--focus" => context.focus = args.next().filter(|s| !s.is_empty()),
             "--cwd" => context.cwd = args.next().filter(|s| !s.is_empty()),
             // Takes the rest of the arguments up to the next option, because a
@@ -53,11 +55,12 @@ fn main() {
             "--help" | "-h" => {
                 println!("nous-shell [options]");
                 println!();
-                println!("  --ask TEXT      open with the prompt already filled in");
+                println!("  --ask TEXT      ask this straight away, without typing it");
                 println!("  --once          close after one request rather than staying open");
                 println!("  --paths FILE... attach a selection from the file manager");
                 println!("  --cwd DIR       attach the folder being looked at");
                 println!("  --focus TITLE   name the window that was in front");
+                println!("  --capture PNG   save a picture of the panel, for reporting a fault");
                 return;
             }
             other => {
@@ -67,13 +70,13 @@ fn main() {
         }
     }
 
-    if let Err(e) = run(once, &initial, context) {
+    if let Err(e) = run(once, &initial, capture, context) {
         eprintln!("nous-shell: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(once: bool, initial: &str, context: Context) -> Result<(), String> {
+fn run(once: bool, initial: &str, capture: String, context: Context) -> Result<(), String> {
     let theme = Theme::detect();
     let mut window = Window::open(
         "Nous",
@@ -85,12 +88,23 @@ fn run(once: bool, initial: &str, context: Context) -> Result<(), String> {
     let (jobs, replies) = spawn_worker();
     let mut panel = Panel::new();
     panel.context = context.label();
-    if !initial.is_empty() {
-        panel.input.set(initial);
-    }
     let mut pending: Option<Pending> = None;
     let mut busy = false;
     let mut height = 0.0f64;
+
+    // Something asked for by name -- from the file manager's menu, or on the
+    // command line -- is a request, not a draft. Pre-filling it and waiting for
+    // Enter would make clicking "Tidy this folder" do nothing visible. Asking
+    // is safe to do unprompted because it only produces a plan; nothing runs
+    // until that plan is approved.
+    if !initial.is_empty() {
+        panel.input.set(initial);
+        panel.set_body(Body::Working {
+            note: format!("working out what \"{initial}\" means…"),
+        });
+        busy = true;
+        let _ = jobs.send(Job::Ask(initial.to_string(), context.clone()));
+    }
 
     // Draw before waiting for anything: the panel must be on screen the moment
     // it is summoned, not after the first event arrives.
@@ -112,6 +126,13 @@ fn run(once: bool, initial: &str, context: Context) -> Result<(), String> {
                 pending = reply.pending;
                 panel.set_body(reply.body);
                 dirty = true;
+                if !capture.is_empty() {
+                    settle(&mut window, &panel, &theme, &mut height);
+                    window.capture(&capture)?;
+                    if once {
+                        return Ok(());
+                    }
+                }
                 if once && !matches!(panel.body, Body::Proposal { .. }) {
                     // Give the result a moment to be readable before the
                     // window disappears out from under it.
@@ -150,15 +171,7 @@ fn run(once: bool, initial: &str, context: Context) -> Result<(), String> {
                 panel.input.insert(&t);
                 dirty = true;
             }
-            Event::Key(k) => match act(
-                &mut panel,
-                &mut pending,
-                &mut busy,
-                &jobs,
-                k,
-                &window,
-                &context,
-            ) {
+            Event::Key(k) => match act(&mut panel, &mut pending, &mut busy, &jobs, k, &context) {
                 Action::Redraw => dirty = true,
                 Action::Quit => return Ok(()),
                 Action::Nothing => {}
@@ -196,7 +209,6 @@ fn act(
     busy: &mut bool,
     jobs: &Sender<Job>,
     k: Key,
-    window: &Window,
     context: &Context,
 ) -> Action {
     use nous_ui::ffi::*;
@@ -273,12 +285,12 @@ fn act(
         }
         XK_Up | XK_Down => {
             let delta = if k.sym == XK_Up { -1 } else { 1 };
-            let visible = visible_rows(panel, window);
+            let visible = visible_rows(panel);
             panel.move_selection(delta, visible);
             Action::Redraw
         }
         XK_Page_Up | XK_Page_Down => {
-            let visible = visible_rows(panel, window).max(1) as i32;
+            let visible = visible_rows(panel).max(1) as i32;
             let delta = if k.sym == XK_Page_Up {
                 -visible
             } else {
@@ -321,7 +333,7 @@ fn act(
 }
 
 /// How many steps are on screen, so paging moves by what the eye can see.
-fn visible_rows(panel: &Panel, _window: &Window) -> usize {
+fn visible_rows(panel: &Panel) -> usize {
     // Derived from the same metrics the layout uses, rather than re-running a
     // layout that would need a live canvas.
     let list = Metrics::PANEL_MAX_HEIGHT - Metrics::PROMPT_HEIGHT - 30.0 - Metrics::PAD - 44.0;
@@ -395,4 +407,256 @@ fn spawn_worker() -> (Sender<Job>, Receiver<Reply>) {
     });
 
     (job_tx, reply_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nous_core::json::Json;
+    use nous_ui::ffi::*;
+    use nous_ui::panel::Step as PanelStep;
+    use nous_ui::theme::Risk;
+
+    struct Harness {
+        panel: Panel,
+        pending: Option<Pending>,
+        busy: bool,
+        jobs: Sender<Job>,
+        sent: Receiver<Job>,
+    }
+
+    impl Harness {
+        fn new() -> Harness {
+            let (jobs, sent) = std::sync::mpsc::channel();
+            Harness {
+                panel: Panel::new(),
+                pending: None,
+                busy: false,
+                jobs,
+                sent,
+            }
+        }
+
+        fn press(&mut self, sym: u64) -> Action {
+            self.press_with(Key {
+                sym,
+                ctrl: false,
+                shift: false,
+                alt: false,
+            })
+        }
+
+        fn press_with(&mut self, k: Key) -> Action {
+            act(
+                &mut self.panel,
+                &mut self.pending,
+                &mut self.busy,
+                &self.jobs,
+                k,
+                &Context::default(),
+            )
+        }
+
+        fn job(&self) -> Option<Job> {
+            self.sent.try_recv().ok()
+        }
+    }
+
+    fn a_proposal() -> (Body, Pending) {
+        (
+            Body::Proposal {
+                headline: "2 changes".into(),
+                steps: vec![PanelStep {
+                    capability: "fs.move:~/Downloads/a".into(),
+                    summary: "move a".into(),
+                    risk: Risk::Write,
+                }],
+            },
+            Pending::Curate(Json::obj()),
+        )
+    }
+
+    #[test]
+    fn enter_on_a_proposal_approves_it() {
+        // The bug this exists for: a plan was shown with no way to say yes.
+        let mut h = Harness::new();
+        let (body, pending) = a_proposal();
+        h.panel.set_body(body);
+        h.pending = Some(pending.clone());
+
+        h.press(XK_Return);
+        match h.job() {
+            Some(Job::Approve(p)) => assert_eq!(p, pending),
+            other => panic!("enter did not approve the plan: {other:?}"),
+        }
+        assert!(h.busy, "the panel must show it is working");
+        assert!(
+            h.pending.is_none(),
+            "the plan must not be approvable twice by holding enter"
+        );
+    }
+
+    #[test]
+    fn escape_on_a_proposal_discards_it_without_approving() {
+        let mut h = Harness::new();
+        let (body, pending) = a_proposal();
+        h.panel.set_body(body);
+        h.pending = Some(pending);
+
+        h.press(XK_Escape);
+        assert!(h.job().is_none(), "escape sent something to the daemon");
+        assert!(h.pending.is_none());
+        assert_eq!(h.panel.body, Body::Empty);
+        assert!(!h.busy);
+    }
+
+    #[test]
+    fn escape_backs_out_one_layer_at_a_time() {
+        let mut h = Harness::new();
+        h.panel.input.set("tidy my downloads");
+        h.panel.set_body(Body::Done {
+            headline: "done".into(),
+            detail: String::new(),
+            undo_hint: false,
+        });
+
+        assert!(matches!(h.press(XK_Escape), Action::Redraw));
+        assert_eq!(h.panel.body, Body::Empty, "the result is cleared first");
+        assert_eq!(
+            h.panel.input.text(),
+            "tidy my downloads",
+            "but not the text"
+        );
+
+        assert!(matches!(h.press(XK_Escape), Action::Redraw));
+        assert!(h.panel.input.is_empty(), "then the text");
+
+        assert!(
+            matches!(h.press(XK_Escape), Action::Quit),
+            "and only then does the panel close"
+        );
+    }
+
+    #[test]
+    fn enter_on_an_empty_prompt_asks_nothing() {
+        let mut h = Harness::new();
+        h.press(XK_Return);
+        assert!(h.job().is_none());
+        assert!(!h.busy);
+
+        // Nor does whitespace count as a question.
+        h.panel.input.set("   ");
+        h.press(XK_Return);
+        assert!(h.job().is_none(), "blank input was sent as a request");
+    }
+
+    #[test]
+    fn enter_submits_what_was_typed_with_the_surrounding_whitespace_removed() {
+        let mut h = Harness::new();
+        h.panel.input.set("  tidy my downloads  ");
+        h.press(XK_Return);
+        match h.job() {
+            Some(Job::Ask(text, _)) => assert_eq!(text, "tidy my downloads"),
+            other => panic!("expected a question, got {other:?}"),
+        }
+        assert!(h.busy);
+    }
+
+    #[test]
+    fn a_second_enter_while_working_does_not_send_the_request_twice() {
+        let mut h = Harness::new();
+        h.panel.input.set("tidy my downloads");
+        h.press(XK_Return);
+        assert!(h.job().is_some());
+
+        h.press(XK_Return);
+        assert!(
+            h.job().is_none(),
+            "holding enter queued a second identical request"
+        );
+    }
+
+    #[test]
+    fn undo_is_only_sent_when_there_is_something_to_undo() {
+        let ctrl_z = Key {
+            sym: 0x7a,
+            ctrl: true,
+            shift: false,
+            alt: false,
+        };
+
+        let mut h = Harness::new();
+        h.panel.set_body(Body::Done {
+            headline: "moved 3 files".into(),
+            detail: String::new(),
+            undo_hint: false,
+        });
+        h.press_with(ctrl_z);
+        assert!(h.job().is_none(), "undid something that cannot be undone");
+
+        h.panel.set_body(Body::Done {
+            headline: "moved 3 files".into(),
+            detail: String::new(),
+            undo_hint: true,
+        });
+        h.press_with(ctrl_z);
+        assert!(matches!(h.job(), Some(Job::Undo)));
+        assert!(h.busy);
+    }
+
+    #[test]
+    fn ctrl_z_without_ctrl_types_a_z() {
+        let mut h = Harness::new();
+        h.panel.set_body(Body::Done {
+            headline: "moved 3 files".into(),
+            detail: String::new(),
+            undo_hint: true,
+        });
+        h.press(0x7a);
+        assert!(h.job().is_none(), "a bare z undid the last action");
+    }
+
+    #[test]
+    fn arrows_move_the_caret_but_ctrl_arrows_move_by_word() {
+        let mut h = Harness::new();
+        h.panel.input.set("tidy my downloads");
+        h.press(XK_Home);
+        assert_eq!(h.panel.input.caret(), 0);
+
+        h.press_with(Key {
+            sym: XK_Right,
+            ctrl: true,
+            shift: false,
+            alt: false,
+        });
+        assert_eq!(h.panel.input.caret(), 5, "ctrl-right skipped a whole word");
+
+        h.press(XK_Right);
+        assert_eq!(
+            h.panel.input.caret(),
+            6,
+            "a plain right moved one character"
+        );
+    }
+
+    #[test]
+    fn arrows_review_the_plan_when_one_is_showing() {
+        let mut h = Harness::new();
+        h.panel.set_body(Body::Proposal {
+            headline: "many".into(),
+            steps: (0..5)
+                .map(|i| PanelStep {
+                    capability: format!("fs.move:~/x{i}"),
+                    summary: format!("move x{i}"),
+                    risk: Risk::Write,
+                })
+                .collect(),
+        });
+        h.press(XK_Down);
+        h.press(XK_Down);
+        assert_eq!(h.panel.selected, 2);
+        h.press(XK_Up);
+        assert_eq!(h.panel.selected, 1);
+        assert!(h.job().is_none(), "reviewing a plan must not run any of it");
+    }
 }

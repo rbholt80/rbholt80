@@ -10,6 +10,7 @@
 //! tell — which is the difference between a shell and a chat window.
 
 use nous_core::ipc::Client;
+use nous_core::journal::human_bytes as human;
 use nous_core::json::{json_obj, Json};
 use nous_core::proto::method;
 use std::io::{BufRead, Write};
@@ -508,21 +509,6 @@ fn render_value(v: &Json) {
             v.f64_or("mem_used_pct", 0.0),
             v.f64_or("disk_used_pct", 0.0)
         );
-    }
-}
-
-fn human(n: u64) -> String {
-    const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{} {}", n, U[0])
-    } else {
-        format!("{:.1} {}", v, U[i])
     }
 }
 
