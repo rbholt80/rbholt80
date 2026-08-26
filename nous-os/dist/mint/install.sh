@@ -150,7 +150,20 @@ preflight() {
     WILL_BUILD=1
     say "   build         ${DIM}from source with cargo${RESET}"
   else
-    say "   build         ${DIM}no cargo — using whatever is in target/release${RESET}"
+    # Without a toolchain a prebuilt tree is the only way this can work, and it
+    # has to be complete. Checked here rather than later so the answer is
+    # "install Rust" before a password has been asked for and apt has run --
+    # not after.
+    local absent=()
+    for b in "${BINARIES[@]}"; do
+      [[ -x "${ROOT}/target/release/${b}" ]] || absent+=("$b")
+    done
+    if (( ${#absent[@]} )); then
+      die "cargo is not installed, and these are not prebuilt: ${absent[*]}
+       Install Rust from https://rustup.rs, then run this again.
+       Nothing has been changed on this system."
+    fi
+    say "   build         ${DIM}no cargo — using the prebuilt binaries${RESET}"
   fi
 
   if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then

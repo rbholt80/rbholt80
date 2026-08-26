@@ -162,6 +162,16 @@ else
   bad "install_binaries uses the shared binary list" "it has its own copy, which will drift"
 fi
 
+# With no toolchain and nothing prebuilt the install cannot work at all. It must
+# say so before a password is asked for and apt has run -- failing after those
+# leaves the machine changed for an install that was never going to finish.
+if sed -n '/^preflight() {/,/^}/p' "${HERE}/install.sh" | grep -q 'rustup.rs'; then
+  ok "a missing toolchain is caught in preflight, before anything is touched"
+else
+  bad "a missing toolchain is caught in preflight, before anything is touched" \
+      "the install would apt-install packages and only then give up"
+fi
+
 echo
 echo "build dependencies"
 
