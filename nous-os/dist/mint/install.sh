@@ -300,7 +300,8 @@ finish() {
   say "   ${DIM}nousctl status${RESET}     check on it"
   say "   ${DIM}nousctl key set anthropic${RESET}   add a model, if you want one"
   say ""
-  say "   It works with no model at all. Try ${BOLD}tidy my downloads${RESET} right now."
+  say "   It works with no model at all. Open a terminal and run ${BOLD}nsh${RESET}, or press"
+  say "   ${BOLD}${HOTKEY//[<>]/ }${RESET} for the popup bar, then try: ${BOLD}tidy my downloads${RESET}"
 }
 
 # ---------------------------------------------------------------------- main

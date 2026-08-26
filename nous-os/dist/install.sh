@@ -275,7 +275,7 @@ finish() {
   say "   Reboot and choose NOUS from the boot menu."
   say "   ${DIM}Your other systems are still there and still listed.${RESET}"
   say ""
-  say "   First boot lands in the shell. Try: ${BOLD}tidy my downloads${RESET}"
+  say "   First boot lands in the shell (nsh). At its prompt, try: ${BOLD}tidy my downloads${RESET}"
   if [[ "$PROFILE" == "hosted" ]]; then
     say "   This machine uses a hosted model. Add a key with:"
     say "     ${BOLD}nousctl key set anthropic${RESET}"
