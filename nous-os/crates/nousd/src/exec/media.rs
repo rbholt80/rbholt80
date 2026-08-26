@@ -444,11 +444,16 @@ fn control(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
         "stop" => vec!["quit".into()],
         "next" => vec!["playlist-next".into()],
         "previous" => vec!["playlist-prev".into()],
-        "seek" => vec![
-            "seek".into(),
-            Json::Num(step.args.f64_or("seconds", 10.0)),
-            "relative".into(),
-        ],
+        // Two ways to seek, because they mean different things: nudging by a
+        // few seconds, and going to a position because someone clicked one.
+        "seek" => match step.args.get("to").and_then(|v| v.as_f64()) {
+            Some(to) => vec!["seek".into(), Json::Num(to), "absolute".into()],
+            None => vec![
+                "seek".into(),
+                Json::Num(step.args.f64_or("seconds", 10.0)),
+                "relative".into(),
+            ],
+        },
         "volume" => vec![
             "set_property".into(),
             "volume".into(),
@@ -539,6 +544,11 @@ fn edit(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
                 ("path", src.to_string_lossy().to_string().into()),
                 ("in", 0.0.into()),
                 ("out", duration.into()),
+                // The source's whole length, kept beside the in/out points.
+                // Once a clip is trimmed, `out` no longer says how long the
+                // file was, and without that an editor cannot show what the
+                // cut left behind.
+                ("duration", duration.into()),
                 ("speed", 1.0.into()),
                 ("volume", 1.0.into()),
             ]));
