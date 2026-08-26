@@ -53,6 +53,24 @@ USAGE
   esac
 done
 
+# If the daemon is not listening, start it here rather than opening a panel
+# whose only content is an instruction to go and type a command somewhere else.
+# The installer has just finished telling the user to type into the panel and
+# not into a terminal, so a panel saying "run systemctl ..." invites exactly the
+# wrong thing -- and typing it into the panel does nothing but repeat itself.
+SOCK="${NOUS_SOCKET:-${XDG_RUNTIME_DIR:-/run/nous}/nous.sock}"
+if [[ ! -S "$SOCK" ]]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user start nousd.service >/dev/null 2>&1 || true
+    # Give it a moment to bind; the panel opens either way, and if this did
+    # not work the panel says so itself.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -S "$SOCK" ]]; then break; fi
+      sleep 0.2
+    done
+  fi
+fi
+
 # Capture the focus before we take it.
 FOCUS=""
 if command -v xdotool >/dev/null 2>&1; then

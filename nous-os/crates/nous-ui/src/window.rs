@@ -506,7 +506,12 @@ impl Window {
                     y: b.y as f64,
                 });
             }
-            FocusOut => self.queue.push_back(Event::FocusLost),
+            FocusOut => {
+                let f = &*(ev as *const XEvent as *const XFocusChangeEvent);
+                if is_real_focus_loss(f.mode, f.detail) {
+                    self.queue.push_back(Event::FocusLost);
+                }
+            }
             ClientMessage => {
                 let m = &*(ev as *const XEvent as *const XClientMessageEvent);
                 if m.message_type == self.atoms.wm_protocols
@@ -661,6 +666,27 @@ impl Drop for Window {
     }
 }
 
+/// Did the window genuinely lose the keyboard, or is this one of the FocusOut
+/// events X sends for reasons that have nothing to do with focus?
+///
+/// X reports a focus change whenever a grab activates or releases, and the
+/// pointer entering or leaving a child window produces one too. Treating those
+/// as "the user went somewhere else" means opening any menu, pressing Alt-Tab,
+/// running a screenshot tool, or another application's global hotkey firing all
+/// look identical to a deliberate click on another window.
+#[allow(non_upper_case_globals)]
+fn is_real_focus_loss(mode: i32, detail: i32) -> bool {
+    // NotifyGrab / NotifyUngrab bracket a grab; the keyboard comes straight
+    // back afterwards. NotifyWhileGrabbed happens with a grab already active.
+    if mode != NotifyNormal {
+        return false;
+    }
+    // Pointer-driven events describe where the mouse is, not where the keyboard
+    // went. NotifyInferior means focus moved to a child of this window, which
+    // for our purposes is still us.
+    !matches!(detail, NotifyPointer | NotifyPointerRoot | NotifyInferior)
+}
+
 /// Keysyms that move the caret or edit the buffer rather than insert a
 /// character. XIM reports a printable string for some of these (Return gives
 /// "\r", Escape gives "\x1b") and inserting that would corrupt the text.
@@ -707,6 +733,26 @@ mod tests {
         // A printable key must not be treated as control, or nothing types.
         assert!(!is_control_sym(0x061)); // 'a'
         assert!(!is_control_sym(0x020)); // space
+    }
+
+    #[test]
+    fn a_grab_is_not_a_focus_change() {
+        // Opening a menu, Alt-Tab, a screenshot tool or another app's global
+        // hotkey all produce a grab. Acting on these dismissed the panel while
+        // a request was still running.
+        assert!(!is_real_focus_loss(NotifyGrab, NotifyNonlinear));
+        assert!(!is_real_focus_loss(NotifyUngrab, NotifyNonlinear));
+        assert!(!is_real_focus_loss(NotifyWhileGrabbed, NotifyNonlinear));
+        // Pointer motion is not the keyboard going anywhere.
+        assert!(!is_real_focus_loss(NotifyNormal, NotifyPointer));
+        assert!(!is_real_focus_loss(NotifyNormal, NotifyPointerRoot));
+        // Focus moving to a child of our own window is still our window.
+        assert!(!is_real_focus_loss(NotifyNormal, NotifyInferior));
+
+        // Clicking another application really is leaving.
+        assert!(is_real_focus_loss(NotifyNormal, NotifyNonlinear));
+        assert!(is_real_focus_loss(NotifyNormal, NotifyNonlinearVirtual));
+        assert!(is_real_focus_loss(NotifyNormal, NotifyAncestor));
     }
 
     #[test]

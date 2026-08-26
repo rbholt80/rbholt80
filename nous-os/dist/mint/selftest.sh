@@ -178,6 +178,71 @@ for pkg in pkg-config libx11-dev libcairo2-dev libpango1.0-dev libglib2.0-dev; d
 done
 
 echo
+echo "upgrading in place"
+
+# `enable --now` only *starts*, and starting an already-running unit does
+# nothing. An upgrade therefore installed the new binary and left the previous
+# one serving, with no error and nothing in the output to suggest it -- the new
+# panel talking to the old daemon.
+if grep -qE 'systemctl --user restart nousd' "${HERE}/install.sh"; then
+  ok "the daemon is restarted, not just enabled"
+else
+  bad "the daemon is restarted, not just enabled" "an upgrade would leave the old process serving"
+fi
+if grep -qE 'enable --now nousd' "${HERE}/install.sh"; then
+  bad "no reliance on 'enable --now' to upgrade" "found 'enable --now', which does not restart"
+else
+  ok "no reliance on 'enable --now' to upgrade"
+fi
+
+# The daemon drives the desktop and needs DISPLAY. systemd's user manager does
+# not inherit it, and a process cannot acquire one after it has exec'd.
+if grep -q 'import-environment' "${HERE}/install.sh"; then
+  ok "the session environment is handed to the daemon"
+else
+  bad "the session environment is handed to the daemon" "desk.* would fail with 'Cannot open display'"
+fi
+if grep -q 'graphical-session.target' "${HERE}/nousd.user.service"; then
+  ok "the unit is tied to the graphical session"
+else
+  bad "the unit is tied to the graphical session" "it would start at login, before X exists"
+fi
+
+# A hotkey is written the way it appears on a keyboard.
+eval "$(sed -n '/^pretty_hotkey() {/,/^}/p' "${HERE}/install.sh")"
+check "hotkey reads as a shortcut"  "$(pretty_hotkey '<Control><Alt>space')" "Ctrl+Alt+Space"
+check "hotkey handles a super key"  "$(pretty_hotkey '<Super>space')"        "Super+Space"
+check "hotkey handles Primary"      "$(pretty_hotkey '<Primary><Shift>n')"   "Ctrl+Shift+N"
+
+echo
+echo "removing"
+
+# Blanking a Cinnamon shortcut leaves its slot in custom-list, and Cinnamon
+# keeps showing a nameless row that nothing can reclaim.
+slot_removal() { printf '%s' "$1" | sed -E "s/'$2'(, )?//; s/, \]/]/"; }
+check "last slot leaves an empty list"  "$(slot_removal "['custom0']" custom0)"                       "[]"
+check "first of two is removed"         "$(slot_removal "['custom0', 'custom1']" custom0)"            "['custom1']"
+check "last of two is removed"          "$(slot_removal "['custom0', 'custom1']" custom1)"            "['custom0']"
+check "middle of three is removed"      "$(slot_removal "['custom0', 'custom1', 'custom2']" custom1)" "['custom0', 'custom2']"
+check "custom1 does not match custom10" "$(slot_removal "['custom1', 'custom10']" custom1)"           "['custom10']"
+
+if grep -q 'custom-list' "${HERE}/uninstall.sh"; then
+  ok "uninstall reclaims the keybinding slot"
+else
+  bad "uninstall reclaims the keybinding slot" "it only blanks the keys, leaving a dead row"
+fi
+if grep -q 'autostart/nous-daemon.desktop' "${HERE}/uninstall.sh"; then
+  ok "uninstall removes the autostart entry"
+else
+  bad "uninstall removes the autostart entry" "it would keep restarting a daemon that is gone"
+fi
+if grep -q 'Nothing else on this system was changed' "${HERE}/uninstall.sh"; then
+  bad "uninstall does not claim it changed nothing else" "it apt-installs packages and leaves them"
+else
+  ok "uninstall does not claim it changed nothing else"
+fi
+
+echo
 echo "launching"
 
 # The panel is a native window now. A browser on this path would mean the thing

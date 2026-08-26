@@ -95,6 +95,19 @@ pub const XK_End: KeySym = 0xff57;
 pub const XK_Page_Up: KeySym = 0xff55;
 pub const XK_Page_Down: KeySym = 0xff56;
 
+// Focus-change `mode` (X.h:267) and `detail` (X.h:276).
+pub const NotifyNormal: c_int = 0;
+pub const NotifyGrab: c_int = 1;
+pub const NotifyUngrab: c_int = 2;
+pub const NotifyWhileGrabbed: c_int = 3;
+pub const NotifyAncestor: c_int = 0;
+pub const NotifyVirtual: c_int = 1;
+pub const NotifyInferior: c_int = 2;
+pub const NotifyNonlinear: c_int = 3;
+pub const NotifyNonlinearVirtual: c_int = 4;
+pub const NotifyPointer: c_int = 5;
+pub const NotifyPointerRoot: c_int = 6;
+
 pub const ShiftMask: c_uint = 1 << 0;
 pub const ControlMask: c_uint = 1 << 2;
 pub const Mod1Mask: c_uint = 1 << 3;
@@ -204,6 +217,21 @@ pub struct XClientMessageEvent {
     pub message_type: Atom,
     pub format: c_int,
     pub data_l: [c_long; 5],
+}
+
+/// FocusIn/FocusOut (Xlib.h:632). `mode` and `detail` are what separate a real
+/// focus change from the flurry X sends whenever a grab activates -- opening a
+/// menu, Alt-Tab, a screenshot tool, another app's global hotkey.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XFocusChangeEvent {
+    pub type_: c_int,
+    pub serial: c_ulong,
+    pub send_event: Bool,
+    pub display: *mut Display,
+    pub window: Window,
+    pub mode: c_int,
+    pub detail: c_int,
 }
 
 #[repr(C)]

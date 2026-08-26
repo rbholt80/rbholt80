@@ -20,6 +20,13 @@ use nous_ui::window::{Event, Key, Window, WindowKind};
 use session::{Job, Pending, Reply};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
+/// A job, tagged with the generation it was sent in. The tag is what lets a
+/// reply be matched against the request that is still wanted: abandon a request
+/// and its answer comes back under a generation nobody is listening for.
+type Request = (u64, Job);
+/// A reply, under the generation of the request that produced it.
+type Answer = (u64, Reply);
+
 /// Frame interval while something is animating. Sixty frames a second for a
 /// pulsing marker is wasteful; the eye cannot tell at this size.
 const ANIMATION_MS: i32 = 33;
@@ -91,6 +98,9 @@ fn run(once: bool, initial: &str, capture: String, context: Context) -> Result<(
     let mut pending: Option<Pending> = None;
     let mut busy = false;
     let mut height = 0.0f64;
+    // Bumped whenever a request is abandoned, so the reply to a request nobody
+    // is waiting for any more can be told apart from the one they are.
+    let mut generation: u64 = 0;
 
     // Something asked for by name -- from the file manager's menu, or on the
     // command line -- is a request, not a draft. Pre-filling it and waiting for
@@ -103,7 +113,7 @@ fn run(once: bool, initial: &str, capture: String, context: Context) -> Result<(
             note: format!("working out what \"{initial}\" means…"),
         });
         busy = true;
-        let _ = jobs.send(Job::Ask(initial.to_string(), context.clone()));
+        let _ = jobs.send((generation, Job::Ask(initial.to_string(), context.clone())));
     }
 
     // Draw before waiting for anything: the panel must be on screen the moment
@@ -121,7 +131,12 @@ fn run(once: bool, initial: &str, capture: String, context: Context) -> Result<(
         }
 
         match replies.try_recv() {
-            Ok(reply) => {
+            // A reply from a request that was abandoned. Dropping it silently
+            // is the point: without this, pressing Escape and typing something
+            // new left Enter dead until the old answer arrived and then pasted
+            // itself over the new question.
+            Ok((seq, _)) if seq != generation => continue,
+            Ok((_, reply)) => {
                 busy = false;
                 pending = reply.pending;
                 panel.set_body(reply.body);
@@ -159,29 +174,51 @@ fn run(once: bool, initial: &str, capture: String, context: Context) -> Result<(
             Event::Redraw | Event::Resized { .. } => dirty = true,
             Event::FocusLost => {
                 // An overlay that stays visible after you click elsewhere is
-                // the browser window the user did not want. It goes away.
-                // Except while a plan is waiting: dismissing an unanswered
-                // question because a notification stole focus would be worse.
-                if !matches!(panel.body, Body::Proposal { .. }) {
+                // the browser window the user did not want, so by default it
+                // goes away. Two states are not default:
+                //
+                // A request in flight. Closing here took the panel, the worker
+                // and the answer with it, leaving no result, no error and no
+                // notification -- the one path through this program with no
+                // feedback of any kind, reached by the most natural thing to do
+                // while waiting for something slow.
+                //
+                // A plan on screen. It is waiting on a decision that has not
+                // been made yet.
+                //
+                // Neither grabs focus back. Going to another window is a
+                // deliberate act, and clicking through a plan's file list
+                // before approving it is exactly what someone should do.
+                // Clicking the panel returns the keyboard to it.
+                if !busy && !matches!(panel.body, Body::Proposal { .. }) {
                     return Ok(());
                 }
-                window.focus();
             }
             Event::Text(t) => {
                 panel.input.insert(&t);
                 dirty = true;
             }
-            Event::Key(k) => match act(&mut panel, &mut pending, &mut busy, &jobs, k, &context) {
+            Event::Key(k) => match act(
+                &mut panel,
+                &mut pending,
+                &mut busy,
+                &mut generation,
+                &jobs,
+                k,
+                &context,
+            ) {
                 Action::Redraw => dirty = true,
                 Action::Quit => return Ok(()),
                 Action::Nothing => {}
             },
-            Event::MouseDown { y, .. } => {
-                // Clicking outside the panel dismisses it, the same as losing
-                // focus. Inside, a click is just a way to take focus back.
-                if y < 0.0 || y > height {
-                    return Ok(());
-                }
+            Event::MouseDown { .. } => {
+                // X delivers a button press to the window under the pointer, so
+                // this only ever fires for a click on the panel itself -- there
+                // is no pointer grab and no "clicked outside" event to receive.
+                // A click here means "I want to type in this again", which
+                // matters because the panel no longer snatches focus back on
+                // its own.
+                window.focus();
             }
             Event::MouseUp { .. } | Event::MouseMove { .. } => {}
             Event::Tick => {
@@ -207,7 +244,8 @@ fn act(
     panel: &mut Panel,
     pending: &mut Option<Pending>,
     busy: &mut bool,
-    jobs: &Sender<Job>,
+    generation: &mut u64,
+    jobs: &Sender<Request>,
     k: Key,
     context: &Context,
 ) -> Action {
@@ -221,6 +259,18 @@ fn act(
             // Escape backs out one layer at a time rather than closing
             // outright: discarding a plan and closing the panel are different
             // intentions and should not share a key press.
+            //
+            // Stopping waiting comes first. It does not call the work back --
+            // a request already sent will finish at the daemon, and anything it
+            // changed is in the journal and can be undone. What it does is give
+            // the panel back, and mark the answer as no longer wanted so it
+            // cannot arrive later on top of whatever is being typed by then.
+            if *busy {
+                *busy = false;
+                *generation = generation.wrapping_add(1);
+                panel.set_body(Body::Empty);
+                return Action::Redraw;
+            }
             if let Some(p) = pending.take() {
                 let _ = p;
                 panel.set_body(Body::Empty);
@@ -245,7 +295,7 @@ fn act(
                 panel.set_body(Body::Working {
                     note: "applying…".into(),
                 });
-                let _ = jobs.send(Job::Approve(p));
+                let _ = jobs.send((*generation, Job::Approve(p)));
                 return Action::Redraw;
             }
             let text = panel.input.text().trim().to_string();
@@ -256,7 +306,7 @@ fn act(
             panel.set_body(Body::Working {
                 note: format!("working out what \"{text}\" means…"),
             });
-            let _ = jobs.send(Job::Ask(text, context.clone()));
+            let _ = jobs.send((*generation, Job::Ask(text, context.clone())));
             Action::Redraw
         }
         XK_BackSpace => {
@@ -319,7 +369,7 @@ fn act(
                 panel.set_body(Body::Working {
                     note: "undoing…".into(),
                 });
-                let _ = jobs.send(Job::Undo);
+                let _ = jobs.send((*generation, Job::Undo));
                 return Action::Redraw;
             }
             Action::Nothing
@@ -371,9 +421,9 @@ fn settle(window: &mut Window, panel: &Panel, theme: &Theme, height: &mut f64) {
 /// It owns the connection for its whole life. Reconnecting per request would
 /// add a round trip to every keystroke-driven action, and a socket that has
 /// gone away is reported as a lost connection rather than retried silently.
-fn spawn_worker() -> (Sender<Job>, Receiver<Reply>) {
-    let (job_tx, job_rx) = std::sync::mpsc::channel::<Job>();
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Reply>();
+fn spawn_worker() -> (Sender<Request>, Receiver<Answer>) {
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<Request>();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Answer>();
 
     std::thread::spawn(move || {
         let mut client = match Client::connect() {
@@ -385,15 +435,19 @@ fn spawn_worker() -> (Sender<Job>, Receiver<Reply>) {
                 // one useful sentence is the command that fixes it. The detail
                 // still goes to stderr for anyone who ran this from a terminal.
                 eprintln!("nous-shell: {e}");
-                while job_rx.recv().is_ok() {
-                    let sent = reply_tx.send(Reply {
-                        body: Body::Error {
-                            message: "NOUS is not running.\n\
-                                      Start it with:  systemctl --user start nousd"
-                                .to_string(),
+                while let Ok((seq, _)) = job_rx.recv() {
+                    let sent = reply_tx.send((
+                        seq,
+                        Reply {
+                            body: Body::Error {
+                                message: "NOUS is not running.\n\
+                                          Open a terminal (Menu \u{2192} Terminal) and run:\n\
+                                          systemctl --user start nousd"
+                                    .to_string(),
+                            },
+                            pending: None,
                         },
-                        pending: None,
-                    });
+                    ));
                     if sent.is_err() {
                         return;
                     }
@@ -401,9 +455,9 @@ fn spawn_worker() -> (Sender<Job>, Receiver<Reply>) {
                 return;
             }
         };
-        while let Ok(job) = job_rx.recv() {
+        while let Ok((seq, job)) = job_rx.recv() {
             let reply = session::run(&mut client, job);
-            if reply_tx.send(reply).is_err() {
+            if reply_tx.send((seq, reply)).is_err() {
                 return;
             }
         }
@@ -424,8 +478,9 @@ mod tests {
         panel: Panel,
         pending: Option<Pending>,
         busy: bool,
-        jobs: Sender<Job>,
-        sent: Receiver<Job>,
+        generation: u64,
+        jobs: Sender<Request>,
+        sent: Receiver<Request>,
     }
 
     impl Harness {
@@ -435,6 +490,7 @@ mod tests {
                 panel: Panel::new(),
                 pending: None,
                 busy: false,
+                generation: 0,
                 jobs,
                 sent,
             }
@@ -454,6 +510,7 @@ mod tests {
                 &mut self.panel,
                 &mut self.pending,
                 &mut self.busy,
+                &mut self.generation,
                 &self.jobs,
                 k,
                 &Context::default(),
@@ -461,7 +518,7 @@ mod tests {
         }
 
         fn job(&self) -> Option<Job> {
-            self.sent.try_recv().ok()
+            self.sent.try_recv().ok().map(|(_, j)| j)
         }
     }
 
@@ -576,6 +633,51 @@ mod tests {
         assert!(
             h.job().is_none(),
             "holding enter queued a second identical request"
+        );
+    }
+
+    #[test]
+    fn escape_while_working_gives_the_panel_back_and_enter_works_again() {
+        // The bug: Escape cleared the panel but left `busy` set, so the panel
+        // looked idle and ready while Enter was silently dead -- until the
+        // abandoned answer arrived and pasted itself over the new question.
+        let mut h = Harness::new();
+        h.panel.input.set("tidy my downloads");
+        h.press(XK_Return);
+        assert!(h.busy);
+        assert!(h.job().is_some());
+        let abandoned = h.generation;
+
+        h.press(XK_Escape);
+        assert!(!h.busy, "the panel still thinks it is working");
+        assert_eq!(h.panel.body, Body::Empty);
+        assert_ne!(
+            h.generation, abandoned,
+            "the abandoned reply would still be accepted"
+        );
+
+        // Enter is live again immediately, not after the old reply lands.
+        h.panel.input.set("open my notes");
+        h.press(XK_Return);
+        match h.job() {
+            Some(Job::Ask(text, _)) => assert_eq!(text, "open my notes"),
+            other => panic!("Enter was still dead: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_still_in_flight_is_labelled_as_waiting_not_as_cancellable() {
+        // Escape gives the panel back; it cannot recall a request the daemon
+        // already has. Saying "cancel" promised something this cannot do.
+        let mut h = Harness::new();
+        h.panel.set_body(Body::Working {
+            note: "working…".into(),
+        });
+        let hints = h.panel.hints();
+        assert!(hints.iter().any(|(k, _)| *k == "esc"));
+        assert!(
+            !hints.iter().any(|(_, what)| what.contains("cancel")),
+            "the panel claims it can cancel work it cannot recall: {hints:?}"
         );
     }
 

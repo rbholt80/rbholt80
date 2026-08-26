@@ -191,19 +191,28 @@ Build the image yourself with `sudo dist/build-iso.sh`.
 
 ## Building from source
 
+The panel draws with the system's Cairo and Pango, so it links against them.
+On a Debian-family desktop that means the development packages, which a desktop
+does not ship by default:
+
+```console
+sudo apt install build-essential pkg-config \
+     libx11-dev libcairo2-dev libpango1.0-dev libglib2.0-dev
+```
+
+`dist/mint/install.sh` installs those for you; this is only for building by hand.
+
 ```console
 git clone <this repository>
 cd nous-os
-cargo build --release        # no network needed: there are no dependencies
-cargo test                   # 319 tests
-dist/mint/selftest.sh        # 24 more, for the desktop shell scripts
+cargo build --release        # no crates: nothing is downloaded
+cargo test --workspace       # 395 tests
+dist/mint/selftest.sh        # 37 more, for the desktop shell scripts
 
 ./target/release/nousd &     # the daemon
-./target/release/nsh         # the shell
+./target/release/nous-shell  # the panel
+./target/release/nsh         # the same thing in a terminal
 ```
-
-Then open <http://127.0.0.1:7666> for the graphical shell, or run
-`nous-session` to launch it as a desktop.
 
 ---
 

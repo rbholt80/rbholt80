@@ -31,7 +31,8 @@ for b in nousd nsh nousctl nous-ask nous-shell nous-uninstall; do
   "${RM[@]}" "${PREFIX}/bin/${b}"
 done
 
-rm -f "${HOME}/.local/share/applications/nous.desktop" \
+rm -f "${HOME}/.config/autostart/nous-daemon.desktop" \
+      "${HOME}/.local/share/applications/nous.desktop" \
       "${HOME}/.local/share/applications/nous-ask.desktop" \
       "${HOME}/.local/share/nemo/actions/nous.nemo_action" \
       "${HOME}/.local/share/nemo/actions/nous-tidy.nemo_action" \
@@ -49,6 +50,11 @@ if command -v gsettings >/dev/null 2>&1 &&
       gsettings set "$path" binding "[]" 2>/dev/null || true
       gsettings set "$path" command "" 2>/dev/null || true
       gsettings set "$path" name "" 2>/dev/null || true
+      # Blanking the keys is not enough: the slot stays in custom-list, and
+      # Cinnamon keeps showing a nameless row in Keyboard Shortcuts that
+      # nothing can reclaim. Drop it from the list as well.
+      list="$(printf '%s' "$list" | sed -E "s/'${name}'(, )?//; s/, \]/]/")"
+      gsettings set "$base" custom-list "$list" 2>/dev/null || true
       echo "  ${DIM}released keybinding slot ${name}${RESET}"
     fi
   done
@@ -65,4 +71,10 @@ else
 fi
 
 echo ""
-echo "Done. Nothing else on this system was changed."
+echo "Done."
+echo ""
+echo "  ${DIM}Packages the installer added with apt (wmctrl, xdotool, xclip,${RESET}"
+echo "  ${DIM}libnotify-bin, xdg-utils, curl, mpv, ffmpeg, and the build${RESET}"
+echo "  ${DIM}toolchain) are left installed -- other things may rely on them${RESET}"
+echo "  ${DIM}now. Remove any you do not want with apt yourself.${RESET}"
+echo "  ${DIM}If you used --local-model, ollama and its models are also kept.${RESET}"

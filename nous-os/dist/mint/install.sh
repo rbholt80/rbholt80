@@ -24,9 +24,32 @@ RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
 if [[ -n "${NO_COLOR:-}" ]]; then BOLD=""; DIM=""; RESET=""; RED=""; GREEN=""; YELLOW=""; fi
 
 say()  { printf '%s\n' "$*"; }
+
 step() { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
 warn() { printf '%s warning:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
 die()  { printf '%s error:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+
+# "<Control><Alt>space" is how gsettings wants a binding written. Stripping the
+# angle brackets and calling it done printed "  Control  Alt space"; a shortcut
+# should read the way it is written on a keyboard.
+pretty_hotkey() {
+  local h="$1" out="" part
+  h="${h//></+}"
+  h="${h#<}"
+  h="${h/>/+}"
+  h="${h//Control/Ctrl}"
+  h="${h//Primary/Ctrl}"
+  h="${h//Mod4/Super}"
+  local IFS='+'
+  for part in $h; do
+    if [[ -n "$part" ]]; then
+      if [[ -n "$out" ]]; then out+="+"; fi
+      out+="${part^}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
 
 # One function touches the machine. In preview mode it prints instead.
 do_() {
@@ -236,8 +259,29 @@ install_desktop_integration() {
   local apps="${HOME}/.local/share/applications"
   local actions="${HOME}/.local/share/nemo/actions"
   local icons="${HOME}/.local/share/icons/hicolor/scalable/apps"
+  local autostart="${HOME}/.config/autostart"
 
-  do_ mkdir -p "$apps" "$actions" "$icons"
+  do_ mkdir -p "$apps" "$actions" "$icons" "$autostart"
+
+  # Hand the daemon the session environment at every login, and restart it so it
+  # picks it up. The unit is WantedBy=graphical-session.target, but not every
+  # Cinnamon build drives that target, and a daemon started at login without
+  # DISPLAY can never acquire one afterwards -- a process's environment is fixed
+  # when it execs. This runs inside the session, so it always has the answer.
+  if (( COMMIT )); then
+    cat > "${autostart}/nous-daemon.desktop" <<AUTOSTART
+[Desktop Entry]
+Type=Application
+Name=NOUS daemon
+Comment=Give the NOUS daemon this session's display, and start it
+Exec=sh -c 'systemctl --user import-environment DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP; systemctl --user restart nousd.service'
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+AUTOSTART
+  else
+    say "   ${DIM}would write ${autostart}/nous-daemon.desktop${RESET}"
+  fi
   do_ install_menu_entry "${HERE}/nous.desktop"     "${apps}/nous.desktop"
   do_ install_menu_entry "${HERE}/nous-ask.desktop" "${apps}/nous-ask.desktop"
   do_ install -Dm644 "${HERE}/nous.svg"         "${icons}/nous.svg"
@@ -249,6 +293,19 @@ install_desktop_integration() {
   else
     say "   ${DIM}Nemo not found; skipping the file manager menu${RESET}"
   fi
+}
+
+# Earlier versions summoned the panel by launching Chromium in app mode against
+# a local server, with its own browser profile so it would not disturb a window
+# already open. The panel is native now and nothing reads that profile, but it
+# is tens of megabytes of somebody's browser state sitting in their home
+# directory, and an upgrade that leaves it there never mentions it again.
+remove_browser_leftovers() {
+  local overlay="${HOME}/.local/share/nous/overlay"
+  if [[ ! -d "$overlay" ]]; then return; fi
+  step "Clearing out the old browser profile"
+  say "   ${DIM}${overlay} — the panel no longer uses a browser${RESET}"
+  do_ rm -rf "$overlay"
 }
 
 install_configuration() {
@@ -276,7 +333,27 @@ install_service() {
   # The unit ships with an absolute path; honour a custom prefix.
   do_ sed -i "s|/usr/local/bin/nousd|${PREFIX}/bin/nousd|" "${unit}/nousd.service"
   do_ systemctl --user daemon-reload
-  do_ systemctl --user enable --now nousd.service
+
+  # The daemon drives the desktop -- windows, clipboard, notifications -- and
+  # cannot do any of it without DISPLAY. systemd's user manager does not inherit
+  # the session environment, so hand it over explicitly before starting.
+  do_ systemctl --user import-environment \
+      DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP
+
+  do_ systemctl --user enable nousd.service
+
+  # A unit left `failed` by an earlier broken install has usually also hit its
+  # start limit, and restart then refuses with "start request repeated too
+  # quickly". Clearing it first is harmless when the unit is healthy.
+  if (( COMMIT )); then
+    systemctl --user reset-failed nousd.service >/dev/null 2>&1 || true
+  fi
+
+  # restart, not `enable --now`. `--now` only *starts*, and starting an already
+  # running unit does nothing at all -- so upgrading installed the new binary
+  # and left the previous one serving, with no error and nothing in the output
+  # to suggest it. The new panel would then be talking to the old daemon.
+  do_ systemctl --user restart nousd.service
 }
 
 # Cinnamon keeps custom shortcuts as a list of names, each with its own schema
@@ -356,7 +433,7 @@ finish() {
     return
   fi
 
-  local keys="${HOTKEY//[<>]/ }"
+  local keys; keys="$(pretty_hotkey "$HOTKEY")"
 
   # Spelled out at this length because the short version was misread once: the
   # closing message suggested trying "tidy my downloads", it was typed at a bash
@@ -394,6 +471,7 @@ install_dependencies
 build_binaries
 install_binaries
 install_desktop_integration
+remove_browser_leftovers
 install_configuration
 install_service
 register_hotkey

@@ -152,7 +152,9 @@ impl Panel {
                 ("esc", "discard"),
                 ("up down", "review"),
             ],
-            Body::Working { .. } => vec![("esc", "cancel")],
+            // Not "cancel": the request is already with the daemon and will
+            // finish there. This gives the panel back and discards the answer.
+            Body::Working { .. } => vec![("esc", "stop waiting")],
             Body::Done {
                 undo_hint: true, ..
             } => {

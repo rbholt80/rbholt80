@@ -1,7 +1,15 @@
 [Unit]
 Description=NOUS system daemon (user session)
 Documentation=man:nousd(8)
+
+# `After=` alone orders nothing: it only sequences units already being started
+# in the same transaction, and nothing pulls graphical-session.target into the
+# default.target transaction. The daemon was therefore exec'd at login, before
+# the X session existed, and a process's environment is fixed at exec -- so it
+# never saw DISPLAY and every desk.* capability failed for the rest of the
+# session. PartOf and the Install section below tie it to the session properly.
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -27,4 +35,8 @@ ReadOnlyPaths=-/boot -/efi -/boot/efi
 InaccessiblePaths=-/etc/shadow -/etc/gshadow
 
 [Install]
-WantedBy=default.target
+# Started by the graphical session, so DISPLAY exists by the time it runs.
+# default.target is kept as a fallback because not every Cinnamon build drives
+# graphical-session.target; the autostart entry the installer writes imports the
+# session environment and restarts the daemon, which covers that case.
+WantedBy=graphical-session.target default.target
