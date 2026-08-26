@@ -1,7 +1,7 @@
 [Nemo Action]
 Name=Tidy this folder with NOUS
 Comment=Look for duplicates, clutter and misfiled media
-Exec=/usr/local/bin/nous-ask --ask "tidy this folder" --paths %F
+Exec=@BIN@/nous-ask --ask "tidy this folder" --paths %F
 Icon-Name=nous
 Selection=S
 Extensions=dir;

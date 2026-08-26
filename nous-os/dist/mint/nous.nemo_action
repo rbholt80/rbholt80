@@ -1,7 +1,7 @@
 [Nemo Action]
 Name=Ask NOUS about this
 Comment=Summon NOUS with this selection attached
-Exec=/usr/local/bin/nous-ask --paths %F
+Exec=@BIN@/nous-ask --paths %F
 Icon-Name=nous
 Selection=Any
 Extensions=any;

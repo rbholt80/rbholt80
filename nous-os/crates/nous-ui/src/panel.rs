@@ -82,6 +82,10 @@ pub struct Panel {
     /// Horizontal scroll of the prompt text, in pixels, when it is longer than
     /// the line.
     pub prompt_offset: f64,
+    /// What was attached to this request by the file manager or the caller,
+    /// described in a few words. Shown so an instruction like "tidy these" can
+    /// be read as a whole.
+    pub context: Option<String>,
 }
 
 impl Default for Panel {
@@ -99,6 +103,7 @@ impl Panel {
             scroll: 0,
             phase: 0.0,
             prompt_offset: 0.0,
+            context: None,
         }
     }
 
@@ -168,6 +173,8 @@ pub struct Layout {
     pub prompt_text: Rect,
     /// The state marker at the left of the prompt.
     pub marker: Rect,
+    /// The chip naming what the file manager attached, if anything.
+    pub context: Option<Rect>,
     /// The area holding the body, empty when there is no body.
     pub body: Rect,
     /// One rect per visible step, in order. Empty unless showing a proposal.
@@ -221,7 +228,26 @@ impl Layout {
         let marker_size = 12.0;
         // The prompt text starts clear of the marker and its gap.
         let text_x = pad + marker_size + Metrics::GAP;
-        let text_w = (width - text_x - pad).max(0.0);
+
+        // What the file manager attached sits at the right of the prompt line,
+        // and the text yields the space rather than running underneath it.
+        // "tidy these" is a blind instruction if the panel does not say what
+        // "these" is.
+        let small = theme.small_font();
+        let context = panel.context.as_ref().map(|label| {
+            let (tw, th) = c.measure(label, &small, Some(inner_w / 2.0));
+            Rect::new(
+                width - pad - (tw + 16.0),
+                (Metrics::PROMPT_HEIGHT - (th + 8.0)) / 2.0,
+                tw + 16.0,
+                th + 8.0,
+            )
+        });
+        let text_right = match &context {
+            Some(chip) => chip.x - Metrics::GAP,
+            None => width - pad,
+        };
+        let text_w = (text_right - text_x).max(0.0);
 
         let prompt = Rect::new(0.0, 0.0, width, Metrics::PROMPT_HEIGHT);
         let prompt_text = Rect::new(text_x, 0.0, text_w, Metrics::PROMPT_HEIGHT);
@@ -274,6 +300,7 @@ impl Layout {
             prompt,
             prompt_text,
             marker,
+            context,
             body: body_rect,
             rows,
             first_row,
@@ -306,6 +333,17 @@ pub fn render(c: &Canvas, panel: &Panel, theme: &Theme, layout: &Layout, focused
 
     draw_marker(c, panel, theme, layout);
     draw_prompt(c, panel, theme, layout, focused);
+    if let (Some(chip), Some(label)) = (layout.context, panel.context.as_ref()) {
+        c.fill_rounded(chip, Metrics::RADIUS_SMALL, theme.surface_active);
+        c.text(
+            label,
+            chip.x + 8.0,
+            chip.y + 4.0,
+            &theme.small_font(),
+            theme.text_dim,
+            Some(chip.w - 16.0),
+        );
+    }
 
     if panel.body != Body::Empty {
         // A hairline under the prompt, rather than a heavier divider: the
@@ -621,6 +659,62 @@ mod tests {
     }
 
     #[test]
+    fn an_attached_selection_takes_room_from_the_prompt_rather_than_covering_it() {
+        let img = Image::new(1, 1).unwrap();
+        let theme = Theme::dark();
+
+        let mut bare = Panel::new();
+        bare.input.set("tidy these");
+        let without = Layout::compute(&bare, Metrics::PANEL_WIDTH, &img.canvas(), &theme);
+        assert!(without.context.is_none());
+
+        let mut attached = Panel::new();
+        attached.input.set("tidy these");
+        attached.context = Some("3 files · Downloads".into());
+        let with = Layout::compute(&attached, Metrics::PANEL_WIDTH, &img.canvas(), &theme);
+
+        let chip = with.context.expect("the attachment must be shown");
+        assert!(chip.w > 0.0 && chip.h > 0.0);
+        assert!(
+            chip.right() <= Metrics::PANEL_WIDTH - Metrics::PAD + 0.001,
+            "the chip runs off the panel"
+        );
+        assert!(
+            with.prompt_text.right() <= chip.x,
+            "the prompt text would be drawn under the chip"
+        );
+        assert!(
+            with.prompt_text.w < without.prompt_text.w,
+            "the text did not yield any space"
+        );
+        // The chip is vertically centred on the prompt line, not floating.
+        assert!(chip.y > 0.0 && chip.bottom() < Metrics::PROMPT_HEIGHT);
+    }
+
+    #[test]
+    fn an_attached_selection_is_actually_drawn() {
+        let theme = Theme::dark();
+        let mut p = Panel::new();
+        p.input.set("tidy these");
+        p.context = Some("3 files · Downloads".into());
+
+        let img = Image::new(Metrics::PANEL_WIDTH as i32, 80).unwrap();
+        let c = img.canvas();
+        let l = Layout::compute(&p, Metrics::PANEL_WIDTH, &c, &theme);
+        render(&c, &p, &theme, &l, true);
+
+        let chip = l.context.expect("laid out");
+        assert!(
+            img.variety(chip) > 3,
+            "the chip region is a flat fill, so nothing was drawn in it"
+        );
+        // And the chip is distinguishable from the panel behind it.
+        let inside = img.pixel((chip.x + chip.w / 2.0) as i32, (chip.y + 2.0) as i32);
+        let outside = img.pixel((chip.x - 4.0) as i32, (chip.y + 2.0) as i32);
+        assert_ne!(inside, outside, "the chip has no visible edge");
+    }
+
+    #[test]
     fn scrolling_follows_the_selection_and_stops_at_the_ends() {
         let mut p = Panel::new();
         p.set_body(Body::Proposal {
@@ -737,11 +831,10 @@ mod tests {
             "the spine is not red: ({r},{g},{b})"
         );
 
-        // And the panel as a whole actually drew something substantial.
+        // And the step's text was drawn, not merely its coloured bar.
         assert!(
-            img.ink() > 5000,
-            "the panel rendered almost nothing: ink={}",
-            img.ink()
+            img.variety(row) > 8,
+            "the step row is a flat fill, so its text never appeared"
         );
     }
 
@@ -784,17 +877,23 @@ mod tests {
     #[test]
     fn an_empty_prompt_shows_a_hint_and_a_filled_one_shows_the_text() {
         let theme = Theme::dark();
-        let render_ink = |text: &str| {
+        // Counting colours in the text area, not pixels on the whole panel: the
+        // panel paints an opaque backdrop first, so "some pixel is set" is true
+        // before anything is drawn.
+        let variety_of = |text: &str| {
             let mut p = Panel::new();
             p.input.set(text);
             let img = Image::new(Metrics::PANEL_WIDTH as i32, 80).unwrap();
             let c = img.canvas();
             let l = Layout::compute(&p, Metrics::PANEL_WIDTH, &c, &theme);
             render(&c, &p, &theme, &l, true);
-            img.ink()
+            img.variety(l.prompt_text)
         };
-        assert!(render_ink("") > 500, "the empty prompt drew no placeholder");
-        assert!(render_ink("tidy my downloads") > 500);
+        assert!(variety_of("") > 3, "the empty prompt drew no placeholder");
+        assert!(
+            variety_of("tidy my downloads") > 3,
+            "the typed text was not drawn"
+        );
     }
 
     #[test]

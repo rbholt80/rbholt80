@@ -9,8 +9,10 @@
 //! anything that needs approval appears as a plan with each step's risk marked
 //! before a single action runs.
 
+mod context;
 mod session;
 
+use context::Context;
 use nous_core::ipc::Client;
 use nous_ui::panel::{Body, Layout, Panel};
 use nous_ui::theme::{Metrics, Theme};
@@ -27,18 +29,35 @@ const ANIMATION_MS: i32 = 33;
 const IDLE_MS: i32 = 80;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     let mut once = false;
     let mut initial = String::new();
+    let mut context = Context::default();
+
     while let Some(a) = args.next() {
         match a.as_str() {
             "--once" => once = true,
             "--ask" => initial = args.next().unwrap_or_default(),
+            "--focus" => context.focus = args.next().filter(|s| !s.is_empty()),
+            "--cwd" => context.cwd = args.next().filter(|s| !s.is_empty()),
+            // Takes the rest of the arguments up to the next option, because a
+            // file manager hands over a whole selection at once.
+            "--paths" => {
+                while let Some(p) = args.peek() {
+                    if p.starts_with("--") {
+                        break;
+                    }
+                    context.paths.push(args.next().unwrap_or_default());
+                }
+            }
             "--help" | "-h" => {
-                println!("nous-shell [--ask TEXT] [--once]");
+                println!("nous-shell [options]");
                 println!();
-                println!("  --ask TEXT   open with the prompt already filled in");
-                println!("  --once       close after one request rather than staying open");
+                println!("  --ask TEXT      open with the prompt already filled in");
+                println!("  --once          close after one request rather than staying open");
+                println!("  --paths FILE... attach a selection from the file manager");
+                println!("  --cwd DIR       attach the folder being looked at");
+                println!("  --focus TITLE   name the window that was in front");
                 return;
             }
             other => {
@@ -48,13 +67,13 @@ fn main() {
         }
     }
 
-    if let Err(e) = run(once, &initial) {
+    if let Err(e) = run(once, &initial, context) {
         eprintln!("nous-shell: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(once: bool, initial: &str) -> Result<(), String> {
+fn run(once: bool, initial: &str, context: Context) -> Result<(), String> {
     let theme = Theme::detect();
     let mut window = Window::open(
         "Nous",
@@ -65,6 +84,7 @@ fn run(once: bool, initial: &str) -> Result<(), String> {
 
     let (jobs, replies) = spawn_worker();
     let mut panel = Panel::new();
+    panel.context = context.label();
     if !initial.is_empty() {
         panel.input.set(initial);
     }
@@ -130,7 +150,15 @@ fn run(once: bool, initial: &str) -> Result<(), String> {
                 panel.input.insert(&t);
                 dirty = true;
             }
-            Event::Key(k) => match act(&mut panel, &mut pending, &mut busy, &jobs, k, &window) {
+            Event::Key(k) => match act(
+                &mut panel,
+                &mut pending,
+                &mut busy,
+                &jobs,
+                k,
+                &window,
+                &context,
+            ) {
                 Action::Redraw => dirty = true,
                 Action::Quit => return Ok(()),
                 Action::Nothing => {}
@@ -169,6 +197,7 @@ fn act(
     jobs: &Sender<Job>,
     k: Key,
     window: &Window,
+    context: &Context,
 ) -> Action {
     use nous_ui::ffi::*;
     use nous_ui::input::Step;
@@ -215,7 +244,7 @@ fn act(
             panel.set_body(Body::Working {
                 note: format!("working out what \"{text}\" means…"),
             });
-            let _ = jobs.send(Job::Ask(text));
+            let _ = jobs.send(Job::Ask(text, context.clone()));
             Action::Redraw
         }
         XK_BackSpace => {

@@ -3,45 +3,55 @@
 # Summon NOUS over whatever you are doing.
 #
 # Bound to a global hotkey, or invoked by the file manager with a selection.
-# The one subtlety worth knowing: the focused window is captured *before* the
-# overlay is launched, because a moment later the focused window is the overlay
-# itself, and "what am I looking at?" would always answer "NOUS".
+#
+# This used to launch a browser in app mode pointed at a local web server, which
+# meant a browser process had to be running for a text box to appear. It now
+# launches the native panel directly. The one subtlety worth keeping is that the
+# focused window is captured *before* the panel is launched, because a moment
+# later the focused window is the panel itself, and "what am I looking at?"
+# would always answer "NOUS".
 
 set -euo pipefail
 
-PORT="${NOUS_UI_PORT:-7666}"
-BASE="http://127.0.0.1:${PORT}/"
-PATHS=""
+SHELL_BIN=""
+for candidate in \
+  "${NOUS_SHELL:-}" \
+  "$(dirname "$(readlink -f "$0")")/nous-shell" \
+  "$HOME/.local/bin/nous-shell" \
+  /usr/local/bin/nous-shell \
+  /usr/bin/nous-shell
+do
+  if [[ -n "$candidate" && -x "$candidate" ]]; then SHELL_BIN="$candidate"; break; fi
+done
+
+if [[ -z "$SHELL_BIN" ]]; then
+  echo "nous-ask: nous-shell is not installed" >&2
+  echo "  run dist/mint/install.sh, or set NOUS_SHELL to the binary" >&2
+  exit 1
+fi
+
+PATHS=()
 CWD=""
 ASK=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --paths) shift; while [[ $# -gt 0 && "$1" != --* ]]; do PATHS+="${1}"$'\n'; shift; done ;;
+    --paths) shift; while [[ $# -gt 0 && "$1" != --* ]]; do PATHS+=("$1"); shift; done ;;
     --cwd)   CWD="${2:-}"; shift 2 ;;
     --ask)   ASK="${2:-}"; shift 2 ;;
     -h|--help)
-      cat <<USAGE
-nous-ask — summon the NOUS overlay
+      cat <<'USAGE'
+nous-ask — summon the NOUS panel
 
-  nous-ask                      just the command bar
-  nous-ask --ask "tidy this"    resolve something immediately
+  nous-ask                      just the prompt
+  nous-ask --ask "tidy this"    open with something already typed
   nous-ask --paths FILE...      attach a selection (used by the file manager)
   nous-ask --cwd DIR            attach the folder being looked at
 USAGE
       exit 0 ;;
-    *) PATHS+="${1}"$'\n'; shift ;;
+    *) PATHS+=("$1"); shift ;;
   esac
 done
-
-if ! curl -sf -o /dev/null --max-time 2 "$BASE"; then
-  if command -v notify-send >/dev/null 2>&1; then
-    notify-send -a NOUS -u critical "NOUS is not running" \
-      "Start it with: systemctl --user start nousd"
-  fi
-  echo "nous-ask: nousd is not answering on port ${PORT}" >&2
-  exit 1
-fi
 
 # Capture the focus before we take it.
 FOCUS=""
@@ -50,86 +60,18 @@ if command -v xdotool >/dev/null 2>&1; then
 fi
 
 # If the file manager gave us a selection but no folder, infer one.
-if [[ -z "$CWD" && -n "$PATHS" ]]; then
-  first="$(printf '%s' "$PATHS" | head -1)"
-  if [[ -d "$first" ]]; then CWD="$first"; else CWD="$(dirname "$first")"; fi
+if [[ -z "$CWD" && ${#PATHS[@]} -gt 0 ]]; then
+  if [[ -d "${PATHS[0]}" ]]; then CWD="${PATHS[0]}"; else CWD="$(dirname "${PATHS[0]}")"; fi
 fi
-
-urlencode() {
-  # Byte semantics, deliberately. In a UTF-8 locale bash slices strings by
-  # character, so "café.png" would encode as %E9 -- the code point -- where a
-  # URL needs the UTF-8 bytes %C3%A9. Every Mint desktop runs a UTF-8 locale,
-  # so that is the common case, not the exotic one, and it silently corrupts
-  # every non-ASCII filename passed in from the file manager.
-  local LC_ALL=C
-  local s="$1" out="" i c
-  for (( i = 0; i < ${#s}; i++ )); do
-    c="${s:i:1}"
-    case "$c" in
-      [a-zA-Z0-9.~_-]) out+="$c" ;;
-      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
-    esac
-  done
-  printf '%s' "$out"
-}
 
 # Written as if-blocks, not `[[ ... ]] && ...`: under `set -e` a false test at
-# the end of a script is a non-zero exit, and a plain hotkey summon has no
-# paths -- which would abort here before the window ever opened.
-URL="${BASE}?mode=overlay"
-if [[ -n "$FOCUS" ]]; then URL+="&focus=$(urlencode "$FOCUS")"; fi
-if [[ -n "$CWD"   ]]; then URL+="&cwd=$(urlencode "$CWD")"; fi
-if [[ -n "$ASK"   ]]; then URL+="&ask=$(urlencode "$ASK")"; fi
-if [[ -n "$PATHS" ]]; then URL+="&paths=$(urlencode "${PATHS%$'\n'}")"; fi
+# the end of a script is a non-zero exit, and a plain hotkey summon has none of
+# these -- which would abort before the panel ever opened.
+ARGS=()
+if [[ -n "$FOCUS" ]]; then ARGS+=(--focus "$FOCUS"); fi
+if [[ -n "$CWD"   ]]; then ARGS+=(--cwd "$CWD"); fi
+if [[ -n "$ASK"   ]]; then ARGS+=(--ask "$ASK"); fi
+# --paths takes the rest of its arguments, so it goes last.
+if [[ ${#PATHS[@]} -gt 0 ]]; then ARGS+=(--paths "${PATHS[@]}"); fi
 
-WIN_W=780
-WIN_H=420
-
-# Chromium's --window-position wants x,y. There is no "center": that string
-# parses as zero and drops the window in the top-left corner. Work out the
-# real coordinates, and sit a third of the way down rather than dead centre --
-# where a command palette belongs.
-POS=()
-if command -v xdotool >/dev/null 2>&1; then
-  GEO="$(xdotool getdisplaygeometry 2>/dev/null || true)"
-  SW="${GEO%% *}"; SH="${GEO##* }"
-  if [[ "$SW" =~ ^[0-9]+$ && "$SH" =~ ^[0-9]+$ ]]; then
-    POS=("--window-position=$(( (SW - WIN_W) / 2 )),$(( (SH - WIN_H) / 3 ))")
-  fi
-fi
-
-for candidate in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome \
-                 /usr/bin/brave-browser /usr/bin/microsoft-edge; do
-  if [[ -x "$candidate" ]]; then BROWSER="$candidate"; break; fi
-done
-if [[ -z "${BROWSER:-}" ]]; then
-  echo "nous-ask: no browser engine found (sudo apt install chromium)" >&2
-  exit 1
-fi
-
-# A separate profile directory, so summoning NOUS never disturbs a browser
-# window you already had open.
-"$BROWSER" \
-  --app="$URL" \
-  --window-size="${WIN_W},${WIN_H}" \
-  "${POS[@]}" \
-  --no-first-run \
-  --no-default-browser-check \
-  --disable-background-networking \
-  --disable-sync \
-  --password-store=basic \
-  --class=nous-overlay \
-  --user-data-dir="${XDG_DATA_HOME:-$HOME/.local/share}/nous/overlay" \
-  >/dev/null 2>&1 &
-
-# Raise it above whatever was in front. Cinnamon honours this; if wmctrl is
-# missing the window still appears, just not necessarily on top.
-if command -v wmctrl >/dev/null 2>&1; then
-  for _ in $(seq 25); do
-    if wmctrl -lx 2>/dev/null | grep -qi 'nous-overlay'; then
-      wmctrl -x -a nous-overlay 2>/dev/null || true
-      break
-    fi
-    sleep 0.1
-  done
-fi
+exec "$SHELL_BIN" "${ARGS[@]}"

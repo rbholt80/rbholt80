@@ -128,10 +128,10 @@ preflight() {
 install_dependencies() {
   step "Installing what NOUS drives"
 
+  # No browser here any more: the panel is a native X11 window. What is left
+  # is what NOUS actually drives -- the window manager, the clipboard, and the
+  # desktop's own notification channel.
   local packages=(wmctrl xdotool xclip libnotify-bin xdg-utils curl)
-  if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
-    packages+=(chromium)
-  fi
   if (( WITH_MEDIA )); then packages+=(mpv ffmpeg); fi
 
   local missing=()
@@ -160,12 +160,24 @@ build_binaries() {
 
 install_binaries() {
   step "Installing to ${PREFIX}/bin"
-  for binary in nousd nsh nousctl; do
+  for binary in nousd nsh nousctl nous-shell; do
     prefix_ install -Dm755 "${ROOT}/target/release/${binary}" "${PREFIX}/bin/${binary}"
   done
   prefix_ install -Dm755 "${HERE}/nous-ask" "${PREFIX}/bin/nous-ask"
-  prefix_ install -Dm755 "${ROOT}/dist/overlay/usr/bin/nous-session" "${PREFIX}/bin/nous-shell"
   prefix_ install -Dm755 "${HERE}/uninstall.sh" "${PREFIX}/bin/nous-uninstall"
+}
+
+# Menu entries and file-manager actions name the binary by absolute path, and
+# that path depends on --prefix. Shipping them with /usr/local/bin baked in left
+# every --prefix install with menu entries pointing at a binary that is not
+# there, which fails silently: the menu item is present and simply does nothing.
+install_menu_entry() {
+  local src="$1" dest="$2"
+  local tmp
+  tmp="$(mktemp)"
+  sed "s|@BIN@|${PREFIX}/bin|g" "$src" > "$tmp"
+  install -Dm644 "$tmp" "$dest"
+  rm -f "$tmp"
 }
 
 install_desktop_integration() {
@@ -176,13 +188,13 @@ install_desktop_integration() {
   local icons="${HOME}/.local/share/icons/hicolor/scalable/apps"
 
   do_ mkdir -p "$apps" "$actions" "$icons"
-  do_ install -Dm644 "${HERE}/nous.desktop"     "${apps}/nous.desktop"
-  do_ install -Dm644 "${HERE}/nous-ask.desktop" "${apps}/nous-ask.desktop"
+  do_ install_menu_entry "${HERE}/nous.desktop"     "${apps}/nous.desktop"
+  do_ install_menu_entry "${HERE}/nous-ask.desktop" "${apps}/nous-ask.desktop"
   do_ install -Dm644 "${HERE}/nous.svg"         "${icons}/nous.svg"
 
   if [[ -d "${HOME}/.local/share/nemo" ]] || command -v nemo >/dev/null 2>&1; then
-    do_ install -Dm644 "${HERE}/nous.nemo_action"      "${actions}/nous.nemo_action"
-    do_ install -Dm644 "${HERE}/nous-tidy.nemo_action" "${actions}/nous-tidy.nemo_action"
+    do_ install_menu_entry "${HERE}/nous.nemo_action"      "${actions}/nous.nemo_action"
+    do_ install_menu_entry "${HERE}/nous-tidy.nemo_action" "${actions}/nous-tidy.nemo_action"
     say "   ${DIM}added to Nemo's right-click menu${RESET}"
   else
     say "   ${DIM}Nemo not found; skipping the file manager menu${RESET}"
@@ -295,7 +307,7 @@ finish() {
   fi
   say "   Press ${BOLD}${HOTKEY//[<>]/ }${RESET} anywhere and say what you want."
   say ""
-  say "   ${DIM}nous-shell${RESET}         the full desktop shell"
+  say "   ${DIM}nous-ask${RESET}           the panel, also on your hotkey"
   say "   ${DIM}nsh${RESET}                a shell where language and commands share a prompt"
   say "   ${DIM}nousctl status${RESET}     check on it"
   say "   ${DIM}nousctl key set anthropic${RESET}   add a model, if you want one"

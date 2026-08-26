@@ -350,14 +350,50 @@ impl Image {
         Ok(())
     }
 
-    /// How many pixels differ from fully transparent. A frame that drew nothing
-    /// scores zero, which is the failure a "it compiled so it works" test
-    /// misses.
+    /// How many pixels differ from fully transparent.
+    ///
+    /// Only meaningful on a surface that starts transparent. A panel paints an
+    /// opaque backdrop first, so every pixel is "inked" whether or not anything
+    /// was drawn on top — use [`Image::variety`] there instead.
     pub fn ink(&self) -> usize {
+        self.count(|p| p.3 != 0)
+    }
+
+    /// How many distinct colours appear inside `r`.
+    ///
+    /// This is the measure that can actually fail on an opaque surface: a
+    /// region containing nothing but its background is one colour, and anything
+    /// drawn into it — text, a border, a filled chip — raises the count. A test
+    /// asserting "something was drawn here" is otherwise satisfied by the
+    /// background alone.
+    pub fn variety(&self, r: Rect) -> usize {
+        let mut seen = Vec::new();
+        let x0 = r.x.max(0.0) as i32;
+        let y0 = r.y.max(0.0) as i32;
+        let x1 = (r.right().ceil() as i32).min(self.width);
+        let y1 = (r.bottom().ceil() as i32).min(self.height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = self.pixel(x, y);
+                if !seen.contains(&p) {
+                    seen.push(p);
+                    // A region with this many distinct colours is unambiguously
+                    // not a flat fill; counting further wastes time on a large
+                    // area with antialiased text in it.
+                    if seen.len() >= 64 {
+                        return seen.len();
+                    }
+                }
+            }
+        }
+        seen.len()
+    }
+
+    fn count(&self, f: impl Fn((u8, u8, u8, u8)) -> bool) -> usize {
         let mut n = 0;
         for y in 0..self.height {
             for x in 0..self.width {
-                if self.pixel(x, y).3 != 0 {
+                if f(self.pixel(x, y)) {
                     n += 1;
                 }
             }

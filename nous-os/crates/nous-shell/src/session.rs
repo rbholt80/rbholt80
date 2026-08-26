@@ -7,6 +7,7 @@
 //! daemon's JSON into [`Body`] is pure and lives here, which is what makes it
 //! testable without a daemon running.
 
+use crate::context::Context;
 use nous_core::json::{json_obj, Json};
 use nous_core::proto::method;
 use nous_ui::panel::{Body, Step};
@@ -28,8 +29,9 @@ pub enum Pending {
 /// A request from the panel to the worker.
 #[derive(Debug, Clone)]
 pub enum Job {
-    /// Work out what an utterance means and what it would take to do it.
-    Ask(String),
+    /// Work out what an utterance means and what it would take to do it,
+    /// against what the panel was summoned over.
+    Ask(String, Context),
     Approve(Pending),
     Undo,
 }
@@ -216,7 +218,7 @@ pub fn read_submission(out: &Json) -> Reply {
 /// Run one job against the daemon. Called on the worker thread.
 pub fn run(client: &mut nous_core::ipc::Client, job: Job) -> Reply {
     match job {
-        Job::Ask(text) => ask(client, &text),
+        Job::Ask(text, context) => ask(client, &text, &context),
         Job::Approve(Pending::Plan(plan)) => {
             match client.call(
                 method::INTENT_SUBMIT,
@@ -273,8 +275,9 @@ pub fn run(client: &mut nous_core::ipc::Client, job: Job) -> Reply {
     }
 }
 
-fn ask(client: &mut nous_core::ipc::Client, text: &str) -> Reply {
-    let preflight = match client.call(method::INTENT_PLAN, json_obj([("text", text.into())])) {
+fn ask(client: &mut nous_core::ipc::Client, text: &str, context: &Context) -> Reply {
+    let params = || json_obj([("text", text.into()), ("context", context.to_json())]);
+    let preflight = match client.call(method::INTENT_PLAN, params()) {
         Ok(p) => p,
         Err(e) => return Reply::error(e),
     };
@@ -301,6 +304,7 @@ fn ask(client: &mut nous_core::ipc::Client, text: &str) -> Reply {
         method::INTENT_SUBMIT,
         json_obj([
             ("text", text.into()),
+            ("context", context.to_json()),
             ("plan", preflight.get("plan").cloned().unwrap_or(Json::Null)),
             ("approved", true.into()),
         ]),

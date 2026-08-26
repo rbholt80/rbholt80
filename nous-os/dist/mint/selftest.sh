@@ -21,43 +21,116 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; printf '        %s\n' "$2"; 
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1" "expected: $3
         got:      $2"; fi; }
 
-# Pull the function under test out of the real script, so the test cannot drift
-# from the thing it is testing.
-eval "$(sed -n '/^urlencode() {/,/^}/p' "${HERE}/nous-ask")"
+# The percent-encoding tests that used to live here are gone with the thing they
+# tested: nous-ask no longer builds a URL for a browser, it execs the native
+# panel. The bug class they guarded -- a filename mangled on the way through --
+# is still real, so it is tested below against the new mechanism instead.
 
-echo "percent-encoding"
+echo "argument passing"
 
-# The bug this was written for: in a UTF-8 locale bash slices by character, so
-# "café" encoded as %E9 (the code point) rather than %C3%A9 (the UTF-8 bytes),
-# and every non-ASCII filename from the file manager arrived corrupted.
-for loc in C C.UTF-8 en_US.UTF-8; do
-  out="$(LC_ALL="$loc" bash -c "$(declare -f urlencode); urlencode '/home/j/café.png'" 2>/dev/null)"
-  check "accented name under LC_ALL=$loc" "$out" "%2Fhome%2Fj%2Fcaf%C3%A9.png"
-done
+# A fake nous-shell that records exactly what it was handed, one argument per
+# line. Anything that mangles a filename shows up as a wrong line count or a
+# wrong line.
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+cat > "${TMP}/nous-shell" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${NOUS_ARGV_OUT}"
+FAKE
+chmod +x "${TMP}/nous-shell"
 
-check "cjk name"        "$(urlencode '日本語.mp4')"    "%E6%97%A5%E6%9C%AC%E8%AA%9E.mp4"
-check "astral plane"    "$(urlencode '🎬.mkv')"        "%F0%9F%8E%AC.mkv"
-check "spaces"          "$(urlencode 'a b.txt')"       "a%20b.txt"
-check "ampersand/hash"  "$(urlencode 'a&b#c')"         "a%26b%23c"
-check "literal percent" "$(urlencode '100%')"          "100%25"
-check "apostrophe"      "$(urlencode "it's")"          "it%27s"
-check "newline"         "$(urlencode $'a\nb')"         "a%0Ab"
-check "unreserved kept" "$(urlencode 'A-z_0.9~')"      "A-z_0.9~"
+# Run nous-ask against the fake, with no X tools on PATH so the focus lookup is
+# skipped and the output is deterministic.
+summon() {
+  NOUS_SHELL="${TMP}/nous-shell" NOUS_ARGV_OUT="${TMP}/argv" \
+    PATH="/usr/bin:/bin" bash "${HERE}/nous-ask" "$@" >/dev/null 2>&1
+  cat "${TMP}/argv"
+}
+
+# The bug the encoder existed to prevent: a non-ASCII name arriving corrupted.
+# Passed as an argv element it cannot be re-encoded at all, which is the point.
+got="$(summon --paths '/home/j/café.png')"
+check "accented name survives" "$got" "--cwd
+/home/j
+--paths
+/home/j/café.png"
+
+got="$(summon --paths '/a/日本語.mp4' '/a/🎬.mkv')"
+check "cjk and astral names survive" "$got" "--cwd
+/a
+--paths
+/a/日本語.mp4
+/a/🎬.mkv"
+
+# A space in a filename is the classic way a shell wrapper splits one file into
+# two. It must arrive as a single argument.
+got="$(summon --paths '/a/holiday photos.zip')"
+check "a space does not split one file into two" "$got" "--cwd
+/a
+--paths
+/a/holiday photos.zip"
+
+got="$(summon --paths "/a/it's & 100%.txt")"
+check "quoting metacharacters survive" "$got" "--cwd
+/a
+--paths
+/a/it's & 100%.txt"
+
+# --paths consumes the rest of its arguments, so it has to be emitted last or it
+# swallows the options that follow it.
+got="$(summon --ask 'tidy this' --paths '/a/x' '/a/y')"
+check "--paths is passed last" "$got" "--cwd
+/a
+--ask
+tidy this
+--paths
+/a/x
+/a/y"
+
+# A plain hotkey summon has no arguments at all. This is the case that a
+# trailing false test under `set -e` used to abort before the panel opened.
+got="$(summon)"
+check "a bare summon passes nothing and still runs" "$got" ""
 
 echo
-echo "window placement"
+echo "launching"
 
-# Chromium's --window-position takes x,y. "center" is not a value: it parses as
-# zero, which put the summon overlay in the top-left corner of the screen.
-if grep -q -- '--window-position=center' "${HERE}/nous-ask"; then
-  bad "no literal 'center' position" "--window-position=center parses as 0,0"
+# The panel is a native window now. A browser on this path would mean the thing
+# the shell was rewritten to stop doing has come back.
+if grep -qiE 'chromium|google-chrome|--app=|brave-browser' "${HERE}/nous-ask"; then
+  bad "no browser is launched" "nous-ask still references a browser"
 else
-  ok "no literal 'center' position"
+  ok "no browser is launched"
 fi
-if grep -q 'getdisplaygeometry' "${HERE}/nous-ask"; then
-  ok "centres against real screen geometry"
+if grep -q 'xdotool getactivewindow' "${HERE}/nous-ask"; then
+  ok "captures the focused window before taking focus"
 else
-  bad "centres against real screen geometry" "expected a geometry lookup"
+  bad "captures the focused window before taking focus" "expected an xdotool lookup"
+fi
+
+echo
+echo "install paths"
+
+# Menu entries name the binary by absolute path, and that path depends on
+# --prefix. Baking /usr/local/bin into the shipped files left every --prefix
+# install with menu items that silently did nothing.
+for f in "${HERE}"/*.desktop "${HERE}"/*.nemo_action; do
+  if grep -q '^Exec=/usr/local/bin' "$f"; then
+    bad "$(basename "$f"): no hardcoded prefix" "Exec= names /usr/local/bin"
+  else
+    ok "$(basename "$f"): no hardcoded prefix"
+  fi
+  if grep -q '^Exec=@BIN@/' "$f"; then
+    ok "$(basename "$f"): prefix is substituted at install time"
+  else
+    bad "$(basename "$f"): prefix is substituted at install time" "no @BIN@ in Exec"
+  fi
+done
+
+if grep -q 's|@BIN@|' "${HERE}/install.sh"; then
+  ok "install.sh substitutes @BIN@"
+else
+  bad "install.sh substitutes @BIN@" "the placeholder would be installed literally"
 fi
 
 echo

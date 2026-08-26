@@ -2,7 +2,7 @@
 Type=Application
 Name=Ask NOUS
 Comment=Summon the NOUS command bar
-Exec=/usr/local/bin/nous-ask
+Exec=@BIN@/nous-ask
 Icon=nous
 Terminal=false
 Categories=System;Utility;
