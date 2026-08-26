@@ -114,7 +114,7 @@ ROOT="$(cd "${HERE}/../.." && pwd)"
 # Every binary the workspace produces. Named once, because build and install
 # consulting different lists is exactly how a new binary gets compiled but never
 # installed -- or checked for but never built.
-BINARIES=(nousd nsh nousctl nous-shell)
+BINARIES=(nousd nsh nousctl nous-shell nous)
 
 # Whether this run will compile. Decided in preflight, because the dependency
 # step needs to know whether to pull in the toolchain packages.

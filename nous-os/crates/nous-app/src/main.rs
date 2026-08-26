@@ -1,0 +1,140 @@
+//! `nous` — the window.
+//!
+//! Everything the interface can draw was, until this existed, reachable only
+//! from a test harness that wrote PNG files. The surfaces were real and the
+//! pictures of them were honest, but nothing opened one. This opens one.
+//!
+//! A single resizable application window holding the views, switched between
+//! rather than stacked: files, the player, and the cutting room. The panel —
+//! the thing you talk to — stays a separate overlay summoned by a hotkey,
+//! because it is summoned over whatever you are already doing and a view inside
+//! this window could not be.
+
+mod views;
+
+use nous_ui::draw::Image;
+use nous_ui::ffi;
+use nous_ui::theme::Theme;
+use nous_ui::window::{Event, Window, WindowKind};
+use views::{App, View};
+
+const WIDTH: i32 = 1180;
+const HEIGHT: i32 = 720;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", HELP);
+        return;
+    }
+    // A screenshot of the real window, for checking the thing that opens rather
+    // than an offscreen copy of it. Used by the self-test.
+    let shot = args
+        .iter()
+        .position(|a| a == "--screenshot")
+        .and_then(|i| args.get(i + 1).cloned());
+    let start = args
+        .iter()
+        .position(|a| a == "--view")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| View::named(n));
+
+    let theme = Theme::detect();
+    let mut window = match Window::open("Nous", WIDTH, HEIGHT, WindowKind::Normal) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("nous: could not open a window: {e}");
+            eprintln!("      is DISPLAY set? this needs a running X session.");
+            std::process::exit(1);
+        }
+    };
+
+    let (mut w, mut h) = (WIDTH as f64, HEIGHT as f64);
+    let mut app = App::new(start.unwrap_or(View::Files));
+    app.load();
+
+    // Draw twice before anything is read back: the first frame can go out
+    // before the server has finished mapping the window, and a blank capture
+    // would look like a rendering fault when it is only a race.
+    for _ in 0..2 {
+        window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));
+        window.sync();
+    }
+
+    if let Some(path) = shot {
+        // Let any Expose land, so what is captured is a settled window.
+        for _ in 0..8 {
+            if let Event::Redraw | Event::Resized { .. } = window.wait(40) {
+                window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));
+            }
+        }
+        match window.capture(&path) {
+            Ok(()) => println!("captured {path}"),
+            Err(e) => {
+                eprintln!("nous: capture failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    loop {
+        // A generous wait: this is a window, not a game. It wakes on input.
+        match window.wait(250) {
+            Event::Close => break,
+            Event::Redraw => {}
+            Event::Resized { w: nw, h: nh } => {
+                w = nw;
+                h = nh;
+            }
+            Event::Key(k) => {
+                if k.is(ffi::XK_Escape) && !app.handles_escape() {
+                    break;
+                }
+                if k.ctrl && k.sym == 'q' as u64 {
+                    break;
+                }
+                app.key(k, w, h);
+            }
+            Event::Text(t) => app.text(&t),
+            // X reports the wheel as buttons four and five. Nothing else in
+            // the interface treats them as clicks, so they are turned back into
+            // scrolling here rather than in every view.
+            Event::MouseDown { x, y, button } => match button {
+                4 => app.scroll(-3.0, w, h),
+                5 => app.scroll(3.0, w, h),
+                b => app.click(x, y, b, w, h),
+            },
+            Event::MouseUp { x, y, button } => app.release(x, y, button),
+            Event::MouseMove { x, y } => app.hover(x, y, w, h),
+            // Nothing happened, and nothing needs redrawing for it.
+            Event::Tick | Event::FocusLost => continue,
+        }
+        window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));
+    }
+}
+
+const HELP: &str = "\
+nous — the interface window
+
+    nous                     open it
+    nous --view files        open on a particular view
+    nous --view player       (files, player, edit)
+    nous --screenshot P.png  open, draw one frame, write it to P, exit
+
+Inside the window:
+    1 2 3        switch view
+    Tab          next view
+    arrows       move around
+    Return       open / play what is selected
+    Ctrl-Q       quit
+
+The panel you talk to is a separate overlay, summoned by its hotkey. Run
+`nousd` for the daemon that does the work.
+";
+
+/// The offscreen probe every layout needs for measuring text before there is
+/// anything to draw on.
+pub fn probe() -> Image {
+    Image::new(1, 1).expect("a one-pixel surface")
+}

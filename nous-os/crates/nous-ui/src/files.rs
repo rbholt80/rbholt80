@@ -306,6 +306,12 @@ pub fn render(c: &Canvas, files: &mut Files, theme: &Theme, layout: &Layout) {
         draw_strip(c, files, theme, layout);
     }
 
+    if files.entries.is_empty() {
+        draw_empty(c, theme, layout.body);
+        draw_footer(c, files, theme, layout);
+        return;
+    }
+
     c.clip_rect(layout.body);
     let scroll = files.scroll;
     let selected = files.selected;
@@ -598,6 +604,24 @@ fn draw_scrollbar(c: &Canvas, files: &Files, theme: &Theme, layout: &Layout) {
 /// The footer says one of two things, and always says something: what the
 /// system wants to do to this folder, or — when there is no plan — what the
 /// file under the cursor actually is, at full width where a long note fits.
+/// A folder with nothing in it.
+///
+/// An empty grid and an empty grid that failed to load look identical, and both
+/// read as a program that has broken. Saying which it is costs one line.
+fn draw_empty(c: &Canvas, theme: &Theme, body: Rect) {
+    let msg = "This folder is empty";
+    let f = theme.title_font();
+    let (w, h) = c.measure(msg, &f, None);
+    c.text(
+        msg,
+        body.x + (body.w - w) / 2.0,
+        body.y + (body.h - h) / 2.0,
+        &f,
+        theme.text_faint,
+        None,
+    );
+}
+
 fn draw_footer(c: &Canvas, files: &Files, theme: &Theme, layout: &Layout) {
     let f = layout.footer;
     c.line(
@@ -1003,6 +1027,25 @@ mod tests {
         assert_eq!(folder_name("/"), "/");
         assert_eq!(folder_name(""), "/");
         assert_eq!(folder_name("Downloads"), "Downloads");
+    }
+
+    #[test]
+    fn an_empty_folder_says_so_rather_than_looking_broken() {
+        // An empty grid and a grid that failed to load are the same picture,
+        // and both read as a program that has stopped working.
+        let theme = Theme::dark();
+        let mut f = Files::new("/home/j/Downloads", Vec::new());
+        let img = Image::new(900, 600).unwrap();
+        let l = Layout::compute(&f, 900.0, 600.0);
+        render(&img.canvas(), &mut f, &theme, &l);
+        assert!(
+            img.variety(l.body) > 2,
+            "an empty folder draws nothing at all"
+        );
+        // The header still names where you are, which is how you get back out.
+        // The footer stays blank on purpose: it reports the selected file, and
+        // an empty folder has none to report.
+        assert!(img.variety(l.header) > 2, "no header on an empty folder");
     }
 
     #[test]

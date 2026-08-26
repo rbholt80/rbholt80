@@ -3,6 +3,14 @@
 version = 3
 
 [[package]]
+name = "nous-app"
+version = "0.1.0"
+dependencies = [
+ "nous-core",
+ "nous-ui",
+]
+
+[[package]]
 name = "nous-core"
 version = "0.1.0"
 

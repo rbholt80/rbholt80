@@ -189,6 +189,17 @@ impl Canvas {
         }
     }
 
+    /// Move the origin, so a view can lay itself out from zero wherever it has
+    /// been put on screen.
+    ///
+    /// Does not save: the transform is part of the state `clip_rect` already
+    /// saves, so the pair is `clip_rect` then `translate` then one `restore`.
+    /// Saving here too would leave a second frame on the stack that nothing
+    /// pops, and the clip would outlive the view that set it.
+    pub fn translate(&self, dx: f64, dy: f64) {
+        unsafe { cairo_translate(self.cr, dx, dy) }
+    }
+
     pub fn clip_rect(&self, r: Rect) {
         unsafe {
             cairo_save(self.cr);

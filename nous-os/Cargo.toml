@@ -4,6 +4,7 @@ members = [
     "crates/nous-core",
     "crates/nous-ui",
     "crates/nous-shell",
+    "crates/nous-app",
     "crates/nousd",
     "crates/nsh",
     "crates/nousctl",
