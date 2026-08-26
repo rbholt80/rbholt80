@@ -37,8 +37,8 @@ ConfigurationDirectory=nous
 
 # /boot and the ESP are on the capability system's protected list already; this
 # makes the kernel enforce it too, so a bug in the broker is not enough.
-ReadOnlyPaths=/boot /efi
-InaccessiblePaths=/etc/shadow /etc/gshadow
+ReadOnlyPaths=-/boot -/efi -/boot/efi
+InaccessiblePaths=-/etc/shadow -/etc/gshadow
 
 [Install]
 WantedBy=multi-user.target

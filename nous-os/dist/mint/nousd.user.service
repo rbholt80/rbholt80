@@ -23,8 +23,8 @@ RestrictSUIDSGID=yes
 
 # The same protected paths the capability system enforces, enforced again by
 # the kernel, so a bug in the broker is not sufficient on its own.
-ReadOnlyPaths=/boot /efi
-InaccessiblePaths=/etc/shadow /etc/gshadow
+ReadOnlyPaths=-/boot -/efi -/boot/efi
+InaccessiblePaths=-/etc/shadow -/etc/gshadow
 
 [Install]
 WantedBy=default.target
