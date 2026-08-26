@@ -418,7 +418,13 @@ pub type PangoLayout = c_void;
 pub type PangoFontDescription = c_void;
 
 pub const PANGO_SCALE: c_int = 1024;
+pub const PANGO_ELLIPSIZE_NONE: c_int = 0;
 pub const PANGO_ELLIPSIZE_END: c_int = 3;
+pub const PANGO_WRAP_WORD: c_int = 0;
+/// Wrap at word boundaries, but break a word that is longer than the line
+/// rather than letting it overflow. A path with no spaces in it is exactly the
+/// case that overflows.
+pub const PANGO_WRAP_WORD_CHAR: c_int = 2;
 pub const PANGO_ALIGN_LEFT: c_int = 0;
 pub const PANGO_WEIGHT_NORMAL: c_int = 400;
 pub const PANGO_WEIGHT_BOLD: c_int = 700;
@@ -438,6 +444,9 @@ extern "C" {
     );
     pub fn pango_layout_set_width(layout: *mut PangoLayout, width: c_int);
     pub fn pango_layout_set_ellipsize(layout: *mut PangoLayout, mode: c_int);
+    pub fn pango_layout_set_wrap(layout: *mut PangoLayout, mode: c_int);
+    pub fn pango_layout_set_line_spacing(layout: *mut PangoLayout, factor: f32);
+    pub fn pango_layout_get_line_count(layout: *mut PangoLayout) -> c_int;
     pub fn pango_layout_get_pixel_size(layout: *mut PangoLayout, w: *mut c_int, h: *mut c_int);
     pub fn pango_font_description_from_string(s: *const c_char) -> *mut PangoFontDescription;
     pub fn pango_font_description_free(desc: *mut PangoFontDescription);

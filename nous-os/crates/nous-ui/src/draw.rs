@@ -70,6 +70,13 @@ impl Rect {
     }
 }
 
+/// Whether text is kept to one line or allowed to wrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    OneLine,
+    Wrap,
+}
+
 /// A drawing context for one frame.
 pub struct Canvas {
     pub cr: *mut cairo_t,
@@ -157,17 +164,20 @@ impl Canvas {
     }
 
     /// Lay out text and return its pixel size without drawing it.
+    ///
+    /// With a `max_width`, the text is kept to one line and ellipsized. Prose
+    /// that should wrap goes through [`Canvas::measure_wrapped`] instead —
+    /// measuring one way and drawing the other is how a body ends up clipped.
     pub fn measure(&self, text: &str, font: &Font, max_width: Option<f64>) -> (f64, f64) {
-        let layout = self.layout_for(text, font, max_width);
-        let (mut w, mut h) = (0, 0);
-        unsafe {
-            pango_layout_get_pixel_size(layout, &mut w, &mut h);
-            g_object_unref(layout as *mut _);
-        }
-        (w as f64, h as f64)
+        self.sized(self.layout_for(text, font, max_width, Flow::OneLine))
     }
 
-    /// Draw text at `(x, y)` (top-left). Returns the height drawn.
+    pub fn measure_wrapped(&self, text: &str, font: &Font, width: f64) -> (f64, f64) {
+        self.sized(self.layout_for(text, font, Some(width), Flow::Wrap))
+    }
+
+    /// Draw one line of text at `(x, y)` (top-left), ellipsized to `max_width`.
+    /// Returns the height drawn.
     pub fn text(
         &self,
         text: &str,
@@ -177,7 +187,43 @@ impl Canvas {
         c: Rgba,
         max_width: Option<f64>,
     ) -> f64 {
-        let layout = self.layout_for(text, font, max_width);
+        self.show(
+            self.layout_for(text, font, max_width, Flow::OneLine),
+            x,
+            y,
+            c,
+        )
+    }
+
+    /// Draw text wrapped to `width`. Returns the height drawn, which is what
+    /// the caller must reserve for it.
+    pub fn text_wrapped(
+        &self,
+        text: &str,
+        x: f64,
+        y: f64,
+        font: &Font,
+        c: Rgba,
+        width: f64,
+    ) -> f64 {
+        self.show(
+            self.layout_for(text, font, Some(width), Flow::Wrap),
+            x,
+            y,
+            c,
+        )
+    }
+
+    fn sized(&self, layout: *mut PangoLayout) -> (f64, f64) {
+        let (mut w, mut h) = (0, 0);
+        unsafe {
+            pango_layout_get_pixel_size(layout, &mut w, &mut h);
+            g_object_unref(layout as *mut _);
+        }
+        (w as f64, h as f64)
+    }
+
+    fn show(&self, layout: *mut PangoLayout, x: f64, y: f64, c: Rgba) -> f64 {
         let (mut w, mut h) = (0, 0);
         unsafe {
             pango_layout_get_pixel_size(layout, &mut w, &mut h);
@@ -186,10 +232,17 @@ impl Canvas {
             pango_cairo_show_layout(self.cr, layout);
             g_object_unref(layout as *mut _);
         }
+        let _ = w;
         h as f64
     }
 
-    fn layout_for(&self, text: &str, font: &Font, max_width: Option<f64>) -> *mut PangoLayout {
+    fn layout_for(
+        &self,
+        text: &str,
+        font: &Font,
+        max_width: Option<f64>,
+        flow: Flow,
+    ) -> *mut PangoLayout {
         unsafe {
             let layout = pango_cairo_create_layout(self.cr);
             let desc_str = CString::new(font.describe()).unwrap_or_default();
@@ -202,7 +255,16 @@ impl Canvas {
             pango_layout_set_text(layout, text.as_ptr() as *const _, text.len() as i32);
             if let Some(w) = max_width {
                 pango_layout_set_width(layout, (w * PANGO_SCALE as f64) as i32);
-                pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
+                match flow {
+                    Flow::OneLine => pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END),
+                    Flow::Wrap => {
+                        pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_NONE);
+                        pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+                        // Prose at 12pt is hard to read set solid. A quarter of
+                        // a line between them is the usual remedy.
+                        pango_layout_set_line_spacing(layout, 1.25);
+                    }
+                }
             }
             layout
         }
