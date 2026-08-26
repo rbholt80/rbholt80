@@ -93,6 +93,91 @@ got="$(summon)"
 check "a bare summon passes nothing and still runs" "$got" ""
 
 echo
+echo "stale builds"
+
+# The bug: build_binaries checked for ONE binary, so a target/release left over
+# from a previous version satisfied it, the build was skipped, and the install
+# then died partway through on a binary that had never been compiled -- leaving
+# the old binaries in place and the user believing they had upgraded.
+#
+# The real functions are pulled out of the installer, so this cannot drift from
+# what actually ships.
+build_harness() {
+  local root="$1" will_build="$2" commit="$3"
+  (
+    set -uo pipefail
+    BOLD=""; DIM=""; RESET=""; RED=""; YELLOW=""; GREEN=""
+    ROOT="$root"; WILL_BUILD="$will_build"; COMMIT="$commit"
+    BINARIES=(nousd nsh nousctl nous-shell)
+    say()  { printf '%s\n' "$*"; }
+    step() { printf '==> %s\n' "$*"; }
+    die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+    do_()  { if (( COMMIT )); then "$@"; else printf 'would run: %s\n' "$*"; fi; }
+    eval "$(sed -n '/^build_binaries() {/,/^}/p' "${HERE}/install.sh")"
+    build_binaries
+  ) 2>&1
+}
+
+STALE="$(mktemp -d)"
+mkdir -p "${STALE}/target/release"
+for b in nousd nsh nousctl; do
+  printf '#!/bin/sh\n' > "${STALE}/target/release/${b}"
+  chmod +x "${STALE}/target/release/${b}"
+done
+
+# No cargo, committing, nous-shell never built: it must refuse by name and not
+# let the install proceed to copy a half-set of binaries.
+out="$(build_harness "$STALE" 0 1)"; rc=$?
+if (( rc != 0 )) && [[ "$out" == *"nous-shell"* ]]; then
+  ok "a stale target/ is refused by name, not installed around"
+else
+  bad "a stale target/ is refused by name, not installed around" "rc=${rc}: ${out}"
+fi
+
+# With cargo present the build must ALWAYS run. Skipping it on the strength of
+# an old binary is the defect itself.
+out="$(build_harness "$STALE" 1 0)"
+if [[ "$out" == *"cargo build --release"* ]]; then
+  ok "a stale target/ does not skip the build"
+else
+  bad "a stale target/ does not skip the build" "no build was attempted: ${out}"
+fi
+
+# A complete tree installs without complaint.
+printf '#!/bin/sh\n' > "${STALE}/target/release/nous-shell"
+chmod +x "${STALE}/target/release/nous-shell"
+out="$(build_harness "$STALE" 0 1)"; rc=$?
+if (( rc == 0 )); then
+  ok "a complete prebuilt tree is accepted"
+else
+  bad "a complete prebuilt tree is accepted" "rc=${rc}: ${out}"
+fi
+rm -rf "$STALE"
+
+# build and install must read the SAME list, or a new binary gets compiled and
+# never installed.
+if grep -q 'for binary in "${BINARIES\[@\]}"' "${HERE}/install.sh"; then
+  ok "install_binaries uses the shared binary list"
+else
+  bad "install_binaries uses the shared binary list" "it has its own copy, which will drift"
+fi
+
+echo
+echo "build dependencies"
+
+# The panel links against X11, Cairo and Pango. A desktop ships libX11.so.6 but
+# not the libX11.so symlink the linker resolves -l against, so without the -dev
+# packages the build stops at "cannot find -lX11" -- which says nothing about
+# what to install.
+for pkg in pkg-config libx11-dev libcairo2-dev libpango1.0-dev libglib2.0-dev; do
+  if grep -q -- "$pkg" "${HERE}/install.sh"; then
+    ok "installer pulls in ${pkg}"
+  else
+    bad "installer pulls in ${pkg}" "the build will fail with 'cannot find -l...'"
+  fi
+done
+
+echo
 echo "launching"
 
 # The panel is a native window now. A browser on this path would mean the thing

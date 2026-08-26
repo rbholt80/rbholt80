@@ -379,15 +379,18 @@ fn spawn_worker() -> (Sender<Job>, Receiver<Reply>) {
         let mut client = match Client::connect() {
             Ok(c) => c,
             Err(e) => {
-                // Drain jobs and answer each with the same explanation, rather
-                // than leaving the panel spinning forever.
+                // The panel is read at a glance by someone who wants to get on
+                // with something. A socket path, an errno and a suggestion to
+                // run a second diagnostic command are not what they need: the
+                // one useful sentence is the command that fixes it. The detail
+                // still goes to stderr for anyone who ran this from a terminal.
+                eprintln!("nous-shell: {e}");
                 while job_rx.recv().is_ok() {
                     let sent = reply_tx.send(Reply {
                         body: Body::Error {
-                            message: format!(
-                                "nousd is not running ({e}).\n\
-                                 start it with: systemctl --user start nousd"
-                            ),
+                            message: "NOUS is not running.\n\
+                                      Start it with:  systemctl --user start nousd"
+                                .to_string(),
                         },
                         pending: None,
                     });

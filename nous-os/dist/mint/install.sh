@@ -88,6 +88,15 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 
+# Every binary the workspace produces. Named once, because build and install
+# consulting different lists is exactly how a new binary gets compiled but never
+# installed -- or checked for but never built.
+BINARIES=(nousd nsh nousctl nous-shell)
+
+# Whether this run will compile. Decided in preflight, because the dependency
+# step needs to know whether to pull in the toolchain packages.
+WILL_BUILD=0
+
 # ------------------------------------------------------------------- checks
 
 preflight() {
@@ -114,6 +123,13 @@ preflight() {
   fi
   say "   memory        $(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 )) MB"
 
+  if command -v cargo >/dev/null 2>&1; then
+    WILL_BUILD=1
+    say "   build         ${DIM}from source with cargo${RESET}"
+  else
+    say "   build         ${DIM}no cargo — using whatever is in target/release${RESET}"
+  fi
+
   if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
     warn "on Wayland, window listing and focus are limited; the rest works normally"
   fi
@@ -134,6 +150,16 @@ install_dependencies() {
   local packages=(wmctrl xdotool xclip libnotify-bin xdg-utils curl)
   if (( WITH_MEDIA )); then packages+=(mpv ffmpeg); fi
 
+  # Compiling the panel needs the development packages for the libraries it
+  # draws with. A desktop ships libX11.so.6 but not the libX11.so symlink the
+  # linker resolves -l against, so without these the build stops at
+  #     /usr/bin/ld: cannot find -lX11
+  # which says nothing whatsoever about what to install. Only pulled in when
+  # this run is actually going to compile.
+  if (( WILL_BUILD )); then
+    packages+=(build-essential pkg-config libx11-dev libcairo2-dev libpango1.0-dev libglib2.0-dev)
+  fi
+
   local missing=()
   for p in "${packages[@]}"; do
     dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
@@ -149,18 +175,42 @@ install_dependencies() {
 }
 
 build_binaries() {
-  if [[ -x "${ROOT}/target/release/nousd" ]]; then
-    say "   ${DIM}using the binaries already built${RESET}"
+  if (( WILL_BUILD )); then
+    # Always build. Cargo already knows what is up to date, and second-guessing
+    # it here got it wrong: a target/release left over from an earlier version
+    # satisfied a check for one binary, the build was skipped, and the install
+    # then failed partway through on a binary that had never been compiled --
+    # leaving the previous version's binaries in place and this one believing it
+    # had been upgraded.
+    step "Building NOUS"
+    say "   ${DIM}a minute or so the first time; seconds after that${RESET}"
+    do_ env -C "$ROOT" cargo build --release
+  else
+    step "Using the prebuilt binaries in target/release"
+  fi
+
+  # However we got here, everything the install is about to copy must exist now.
+  local absent=()
+  for b in "${BINARIES[@]}"; do
+    [[ -x "${ROOT}/target/release/${b}" ]] || absent+=("$b")
+  done
+  if (( ${#absent[@]} == 0 )); then return; fi
+
+  # In preview mode nothing was compiled, so on a clean tree this is expected.
+  if (( ! COMMIT )); then
+    say "   ${DIM}not built yet: ${absent[*]}${RESET}"
     return
   fi
-  step "Building NOUS"
-  command -v cargo >/dev/null 2>&1 || die "cargo is not installed. Install Rust from https://rustup.rs, or use a prebuilt release."
-  do_ env -C "$ROOT" cargo build --release
+  if (( WILL_BUILD )); then
+    die "the build did not produce: ${absent[*]}"
+  fi
+  die "cargo is not installed and these are not prebuilt: ${absent[*]}
+       Install Rust from https://rustup.rs and run this again."
 }
 
 install_binaries() {
   step "Installing to ${PREFIX}/bin"
-  for binary in nousd nsh nousctl nous-shell; do
+  for binary in "${BINARIES[@]}"; do
     prefix_ install -Dm755 "${ROOT}/target/release/${binary}" "${PREFIX}/bin/${binary}"
   done
   prefix_ install -Dm755 "${HERE}/nous-ask" "${PREFIX}/bin/nous-ask"
@@ -305,15 +355,28 @@ finish() {
     say "   ${YELLOW}That was a preview. Re-run with --commit to install.${RESET}"
     return
   fi
-  say "   Press ${BOLD}${HOTKEY//[<>]/ }${RESET} anywhere and say what you want."
+
+  local keys="${HOTKEY//[<>]/ }"
+
+  # Spelled out at this length because the short version was misread once: the
+  # closing message suggested trying "tidy my downloads", it was typed at a bash
+  # prompt, and bash answered command-not-found. Saying which window the words
+  # go into costs three lines and removes the whole failure.
+  say "   ${BOLD}To use it:${RESET}"
+  say "     1. Press ${BOLD}${keys}${RESET} — a panel appears in the middle of the screen."
+  say "     2. Type into ${BOLD}that panel${RESET}, not into this terminal."
+  say "     3. Try: ${BOLD}tidy my downloads${RESET} — then press Enter."
   say ""
-  say "   ${DIM}nous-ask${RESET}           the panel, also on your hotkey"
-  say "   ${DIM}nsh${RESET}                a shell where language and commands share a prompt"
-  say "   ${DIM}nousctl status${RESET}     check on it"
-  say "   ${DIM}nousctl key set anthropic${RESET}   add a model, if you want one"
+  say "   It shows you what it intends to do and waits. Nothing moves until you"
+  say "   press Enter again to approve it. Escape throws the plan away."
   say ""
-  say "   It works with no model at all. Open a terminal and run ${BOLD}nsh${RESET}, or press"
-  say "   ${BOLD}${HOTKEY//[<>]/ }${RESET} for the popup bar, then try: ${BOLD}tidy my downloads${RESET}"
+  say "   ${BOLD}Terminal commands${RESET}, if you want them:"
+  say "     ${DIM}nsh${RESET}                         the same thing, as a terminal shell"
+  say "     ${DIM}nousctl status${RESET}              check that it is running"
+  say "     ${DIM}nousctl key set anthropic${RESET}   connect your own AI, if you want one"
+  say "     ${DIM}nous-uninstall${RESET}              remove all of this again"
+  say ""
+  say "   ${DIM}It works with no AI model at all — it resolves what it can on its own.${RESET}"
 }
 
 # ---------------------------------------------------------------------- main
