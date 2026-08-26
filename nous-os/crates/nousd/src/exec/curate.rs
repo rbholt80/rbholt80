@@ -15,7 +15,7 @@ use nous_core::cap::Capability;
 use nous_core::journal::now_secs;
 use nous_core::json::{json_obj, Json};
 use nous_core::Step;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 pub fn execute(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
@@ -97,6 +97,8 @@ pub fn analyse(roots: &[PathBuf], exclude: &[String], now: u64) -> Vec<Finding> 
     findings.extend(find_screenshot_clutter(roots));
     findings.extend(find_large_files(&files));
     findings.extend(find_misfiled_media(roots));
+    findings.extend(find_arrived_together(roots));
+    findings.extend(find_loose_by_kind(roots));
     findings.extend(find_empty_dirs(roots));
 
     // Most consequential first: the user should see the 40 GB of duplicates
@@ -357,6 +359,204 @@ fn find_misfiled_media(roots: &[PathBuf]) -> Vec<Finding> {
     }])
 }
 
+/// Folders worth sorting. Only the two the user actually tips things into --
+/// reorganising a home directory nobody asked about would be presumptuous, and
+/// a project folder's "mess" is usually its structure.
+fn sortable_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter(|r| r.ends_with("Downloads") || r.ends_with("Documents"))
+        .cloned()
+        .collect()
+}
+
+/// The loose files sitting directly in `dir`, with their kind, size and age.
+/// Not recursive: a file already inside a subfolder has been filed.
+fn loose_files(dir: &Path) -> Vec<(PathBuf, &'static str, u64, u64)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let Ok(meta) = e.metadata() else { continue };
+        if meta.is_dir() {
+            continue;
+        }
+        // A dotfile in Downloads is a browser's business, not the user's.
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'))
+        {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        out.push((
+            p.clone(),
+            super::fsops::classify(&p, false),
+            meta.len(),
+            mtime,
+        ));
+    }
+    out.sort();
+    out
+}
+
+/// The folder a kind of file belongs in, in words a person would use. `None`
+/// for kinds not worth gathering: one stray `.conf` is not a category.
+fn kind_folder(kind: &str) -> Option<&'static str> {
+    match kind {
+        "image" => Some("Images"),
+        "document" => Some("Documents"),
+        "sheet" => Some("Spreadsheets"),
+        "slides" => Some("Presentations"),
+        "archive" => Some("Archives"),
+        "package" => Some("Installers"),
+        "text" => Some("Notes"),
+        "code" => Some("Code"),
+        "image-disk" => Some("Disk Images"),
+        _ => None,
+    }
+}
+
+/// How many loose files of one kind make a folder worth creating. Below this a
+/// subfolder is more clutter than the files were.
+const GATHER_THRESHOLD: usize = 4;
+
+/// Loose files of the same kind piling up in Downloads or Documents.
+///
+/// The plainest kind of tidying and the one most people do by hand: everything
+/// of a type into a folder named for that type.
+fn find_loose_by_kind(roots: &[PathBuf]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for dir in sortable_roots(roots) {
+        let mut by_kind: BTreeMap<&'static str, (Vec<PathBuf>, u64)> = BTreeMap::new();
+        for (path, kind, size, _) in loose_files(&dir) {
+            if kind_folder(kind).is_none() {
+                continue;
+            }
+            let slot = by_kind.entry(kind).or_default();
+            slot.0.push(path);
+            slot.1 += size;
+        }
+        for (kind, (paths, bytes)) in by_kind {
+            if paths.len() < GATHER_THRESHOLD {
+                continue;
+            }
+            let folder = kind_folder(kind).unwrap_or("Sorted");
+            findings.push(Finding {
+                kind: "loose_by_kind",
+                severity: 3,
+                title: format!(
+                    "{} loose {} files in {}",
+                    paths.len(),
+                    kind,
+                    dir.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("that folder")
+                ),
+                detail: format!("{} that could go into {}", human_bytes(bytes), folder),
+                paths,
+                bytes,
+            });
+        }
+    }
+    findings
+}
+
+/// The stem a file shares with its siblings: its name with any trailing part
+/// number stripped, so `invoice-part1` and `invoice-part2` agree on `invoice`.
+///
+/// Deliberately conservative. Only a trailing run of digits, optionally behind
+/// a `part`/`disc`/`cd`/`vol` word and a separator, is removed -- `report_data`
+/// keeps its whole name, because `data` is a word, not an index.
+fn shared_stem(name: &str) -> String {
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    let mut s = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+    if s.len() == stem.len() {
+        return stem.to_string();
+    }
+    s = s.trim_end_matches([' ', '-', '_', '.']);
+    // Strip a marker word sitting in front of the index -- "manual-part1"
+    // means "manual". Only when something is left afterwards: for
+    // "chapter_03" the word *is* the whole name, and removing it would leave
+    // nothing to group on.
+    for word in ["part", "disc", "cd", "vol", "page", "chapter"] {
+        if s.len() > word.len() && s[s.len() - word.len()..].eq_ignore_ascii_case(word) {
+            let rest = s[..s.len() - word.len()].trim_end_matches([' ', '-', '_', '.']);
+            if !rest.is_empty() {
+                s = &s[..s.len() - word.len()];
+                break;
+            }
+        }
+    }
+    s.trim_end_matches([' ', '-', '_', '.']).to_string()
+}
+
+/// How close together files must have arrived to count as one delivery.
+const TOGETHER_WINDOW: u64 = 300;
+/// How many of them it takes. Two files with a shared stem is a coincidence.
+const TOGETHER_THRESHOLD: usize = 3;
+
+/// Files that arrived as one thing and were scattered across the folder.
+///
+/// Two independent signals have to agree before anything is proposed: the names
+/// share a stem, *and* they were written within a few minutes of each other. A
+/// single signal is not enough -- `report.pdf` and `report.pdf` downloaded a
+/// year apart are not a set, and forty unrelated files from one busy afternoon
+/// are not either. Grouping the wrong things is worse than grouping nothing.
+fn find_arrived_together(roots: &[PathBuf]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for dir in sortable_roots(roots) {
+        let mut by_stem: BTreeMap<String, Vec<(PathBuf, u64, u64)>> = BTreeMap::new();
+        for (path, _, size, mtime) in loose_files(&dir) {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let stem = shared_stem(name);
+            // A one- or two-character stem says nothing about relatedness.
+            if stem.len() < 3 {
+                continue;
+            }
+            by_stem.entry(stem).or_default().push((path, size, mtime));
+        }
+
+        for (stem, group) in by_stem {
+            if group.len() < TOGETHER_THRESHOLD {
+                continue;
+            }
+            let times: Vec<u64> = group.iter().map(|(_, _, t)| *t).collect();
+            let (lo, hi) = (
+                times.iter().copied().min().unwrap_or(0),
+                times.iter().copied().max().unwrap_or(0),
+            );
+            // Unknown timestamps read as 0 and would make any group look
+            // simultaneous. A group is only "together" if it really is dated.
+            if lo == 0 || hi.saturating_sub(lo) > TOGETHER_WINDOW {
+                continue;
+            }
+            let bytes: u64 = group.iter().map(|(_, s, _)| *s).sum();
+            findings.push(Finding {
+                kind: "arrived_together",
+                severity: 4,
+                title: format!("{} files that arrived together as \"{stem}\"", group.len()),
+                detail: format!(
+                    "{} downloaded within a few minutes of each other",
+                    human_bytes(bytes)
+                ),
+                paths: group.into_iter().map(|(p, _, _)| p).collect(),
+                bytes,
+            });
+        }
+    }
+    findings
+}
+
 fn find_empty_dirs(roots: &[PathBuf]) -> Vec<Finding> {
     let mut empties = Vec::new();
     for root in roots {
@@ -457,7 +657,12 @@ fn kind_priority(kind: &str) -> u8 {
         "duplicate" => 0,
         "misfiled_media" => 1,
         "screenshots" => 2,
-        "stale_downloads" => 3,
+        // A delivery is planned before the plain by-type sweep so that its
+        // files claim their destination first -- that destination is *inside*
+        // the type folder, so type still organises the result.
+        "arrived_together" => 3,
+        "stale_downloads" => 4,
+        "loose_by_kind" => 5,
         _ => 9,
     }
 }
@@ -518,6 +723,51 @@ pub fn plan_steps(findings: &[Finding], home: &Path, kinds: &[String]) -> Vec<St
                         home.join("Videos")
                     };
                     (p.clone(), dest.join(unique_name(p)))
+                })
+                .collect(),
+            // Into a folder named for the delivery, beside the files it came
+            // from -- not off in Tidy/, because these are wanted.
+            "arrived_together" => {
+                let stem = f
+                    .title
+                    .rsplit_once('"')
+                    .and_then(|(head, _)| head.rsplit_once('"').map(|(_, s)| s.to_string()))
+                    .unwrap_or_else(|| "Group".to_string());
+                // Every file of one type, or a mixture?
+                let kinds: Vec<&str> = f
+                    .paths
+                    .iter()
+                    .map(|p| super::fsops::classify(p, false))
+                    .collect();
+                let shared: Option<&'static str> = match kinds.first() {
+                    Some(first) if kinds.iter().all(|k| k == first) => kind_folder(first),
+                    _ => None,
+                };
+                f.paths
+                    .iter()
+                    .map(|p| {
+                        let parent = p
+                            .parent()
+                            .map_or_else(|| home.to_path_buf(), Path::to_path_buf);
+                        let dest = match shared {
+                            Some(folder) => parent.join(folder).join(&stem),
+                            None => parent.join(&stem),
+                        };
+                        (p.clone(), dest.join(unique_name(p)))
+                    })
+                    .collect()
+            }
+            // Into a folder named for the type, inside the folder they are
+            // already in. Downloads/Images, Documents/Spreadsheets.
+            "loose_by_kind" => f
+                .paths
+                .iter()
+                .map(|p| {
+                    let parent = p
+                        .parent()
+                        .map_or_else(|| home.to_path_buf(), Path::to_path_buf);
+                    let folder = kind_folder(super::fsops::classify(p, false)).unwrap_or("Sorted");
+                    (p.clone(), parent.join(folder).join(unique_name(p)))
                 })
                 .collect(),
             // Large files and empty folders are reported, never acted on:
@@ -802,6 +1052,214 @@ mod tests {
         assert_ne!(dests[0], dests[1], "two files cannot land on the same path");
         assert!(dests[1].contains("shot (2).png"), "{}", dests[1]);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Write a file with a chosen modification time, so "arrived together"
+    /// can be tested without waiting.
+    fn touch_at(dir: &Path, name: &str, bytes: usize, mtime: u64) {
+        let p = dir.join(name);
+        std::fs::write(&p, vec![b'x'; bytes]).unwrap();
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn a_stem_loses_only_a_trailing_index_never_a_word() {
+        assert_eq!(shared_stem("invoice-part1.pdf"), "invoice");
+        assert_eq!(shared_stem("invoice-2024-part2.pdf"), "invoice-2024");
+        assert_eq!(shared_stem("holiday-1.jpg"), "holiday");
+        // The marker word is only stripped when something is left behind it.
+        assert_eq!(shared_stem("disc 2.flac"), "disc");
+        assert_eq!(shared_stem("chapter_03.txt"), "chapter");
+        // A word is not an index: these keep their whole name and so will not
+        // be grouped with each other.
+        assert_eq!(shared_stem("report_data.csv"), "report_data");
+        assert_eq!(shared_stem("summary.pdf"), "summary");
+        assert_eq!(shared_stem("notes.txt"), "notes");
+        // A name that is nothing but digits leaves nothing to match on.
+        assert_eq!(shared_stem("12345.jpg"), "");
+    }
+
+    #[test]
+    fn files_that_arrived_together_are_grouped_beside_themselves() {
+        let root = scratch("together");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        // One delivery: shared stem, seconds apart.
+        touch_at(&dl, "manual-part1.pdf", 100, 1_700_000_000);
+        touch_at(&dl, "manual-part2.pdf", 100, 1_700_000_030);
+        touch_at(&dl, "manual-part3.pdf", 100, 1_700_000_060);
+
+        let found = find_arrived_together(std::slice::from_ref(&dl));
+        assert_eq!(found.len(), 1, "expected one group, got {found:?}");
+        assert_eq!(found[0].paths.len(), 3);
+        assert!(found[0].title.contains("manual"), "{}", found[0].title);
+
+        let steps = plan_steps(&found, &root, &[]);
+        assert_eq!(steps.len(), 3);
+        for st in &steps {
+            let to = st.args.str_or("to", "");
+            // All PDFs, so the set nests inside the type folder.
+            assert!(
+                to.contains("/Downloads/Documents/manual/"),
+                "grouped somewhere unexpected: {to}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_name_alone_is_not_a_delivery() {
+        // The same stem, but a year apart. Two files called report-1 and
+        // report-2 downloaded in different years are not a set, and moving
+        // them into a folder together would be wrong.
+        let root = scratch("apart");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        touch_at(&dl, "report-1.pdf", 10, 1_600_000_000);
+        touch_at(&dl, "report-2.pdf", 10, 1_650_000_000);
+        touch_at(&dl, "report-3.pdf", 10, 1_700_000_000);
+        assert!(find_arrived_together(&[dl]).is_empty());
+    }
+
+    #[test]
+    fn arriving_at_the_same_moment_is_not_a_delivery_either() {
+        // Forty unrelated files from one busy afternoon share a timestamp but
+        // nothing else. Both signals have to agree.
+        let root = scratch("busy");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        for (i, name) in ["taxes.pdf", "kitten.jpg", "resume.docx", "budget.csv"]
+            .iter()
+            .enumerate()
+        {
+            touch_at(&dl, name, 10, 1_700_000_000 + i as u64);
+        }
+        assert!(find_arrived_together(&[dl]).is_empty());
+    }
+
+    #[test]
+    fn two_files_are_a_coincidence_not_a_set() {
+        let root = scratch("pair");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        touch_at(&dl, "scan-1.jpg", 10, 1_700_000_000);
+        touch_at(&dl, "scan-2.jpg", 10, 1_700_000_010);
+        assert!(find_arrived_together(&[dl]).is_empty());
+    }
+
+    #[test]
+    fn loose_files_of_one_kind_are_gathered_into_a_folder_named_for_it() {
+        let root = scratch("bykind");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        for i in 0..5 {
+            // Distinct stems and spread-out times, so this is a by-kind case
+            // and not a delivery.
+            touch_at(
+                &dl,
+                &format!("photo{i}.jpg"),
+                10,
+                1_700_000_000 + i * 100_000,
+            );
+        }
+        let found = find_loose_by_kind(std::slice::from_ref(&dl));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, "loose_by_kind");
+
+        let steps = plan_steps(&found, &root, &[]);
+        assert_eq!(steps.len(), 5);
+        for st in &steps {
+            let to = st.args.str_or("to", "");
+            assert!(to.contains("/Downloads/Images/"), "went to {to}");
+        }
+    }
+
+    #[test]
+    fn a_few_loose_files_are_left_alone() {
+        // Three photos do not need a folder; making one is not tidying.
+        let root = scratch("fewkind");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        for i in 0..3 {
+            touch_at(
+                &dl,
+                &format!("photo{i}.jpg"),
+                10,
+                1_700_000_000 + i * 100_000,
+            );
+        }
+        assert!(find_loose_by_kind(&[dl]).is_empty());
+    }
+
+    #[test]
+    fn only_downloads_and_documents_get_reorganised() {
+        // Somebody's project folder is not clutter; its layout is the point.
+        let root = scratch("scope");
+        let proj = root.join("Projects");
+        std::fs::create_dir_all(&proj).unwrap();
+        for i in 0..6 {
+            touch_at(
+                &proj,
+                &format!("asset{i}.png"),
+                10,
+                1_700_000_000 + i * 100_000,
+            );
+        }
+        assert!(find_loose_by_kind(std::slice::from_ref(&proj)).is_empty());
+        assert!(find_arrived_together(&[proj]).is_empty());
+    }
+
+    #[test]
+    fn a_set_stays_together_inside_its_type_folder() {
+        // Type organises the result; a delivery keeps its files together
+        // within that. Both rules match here and the outcome honours both.
+        let root = scratch("beats");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        for i in 1..=5 {
+            touch_at(&dl, &format!("wedding-{i}.jpg"), 10, 1_700_000_000 + i);
+        }
+        let mut findings = find_arrived_together(std::slice::from_ref(&dl));
+        findings.extend(find_loose_by_kind(std::slice::from_ref(&dl)));
+        assert_eq!(findings.len(), 2, "both rules should match here");
+
+        let steps = plan_steps(&findings, &root, &[]);
+        assert_eq!(steps.len(), 5, "each file moved exactly once");
+        for st in &steps {
+            let to = st.args.str_or("to", "");
+            assert!(
+                to.contains("/Downloads/Images/wedding/"),
+                "the set should nest inside its type folder: {to}"
+            );
+        }
+    }
+
+    #[test]
+    fn already_filed_things_are_left_where_they_are() {
+        // Files inside a subfolder have been filed already, and a dotfile is
+        // the browser's business.
+        let root = scratch("filed");
+        let dl = root.join("Downloads");
+        let sub = dl.join("Images");
+        std::fs::create_dir_all(&sub).unwrap();
+        for i in 0..6 {
+            touch_at(
+                &sub,
+                &format!("photo{i}.jpg"),
+                10,
+                1_700_000_000 + i * 100_000,
+            );
+        }
+        for i in 0..6 {
+            touch_at(
+                &dl,
+                &format!(".partial{i}.jpg"),
+                10,
+                1_700_000_000 + i * 100_000,
+            );
+        }
+        assert!(find_loose_by_kind(&[dl]).is_empty());
     }
 
     #[test]

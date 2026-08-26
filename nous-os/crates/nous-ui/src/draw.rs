@@ -157,6 +157,38 @@ impl Canvas {
         }
     }
 
+    /// Draw `pic` into `at`, stretched to exactly that rectangle. Use
+    /// [`Picture::cover`] or [`Picture::contain`] to work out what `at` should
+    /// be; this does no aspect correction of its own.
+    pub fn picture(&self, pic: &Picture, at: Rect) {
+        if at.w <= 0.0 || at.h <= 0.0 {
+            return;
+        }
+        unsafe {
+            cairo_save(self.cr);
+            cairo_translate(self.cr, at.x, at.y);
+            cairo_scale(self.cr, at.w / pic.width, at.h / pic.height);
+            cairo_set_source_surface(self.cr, pic.surface, 0.0, 0.0);
+            // The default filter is slower and buys nothing at these sizes.
+            cairo_pattern_set_filter(cairo_get_source(self.cr), CAIRO_FILTER_BILINEAR);
+            cairo_paint(self.cr);
+            cairo_restore(self.cr);
+        }
+    }
+
+    /// Draw `pic` into `at`, cropped to a rounded rectangle. Tiles in a grid
+    /// share the panel's corner radius, so a photograph cannot be the one
+    /// square-cornered thing on screen.
+    pub fn picture_rounded(&self, pic: &Picture, into: Rect, radius: f64) {
+        unsafe {
+            cairo_save(self.cr);
+            self.rounded_path(into, radius);
+            cairo_clip(self.cr);
+            self.picture(pic, pic.cover(into));
+            cairo_restore(self.cr);
+        }
+    }
+
     pub fn clip_rect(&self, r: Rect) {
         unsafe {
             cairo_save(self.cr);
@@ -274,6 +306,80 @@ impl Canvas {
             }
             layout
         }
+    }
+}
+
+/// A loaded picture.
+///
+/// Only PNG is decoded, deliberately. The daemon caches a PNG thumbnail for
+/// everything it indexes -- ffmpeg converts whatever the file actually is on
+/// the way in -- so this layer never needs a second decoder, and a corrupt or
+/// exotic image can never crash the interface: it fails to load and the tile
+/// draws a placeholder.
+pub struct Picture {
+    surface: *mut cairo_surface_t,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Picture {
+    pub fn load(path: &str) -> Result<Picture, String> {
+        let c = CString::new(path).map_err(|_| "path contains a NUL".to_string())?;
+        unsafe {
+            let surface = cairo_image_surface_create_from_png(c.as_ptr());
+            if surface.is_null() || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS {
+                if !surface.is_null() {
+                    cairo_surface_destroy(surface);
+                }
+                return Err(format!("not a readable PNG: {path}"));
+            }
+            let width = cairo_image_surface_get_width(surface) as f64;
+            let height = cairo_image_surface_get_height(surface) as f64;
+            if width <= 0.0 || height <= 0.0 {
+                cairo_surface_destroy(surface);
+                return Err(format!("empty image: {path}"));
+            }
+            Ok(Picture {
+                surface,
+                width,
+                height,
+            })
+        }
+    }
+
+    /// The rectangle this picture fills inside `into`, covering it entirely and
+    /// centred, with whatever overflows cropped. Photographs in a grid want to
+    /// fill their tile; letterboxing every one to its own aspect ratio makes a
+    /// folder look like a broken table.
+    pub fn cover(&self, into: Rect) -> Rect {
+        let scale = (into.w / self.width).max(into.h / self.height);
+        let (w, h) = (self.width * scale, self.height * scale);
+        Rect::new(
+            into.x + (into.w - w) / 2.0,
+            into.y + (into.h - h) / 2.0,
+            w,
+            h,
+        )
+    }
+
+    /// The rectangle this picture fits inside `into`, whole and centred. What a
+    /// single image on its own deserves -- cropping the one thing being looked
+    /// at is not a trade worth making.
+    pub fn contain(&self, into: Rect) -> Rect {
+        let scale = (into.w / self.width).min(into.h / self.height);
+        let (w, h) = (self.width * scale, self.height * scale);
+        Rect::new(
+            into.x + (into.w - w) / 2.0,
+            into.y + (into.h - h) / 2.0,
+            w,
+            h,
+        )
+    }
+}
+
+impl Drop for Picture {
+    fn drop(&mut self) {
+        unsafe { cairo_surface_destroy(self.surface) }
     }
 }
 
@@ -527,6 +633,114 @@ mod tests {
 
     // The tests below render for real and read the pixels back. They need no
     // display, so they run everywhere the crate builds.
+
+    #[test]
+    fn a_picture_loads_and_draws_where_it_is_put() {
+        // Make a real PNG, then load it back through the same path the file
+        // grid will use. A green square on a transparent ground, so both the
+        // colour and the placement can be checked.
+        let src = Image::new(40, 20).expect("source surface");
+        src.canvas()
+            .fill_rect(Rect::new(0.0, 0.0, 40.0, 20.0), Rgba::rgb(0, 200, 0));
+        let path = format!(
+            "{}/nous-picture-test.png",
+            std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
+        );
+        src.write_png(&path).expect("wrote png");
+
+        let pic = Picture::load(&path).expect("loaded png");
+        assert_eq!(pic.width, 40.0);
+        assert_eq!(pic.height, 20.0);
+
+        let dst = Image::new(100, 100).expect("dest surface");
+        dst.canvas()
+            .picture(&pic, Rect::new(10.0, 10.0, 40.0, 20.0));
+        assert_eq!(dst.pixel(20, 15), (0, 200, 0, 255), "inside the picture");
+        assert_eq!(dst.pixel(5, 15).3, 0, "left of it is untouched");
+        assert_eq!(dst.pixel(60, 15).3, 0, "right of it is untouched");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_png_fails_instead_of_crashing() {
+        // A tile whose thumbnail is missing or corrupt must draw a placeholder,
+        // not take the whole interface down.
+        assert!(Picture::load("/definitely/not/here.png").is_err());
+        let junk = format!(
+            "{}/nous-not-a-png.png",
+            std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
+        );
+        std::fs::write(&junk, b"this is not a png").unwrap();
+        assert!(Picture::load(&junk).is_err());
+        let _ = std::fs::remove_file(&junk);
+    }
+
+    #[test]
+    fn cover_fills_the_tile_and_contain_fits_inside_it() {
+        let src = Image::new(40, 20).expect("surface");
+        src.canvas()
+            .fill_rect(Rect::new(0.0, 0.0, 40.0, 20.0), Rgba::rgb(0, 0, 200));
+        let path = format!(
+            "{}/nous-fit-test.png",
+            std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
+        );
+        src.write_png(&path).unwrap();
+        let pic = Picture::load(&path).unwrap();
+
+        // A 2:1 picture in a square tile.
+        let tile = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+        let cover = pic.cover(tile);
+        assert!(
+            cover.w >= tile.w - 0.001 && cover.h >= tile.h - 0.001,
+            "cover leaves a gap: {cover:?}"
+        );
+        assert!(
+            (cover.x + cover.w / 2.0 - 50.0).abs() < 0.001,
+            "not centred"
+        );
+        assert!(
+            (cover.y + cover.h / 2.0 - 50.0).abs() < 0.001,
+            "not centred"
+        );
+
+        let contain = pic.contain(tile);
+        assert!(
+            contain.w <= tile.w + 0.001 && contain.h <= tile.h + 0.001,
+            "contain overflows"
+        );
+        assert!(
+            (contain.w - 100.0).abs() < 0.001,
+            "should touch the wide edge"
+        );
+        assert!((contain.h - 50.0).abs() < 0.001, "and be half as tall");
+
+        // Aspect ratio is preserved by both.
+        assert!((cover.w / cover.h - 2.0).abs() < 0.001);
+        assert!((contain.w / contain.h - 2.0).abs() < 0.001);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_rounded_picture_is_cropped_at_its_corners() {
+        let src = Image::new(50, 50).expect("surface");
+        src.canvas()
+            .fill_rect(Rect::new(0.0, 0.0, 50.0, 50.0), Rgba::rgb(200, 0, 0));
+        let path = format!(
+            "{}/nous-round-test.png",
+            std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
+        );
+        src.write_png(&path).unwrap();
+        let pic = Picture::load(&path).unwrap();
+
+        let dst = Image::new(60, 60).expect("surface");
+        dst.canvas()
+            .picture_rounded(&pic, Rect::new(0.0, 0.0, 60.0, 60.0), 16.0);
+        assert_eq!(dst.pixel(30, 30), (200, 0, 0, 255), "the middle is drawn");
+        assert_eq!(dst.pixel(0, 0).3, 0, "the corner is cut away");
+        assert_eq!(dst.pixel(59, 59).3, 0);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn a_filled_rect_lands_exactly_where_it_was_asked_to() {

@@ -423,7 +423,25 @@ extern "C" {
     pub fn cairo_image_surface_get_height(s: *mut cairo_surface_t) -> c_int;
     pub fn cairo_surface_write_to_png(s: *mut cairo_surface_t, filename: *const c_char) -> c_int;
     pub fn cairo_surface_status(s: *mut cairo_surface_t) -> c_int;
+
+    // Loading pictures. Cairo reads PNG and nothing else, which is why every
+    // thumbnail the daemon caches is a PNG: ffmpeg converts whatever the file
+    // actually is on the way in, so this layer only ever decodes one format.
+    pub fn cairo_image_surface_create_from_png(filename: *const c_char) -> *mut cairo_surface_t;
+    pub fn cairo_set_source_surface(cr: *mut cairo_t, s: *mut cairo_surface_t, x: f64, y: f64);
+    pub fn cairo_scale(cr: *mut cairo_t, sx: f64, sy: f64);
+    pub fn cairo_get_source(cr: *mut cairo_t) -> *mut cairo_pattern_t;
+    pub fn cairo_pattern_set_filter(p: *mut cairo_pattern_t, filter: c_int);
+    pub fn cairo_paint_with_alpha(cr: *mut cairo_t, alpha: f64);
 }
+
+pub type cairo_pattern_t = c_void;
+
+/// Bilinear. The default is a slower filter that buys nothing at thumbnail
+/// sizes, and CAIRO_FILTER_NEAREST would alias badly when a 480px thumb is
+/// drawn into a 160px tile.
+pub const CAIRO_FILTER_GOOD: c_int = 1;
+pub const CAIRO_FILTER_BILINEAR: c_int = 4;
 
 pub const CAIRO_FORMAT_ARGB32: c_int = 0;
 pub const CAIRO_STATUS_SUCCESS: c_int = 0;
