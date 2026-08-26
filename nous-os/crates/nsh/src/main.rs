@@ -324,6 +324,7 @@ fn handle_intent(
         ]),
     )?;
 
+    let mut proposal: Option<Json> = None;
     for r in out.arr_or_empty("results") {
         let state = r.str_or("state", "");
         if state == "ok" {
@@ -337,11 +338,79 @@ fn handle_intent(
                 r.str_or("detail", "")
             );
         }
-        render_value(r.get("value").unwrap_or(&Json::Null));
+        let value = r.get("value").unwrap_or(&Json::Null);
+        render_value(value);
+        if is_proposal(value) {
+            proposal = Some(value.clone());
+        }
     }
     let message = out.str_or("message", "");
     if !message.is_empty() {
         println!("  {}{}{}", c(DIM), message, c(RESET));
+    }
+
+    // A curator proposal is read-only by itself; this is the step that closes
+    // the loop, because seeing a plan with no way to say "go ahead" is not
+    // actually useful. The graphical shell has an Apply button for the same
+    // reason -- this is that button, in the terminal.
+    if let Some(prop) = proposal {
+        apply_proposal(client, &prop, interactive)?;
+    }
+    Ok(())
+}
+
+/// Does this look like a curator proposal -- a list of concrete moves, not
+/// just the findings that led to them?
+fn is_proposal(v: &Json) -> bool {
+    let steps = v.get("steps").and_then(|s| s.as_arr());
+    matches!(steps, Some(s) if !s.is_empty())
+        && v.get("bytes").is_some()
+        && steps
+            .unwrap()
+            .iter()
+            .all(|s| s.get("capability").is_some() && s.get("summary").is_some())
+}
+
+fn apply_proposal(client: &mut Client, proposal: &Json, interactive: bool) -> Result<(), String> {
+    let steps = proposal.arr_or_empty("steps");
+    let n = steps.len();
+    let summary = proposal.str_or("summary", "");
+
+    if !interactive {
+        println!(
+            "  {}{} move(s) proposed ({}). Run nsh interactively, or `nousctl storage`,{}",
+            c(DIM),
+            n,
+            summary,
+            c(RESET)
+        );
+        println!(
+            "  {}to review and apply this from a terminal.{}",
+            c(DIM),
+            c(RESET)
+        );
+        return Ok(());
+    }
+
+    if !ask(&format!("  Apply {} move(s) ({})?", n, summary)) {
+        println!("  {}nothing was moved{}", c(DIM), c(RESET));
+        return Ok(());
+    }
+
+    let out = client.call(
+        "cap.invoke",
+        json_obj([
+            ("capability", "curate.apply".into()),
+            ("args", json_obj([("steps", Json::Arr(steps))])),
+            ("approved", true.into()),
+            ("why", "apply a tidy-up proposal".into()),
+        ]),
+    )?;
+    for r in out.arr_or_empty("results") {
+        let state = r.str_or("state", "");
+        let tint = if state == "ok" { c(GREEN) } else { c(RED) };
+        let mark = if state == "ok" { "✓" } else { "×" };
+        println!("  {}{}{} {}", tint, mark, c(RESET), r.str_or("detail", ""));
     }
     Ok(())
 }
@@ -385,6 +454,26 @@ fn render_value(v: &Json) {
                 } else {
                     human(e.get("size").and_then(|s| s.as_u64()).unwrap_or(0))
                 }
+            );
+        }
+        return;
+    }
+    if is_proposal(v) {
+        let steps = v.arr_or_empty("steps");
+        println!(
+            "      {} move(s) proposed ({})",
+            steps.len(),
+            v.str_or("summary", "")
+        );
+        for s in steps.iter().take(8) {
+            println!("        {} {}", c(DIM), s.str_or("summary", ""));
+        }
+        if steps.len() > 8 {
+            println!(
+                "        {}… and {} more{}",
+                c(DIM),
+                steps.len() - 8,
+                c(RESET)
             );
         }
         return;
@@ -450,6 +539,47 @@ fn ask(prompt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn move_step(summary: &str) -> Json {
+        json_obj([
+            ("capability", "fs.move:/x".into()),
+            ("summary", summary.into()),
+        ])
+    }
+
+    #[test]
+    fn recognises_a_real_curator_proposal() {
+        let v = json_obj([
+            (
+                "steps",
+                Json::Arr(vec![move_step("move a.txt"), move_step("move b.txt")]),
+            ),
+            ("bytes", 1024i64.into()),
+            ("summary", "1.0 KB".into()),
+            ("findings", Json::Arr(vec![])),
+        ]);
+        assert!(is_proposal(&v));
+    }
+
+    #[test]
+    fn does_not_mistake_other_shapes_for_a_proposal() {
+        // No steps at all.
+        assert!(!is_proposal(&json_obj([("findings", Json::Arr(vec![]))])));
+        // Steps present but not move-shaped (e.g. an echoed GLYPH plan).
+        let not_moves = json_obj([
+            ("steps", Json::Arr(vec![Json::obj()])),
+            ("bytes", 10i64.into()),
+        ]);
+        assert!(!is_proposal(&not_moves));
+        // Steps and the right shape, but no "bytes" -- not a curator proposal.
+        let no_bytes = json_obj([("steps", Json::Arr(vec![move_step("move a.txt")]))]);
+        assert!(!is_proposal(&no_bytes));
+        // An empty steps array is not a proposal worth acting on.
+        assert!(!is_proposal(&json_obj([
+            ("steps", Json::Arr(vec![])),
+            ("bytes", 0i64.into())
+        ])));
+    }
 
     #[test]
     fn formats_sizes_readably() {
