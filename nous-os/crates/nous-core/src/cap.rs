@@ -96,6 +96,9 @@ impl Capability {
             ("svc", "status") | ("net", "status") | ("pkg", "query") => Risk::Read,
             ("ctx", "read") | ("journal", "read") => Risk::Read,
             ("media", "probe") | ("media", "search") | ("media", "thumbnail") => Risk::Read,
+            // Asking what is playing changes nothing, and is asked often
+            // enough that anything dearer than free would be felt.
+            ("media", "state") => Risk::Read,
             // Looking at the desktop is free; touching it is not.
             ("desk", "apps") | ("desk", "windows") | ("desk", "session_info") => Risk::Read,
 
@@ -257,6 +260,7 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "media.thumbnail",
     "media.play",
     "media.control",
+    "media.state",
     "media.edit",
     "media.render",
     "media.index",

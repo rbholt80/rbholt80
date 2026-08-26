@@ -24,6 +24,7 @@ pub fn execute(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, S
         "thumbnail" => thumbnail(step, ctx),
         "play" => play(step, ctx),
         "control" => control(step, ctx),
+        "state" => state(step, ctx),
         "edit" => edit(step, ctx),
         "render" => render(step, ctx),
         other => Err(format!("media executor cannot '{}'", other)),
@@ -393,15 +394,57 @@ fn mpv_socket() -> PathBuf {
     nous_core::ipc::state_dir().join("media/mpv.sock")
 }
 
+/// How mpv should be started.
+///
+/// `into` is an X window id. Given one, mpv draws its video inside that window
+/// instead of opening one of its own — which is the difference between a media
+/// player and a media player plus a second window that appeared beside it. The
+/// interface owns the chrome; mpv owns the pixels of the picture and nothing
+/// else.
+pub fn mpv_args(sock: &Path, path: &Path, into: Option<u64>) -> Vec<String> {
+    let mut args = vec![
+        format!("--input-ipc-server={}", sock.display()),
+        // Stay alive when the file ends, so the queue survives its last track
+        // and the interface is not left controlling a process that has gone.
+        "--idle=yes".to_string(),
+        // The chrome is drawn by the interface. mpv's own would be a second
+        // set of controls for the same playback, disagreeing at the edges.
+        "--no-osc".to_string(),
+        "--no-input-default-bindings".to_string(),
+    ];
+    match into {
+        Some(id) => args.push(format!("--wid={}", id)),
+        // Only when there is nowhere to put it: without a window of its own and
+        // without one to borrow, audio would play with the picture nowhere.
+        None => args.push("--force-window=yes".to_string()),
+    }
+    args.push(path.to_string_lossy().to_string());
+    args
+}
+
+/// Whether a player is already up, judged by whether its socket answers.
+///
+/// A socket file left behind by a player that died is not a running player, so
+/// the file existing is not the question — whether it accepts a connection is.
+fn player_is_running(sock: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(sock).is_ok()
+}
+
 fn play(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let path = arg_path(step, "path")?;
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
+    // Adding to what is already playing, rather than interrupting it.
+    let queue = step.args.bool_or("queue", false);
     if ctx.dry_run {
         return Ok(Effect::read_only(
             json_obj([("path", path.to_string_lossy().to_string().into())]),
-            format!("would play {}", path.display()),
+            if queue {
+                format!("would add {} to the queue", path.display())
+            } else {
+                format!("would play {}", path.display())
+            },
         ));
     }
     if !have("mpv") {
@@ -411,12 +454,44 @@ fn play(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     if let Some(d) = sock.parent() {
         std::fs::create_dir_all(d).ok();
     }
+
+    // A second mpv on the same socket would leave two players fighting over
+    // one set of controls, and the interface talking to whichever won. So when
+    // one is already up, this goes through it.
+    if player_is_running(&sock) {
+        let how = if queue { "append-play" } else { "replace" };
+        mpv_command(Json::Arr(vec![
+            "loadfile".into(),
+            path.to_string_lossy().to_string().into(),
+            how.into(),
+        ]))?;
+        return Ok(Effect::with_undo(
+            json_obj([
+                ("path", path.to_string_lossy().to_string().into()),
+                ("queued", Json::Bool(queue)),
+            ]),
+            Undo::Manual {
+                note: "stop playback".to_string(),
+            },
+            if queue {
+                format!("added {} to the queue", path.display())
+            } else {
+                format!("playing {}", path.display())
+            },
+        ));
+    }
+
+    // A stale socket file stops mpv binding its own; nothing answered it above,
+    // so nothing is losing a connection here.
+    let _ = std::fs::remove_file(&sock);
+    let into = step
+        .args
+        .get("window")
+        .and_then(|v| v.as_f64())
+        .map(|n| n as u64);
     // Detach: playback outlives the request that started it.
     let child = std::process::Command::new("mpv")
-        .arg(format!("--input-ipc-server={}", sock.display()))
-        .arg("--force-window=yes")
-        .arg("--idle=yes")
-        .arg(path.as_os_str())
+        .args(mpv_args(&sock, &path, into))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -459,6 +534,35 @@ fn control(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             "volume".into(),
             Json::Num(step.args.f64_or("level", 70.0)),
         ],
+        // Faster or slower without changing pitch, which is mpv's default and
+        // the only setting under which a sped-up voice is still listenable.
+        "speed" => vec![
+            "set_property".into(),
+            "speed".into(),
+            Json::Num(step.args.f64_or("value", 1.0).clamp(0.25, 4.0)),
+        ],
+        // Subtitles and alternate audio, chosen by the track id `media.state`
+        // reports. `no` turns them off — mpv's own word for it, and the reason
+        // this takes a string rather than a number.
+        "subtitles" | "audio_track" => {
+            let prop = if action == "subtitles" { "sid" } else { "aid" };
+            let id = step.args.str_or("track", "").to_string();
+            let value: Json = if id.is_empty() || id == "off" || id == "no" {
+                "no".into()
+            } else {
+                id.into()
+            };
+            vec!["set_property".into(), prop.into(), value]
+        }
+        "fullscreen" => vec!["cycle".into(), "fullscreen".into()],
+        // Jump to a numbered entry in the queue. Distinct from next/previous,
+        // which step, and from seek, which moves within one file.
+        "goto" => vec![
+            "set_property".into(),
+            "playlist-pos".into(),
+            Json::Num(step.args.f64_or("index", 0.0).max(0.0)),
+        ],
+        "clear_queue" => vec!["playlist-clear".into()],
         other => return Err(format!("unknown playback action '{}'", other)),
     };
     if ctx.dry_run {
@@ -484,6 +588,181 @@ fn mpv_command(command: Json) -> Result<(), String> {
     let msg = format!("{}\n", json_obj([("command", command)]));
     s.write_all(msg.as_bytes())
         .map_err(|e| format!("cannot talk to mpv: {}", e))
+}
+
+/// How long to wait for a player that may have wedged. Short: this runs on the
+/// path that draws a moving playhead, and a stalled answer is worse than none.
+const MPV_REPLY_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// How many properties one playback report asks for.
+const PLAYBACK_PROPS: usize = 10;
+
+/// Ask a running mpv for things, and wait for the answers.
+///
+/// Sending was never the hard part. mpv interleaves replies with unsolicited
+/// event lines and answers concurrent requests in whatever order it finishes
+/// them, so a reply is found by the id it carries and never by its position in
+/// the stream. Everything the interface knows about playback — where it is, how
+/// long the file is, whether it is paused — comes through here; until it did,
+/// every one of those numbers was the interface's own guess.
+///
+/// An entry is `None` when mpv refused the property, which is the ordinary
+/// answer for something a file does not have: an mp3 has no subtitle track.
+fn mpv_ask(sock: &Path, commands: Vec<Json>) -> Result<Vec<Option<Json>>, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut s = UnixStream::connect(sock)
+        .map_err(|_| "nothing is playing (no mpv instance to ask)".to_string())?;
+    s.set_read_timeout(Some(MPV_REPLY_TIMEOUT)).ok();
+
+    for (i, c) in commands.iter().enumerate() {
+        let msg = format!(
+            "{}\n",
+            json_obj([
+                ("command", c.clone()),
+                ("request_id", (i as u64 + 1).into())
+            ])
+        );
+        s.write_all(msg.as_bytes())
+            .map_err(|e| format!("cannot talk to mpv: {}", e))?;
+    }
+
+    let mut out: Vec<Option<Json>> = vec![None; commands.len()];
+    let mut answered = vec![false; commands.len()];
+    let mut left = commands.len();
+    let reader = BufReader::new(s);
+    for line in reader.lines() {
+        // A read timeout arrives as an error, and ends the wait rather than
+        // failing the request: partial state is still worth drawing.
+        let Ok(line) = line else { break };
+        let Ok(v) = parse(&line) else { continue };
+        // No request id means an event, which nobody asked for.
+        let Some(id) = v.get("request_id").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        let i = id as usize;
+        if i == 0 || i > answered.len() || answered[i - 1] {
+            continue;
+        }
+        answered[i - 1] = true;
+        if v.str_or("error", "") == "success" {
+            out[i - 1] = v.get("data").cloned();
+        }
+        left -= 1;
+        if left == 0 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// What is playing, where it is, and what it offers.
+///
+/// Read-only and cheap enough to call while a playhead is moving. Returns an
+/// empty report rather than an error when nothing is playing: "nothing" is a
+/// state a player has, not a failure to answer.
+fn state(_step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
+    let report = playback_state(&mpv_socket());
+    let note = describe_playback(&report);
+    Ok(Effect::read_only(report, note))
+}
+
+/// The same report, against a named socket. Separated so it can be exercised
+/// against a stand-in player: the alternative is an environment variable, and a
+/// test suite that rewrites the process's environment cannot be run in
+/// parallel with itself.
+pub fn playback_state(sock: &Path) -> Json {
+    const PROPS: [&str; PLAYBACK_PROPS] = [
+        "path",
+        "media-title",
+        "time-pos",
+        "duration",
+        "pause",
+        "volume",
+        "speed",
+        "track-list",
+        "playlist",
+        "playlist-pos",
+    ];
+    let asked = match mpv_ask(
+        sock,
+        PROPS
+            .iter()
+            .map(|p| Json::Arr(vec!["get_property".into(), (*p).into()]))
+            .collect(),
+    ) {
+        Ok(v) => v,
+        // No socket at all: nothing is playing, which is a state a player has
+        // rather than a failure to answer.
+        Err(_) => return json_obj([("playing", Json::Bool(false))]),
+    };
+
+    let get = |name: &str| -> Option<Json> {
+        PROPS
+            .iter()
+            .position(|p| *p == name)
+            .and_then(|i| asked.get(i).cloned().flatten())
+    };
+    let num = |name: &str| get(name).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let text = |name: &str| {
+        get(name)
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+
+    let path = text("path");
+    // mpv answers `pause` even with an empty playlist, so a loaded file is what
+    // says something is playing — not the absence of an error.
+    let playing = !path.is_empty();
+    let paused = get("pause").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut report = json_obj([
+        ("playing", Json::Bool(playing)),
+        ("paused", Json::Bool(paused)),
+        ("path", path.clone().into()),
+        ("title", text("media-title").into()),
+        ("position", num("time-pos").into()),
+        ("duration", num("duration").into()),
+        // mpv counts volume out of a hundred; so does this, so the two never
+        // need converting between.
+        ("volume", num("volume").into()),
+        (
+            "speed",
+            get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0).into(),
+        ),
+    ]);
+    if let Some(t) = get("track-list") {
+        report.set("tracks", t);
+    }
+    if let Some(p) = get("playlist") {
+        report.set("queue", p);
+    }
+    report.set("queue_pos", num("playlist-pos").into());
+    report
+}
+
+/// The one-line reading of a playback report, for anything that speaks rather
+/// than draws.
+pub fn describe_playback(report: &Json) -> String {
+    if !report.bool_or("playing", false) {
+        return "nothing is playing".to_string();
+    }
+    let title = {
+        let t = report.str_or("title", "");
+        if t.is_empty() {
+            report.str_or("path", "something")
+        } else {
+            t
+        }
+    };
+    let at = fmt_duration(report.f64_or("position", 0.0));
+    let total = fmt_duration(report.f64_or("duration", 0.0));
+    if report.bool_or("paused", false) {
+        format!("paused at {} of {} — {}", at, total, title)
+    } else {
+        format!("{} of {} — {}", at, total, title)
+    }
 }
 
 // ------------------------------------------------------- non-destructive edit
@@ -802,6 +1081,268 @@ fn render(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in mpv on a Unix socket, answering the way the real one does:
+    /// out of order, with unsolicited event lines mixed in. mpv's ordering is
+    /// not deterministic, so a test against the real thing would pass on a
+    /// reply-by-position reader most of the time. This one never does.
+    struct FakeMpv {
+        sock: PathBuf,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeMpv {
+        /// `answers` maps a property name to the JSON its reply carries;
+        /// anything absent is refused, as mpv refuses a property a file has no
+        /// such thing as.
+        fn start(tag: &str, answers: Vec<(&'static str, Json)>) -> FakeMpv {
+            use std::io::{BufRead, BufReader, Write};
+            use std::os::unix::net::UnixListener;
+
+            let dir = std::env::temp_dir().join(format!("nous-fake-mpv-{tag}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("mpv.sock");
+            let listener = UnixListener::bind(&sock).unwrap();
+
+            let thread = std::thread::spawn(move || {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut w = stream.try_clone().unwrap();
+                let reader = BufReader::new(stream);
+                let mut replies: Vec<String> = Vec::new();
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    let Ok(v) = parse(&line) else { break };
+                    let id = v.f64_or("request_id", 0.0) as u64;
+                    let prop = v
+                        .get("command")
+                        .and_then(|c| c.as_arr())
+                        .and_then(|a| a.get(1))
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let reply = match answers.iter().find(|(k, _)| *k == prop) {
+                        Some((_, data)) => json_obj([
+                            ("error", "success".into()),
+                            ("data", data.clone()),
+                            ("request_id", id.into()),
+                        ]),
+                        None => json_obj([
+                            ("error", "property unavailable".into()),
+                            ("request_id", id.into()),
+                        ]),
+                    };
+                    replies.push(format!("{}\n", reply));
+                    // Everything the caller asked for arrives in one burst, so
+                    // hold the replies until the requests stop coming, then
+                    // send them backwards with events salted through.
+                    if replies.len() >= PLAYBACK_PROPS {
+                        let _ =
+                            w.write_all(b"{\"event\":\"property-change\",\"name\":\"time-pos\"}\n");
+                        for r in replies.iter().rev() {
+                            let _ = w.write_all(r.as_bytes());
+                            let _ = w.write_all(b"{\"event\":\"tick\"}\n");
+                        }
+                        let _ = w.flush();
+                        replies.clear();
+                    }
+                }
+            });
+            FakeMpv {
+                sock,
+                thread: Some(thread),
+            }
+        }
+
+        fn report(&self) -> Json {
+            playback_state(&self.sock)
+        }
+    }
+
+    impl Drop for FakeMpv {
+        fn drop(&mut self) {
+            if let Some(d) = self.sock.parent() {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    #[test]
+    fn a_reply_is_found_by_its_id_not_by_when_it_arrives() {
+        // Every property answered in reverse, with events in between. Reading
+        // replies in the order they arrive would put the duration in the
+        // position field and the volume in the speed field.
+        let fake = FakeMpv::start(
+            "order",
+            vec![
+                ("path", "/home/j/Music/track.flac".into()),
+                ("media-title", "Sixteen Tons".into()),
+                ("time-pos", 41.5.into()),
+                ("duration", 168.0.into()),
+                ("pause", Json::Bool(false)),
+                ("volume", 62.0.into()),
+                ("speed", 1.25.into()),
+                ("track-list", Json::Arr(vec![])),
+                ("playlist", Json::Arr(vec![])),
+                ("playlist-pos", 0.0.into()),
+            ],
+        );
+        let r = fake.report();
+        assert!(r.bool_or("playing", false), "a loaded file is playing: {r}");
+        assert_eq!(
+            r.f64_or("position", -1.0),
+            41.5,
+            "position came from the wrong reply"
+        );
+        assert_eq!(
+            r.f64_or("duration", -1.0),
+            168.0,
+            "duration came from the wrong reply"
+        );
+        assert_eq!(r.f64_or("volume", -1.0), 62.0);
+        assert_eq!(r.f64_or("speed", -1.0), 1.25);
+        assert_eq!(r.str_or("title", ""), "Sixteen Tons");
+        assert!(!r.bool_or("paused", true));
+        assert_eq!(describe_playback(&r), "0:41 of 2:48 — Sixteen Tons");
+    }
+
+    #[test]
+    fn a_property_the_file_does_not_have_is_absent_not_fatal() {
+        // An mp3 has no subtitle track and mpv refuses the property. That is
+        // an ordinary answer; the rest of the report must still arrive.
+        let fake = FakeMpv::start(
+            "partial",
+            vec![
+                ("path", "/home/j/Music/track.mp3".into()),
+                ("time-pos", 3.0.into()),
+                ("duration", 200.0.into()),
+                ("pause", Json::Bool(true)),
+                ("volume", 100.0.into()),
+                ("speed", 1.0.into()),
+                ("media-title", "".into()),
+                ("playlist", Json::Arr(vec![])),
+                ("playlist-pos", 0.0.into()),
+            ],
+        );
+        let r = fake.report();
+        assert!(r.bool_or("playing", false), "{r}");
+        assert!(
+            r.bool_or("paused", false),
+            "a paused player reported as running"
+        );
+        assert_eq!(r.f64_or("duration", -1.0), 200.0);
+        assert!(
+            r.get("tracks").is_none(),
+            "invented a track list mpv refused"
+        );
+        assert!(
+            describe_playback(&r).starts_with("paused at 0:03 of 3:20"),
+            "{}",
+            describe_playback(&r)
+        );
+    }
+
+    #[test]
+    fn given_a_window_mpv_draws_inside_it_rather_than_opening_its_own() {
+        // The whole difference between a media player and a media player plus
+        // a stray second window.
+        let sock = Path::new("/run/nous/mpv.sock");
+        let args = mpv_args(sock, Path::new("/home/j/Videos/a.mkv"), Some(0x1c00007));
+        let joined = args.join(" ");
+        assert!(joined.contains("--wid=29360135"), "{joined}");
+        assert!(
+            !joined.contains("--force-window"),
+            "asked for a window of its own as well: {joined}"
+        );
+        assert!(
+            joined.contains("--no-osc"),
+            "mpv would draw a second set of controls"
+        );
+        assert_eq!(
+            args.last().unwrap(),
+            "/home/j/Videos/a.mkv",
+            "the file must come last"
+        );
+    }
+
+    #[test]
+    fn with_nowhere_to_draw_it_still_gets_a_window() {
+        // Otherwise audio plays and the picture goes nowhere at all.
+        let args = mpv_args(Path::new("/s"), Path::new("/v/a.mkv"), None);
+        let joined = args.join(" ");
+        assert!(joined.contains("--force-window=yes"), "{joined}");
+        assert!(!joined.contains("--wid"), "{joined}");
+    }
+
+    #[test]
+    fn a_socket_file_left_by_a_dead_player_is_not_a_running_player() {
+        // mpv does not clean up after itself when killed. Treating the leftover
+        // file as a live player means every later request is sent into nothing.
+        let dir = std::env::temp_dir().join("nous-stale-sock");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("mpv.sock");
+        std::fs::write(&sock, b"").unwrap();
+        assert!(sock.exists(), "the file is there");
+        assert!(
+            !player_is_running(&sock),
+            "a file nobody answers is not a player"
+        );
+
+        let live = std::os::unix::net::UnixListener::bind(dir.join("live.sock")).unwrap();
+        assert!(
+            player_is_running(&dir.join("live.sock")),
+            "a listening socket is a player"
+        );
+        drop(live);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_playing_is_a_state_rather_than_a_failure() {
+        // No socket at all. A player with nothing loaded is a normal thing for
+        // an interface to draw, so this must not come back as an error.
+        let nowhere = std::env::temp_dir().join("nous-no-such-mpv.sock");
+        let _ = std::fs::remove_file(&nowhere);
+        let r = playback_state(&nowhere);
+        assert!(!r.bool_or("playing", true));
+        assert_eq!(describe_playback(&r), "nothing is playing");
+    }
+
+    #[test]
+    fn a_wedged_player_gives_up_rather_than_hanging_the_daemon() {
+        // A socket that accepts and then says nothing. Everything that draws a
+        // moving playhead goes through here, so this must return.
+        let dir = std::env::temp_dir().join("nous-fake-mpv-silent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("mpv.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let t = std::thread::spawn(move || {
+            if let Ok((s, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_millis(1200));
+                drop(s);
+            }
+        });
+        let began = std::time::Instant::now();
+        let r = playback_state(&sock);
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_millis(1000),
+            "waited {took:?} on a silent player"
+        );
+        assert!(
+            !r.bool_or("playing", true),
+            "invented a state from no answer"
+        );
+        let _ = t.join();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn clip(path: &str, start: f64, end: f64) -> Json {
         json_obj([

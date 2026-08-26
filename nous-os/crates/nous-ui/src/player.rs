@@ -400,9 +400,9 @@ pub fn timecode(seconds: f64) -> String {
 
 // --- layout ---------------------------------------------------------------
 
-const TRANSPORT_H: f64 = 56.0;
+pub(crate) const TRANSPORT_H: f64 = 56.0;
 const TIMELINE_H: f64 = 78.0;
-const SCRUB_H: f64 = 26.0;
+pub(crate) const SCRUB_H: f64 = 26.0;
 /// The strip under each clip showing the whole source file, with the kept part
 /// lit. Tall enough to read at a glance, and clear of the selection ring so the
 /// two never blend into one another.
@@ -745,7 +745,7 @@ fn draw_timeline(c: &Canvas, player: &mut Player, theme: &Theme, layout: &Layout
 // bars, and a font that happens to lack them would leave empty boxes where the
 // controls should be.
 
-fn glyph_play(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
+pub(crate) fn glyph_play(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
     let r = 9.0;
     // A filled triangle, built from horizontal lines: no polygon primitive is
     // needed for a shape this simple.
@@ -765,13 +765,13 @@ fn glyph_play(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
     }
 }
 
-fn glyph_pause(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
+pub(crate) fn glyph_pause(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
     let r = 8.0;
     c.line(cx - 4.0, cy - r, cx - 4.0, cy + r, 3.5, colour);
     c.line(cx + 4.0, cy - r, cx + 4.0, cy + r, 3.5, colour);
 }
 
-fn glyph_prev(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
+pub(crate) fn glyph_prev(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
     let r = 7.0;
     c.line(cx - 6.0, cy - r, cx - 6.0, cy + r, 2.0, colour);
     let steps = 12;
@@ -783,7 +783,7 @@ fn glyph_prev(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
     }
 }
 
-fn glyph_next(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
+pub(crate) fn glyph_next(c: &Canvas, cx: f64, cy: f64, colour: Rgba) {
     let r = 7.0;
     c.line(cx + 6.0, cy - r, cx + 6.0, cy + r, 2.0, colour);
     let steps = 12;

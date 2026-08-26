@@ -4,5 +4,6 @@ pub mod files;
 pub mod input;
 pub mod panel;
 pub mod player;
+pub mod queue;
 pub mod theme;
 pub mod window;

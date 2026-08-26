@@ -210,6 +210,12 @@ impl Theme {
         self.font.clone().size(17.0)
     }
 
+    /// Running text and list rows: the same family at a readable size and an
+    /// ordinary weight, so a title set in it does not compete with a heading.
+    pub fn body_font(&self) -> Font {
+        self.font.clone().size(13.0)
+    }
+
     pub fn small_font(&self) -> Font {
         self.font.clone().size(10.5)
     }
