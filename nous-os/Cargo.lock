@@ -7,6 +7,14 @@ name = "nous-core"
 version = "0.1.0"
 
 [[package]]
+name = "nous-shell"
+version = "0.1.0"
+dependencies = [
+ "nous-core",
+ "nous-ui",
+]
+
+[[package]]
 name = "nous-ui"
 version = "0.1.0"
 dependencies = [

@@ -619,6 +619,24 @@ impl Window {
         unsafe { XSync(self.dpy, 0) };
     }
 
+    /// Write what is currently on the window to a PNG.
+    ///
+    /// Reads back from the X server, so this is the window as the screen has
+    /// it, not a re-render. That is the point: it is how a rendering fault that
+    /// only happens on a real display gets caught, and how a user can send a
+    /// picture of what went wrong.
+    pub fn capture(&self, path: &str) -> Result<(), String> {
+        let c = CString::new(path).map_err(|_| "path contains a NUL".to_string())?;
+        unsafe {
+            XSync(self.dpy, 0);
+            cairo_surface_flush(self.surface);
+            if cairo_surface_write_to_png(self.surface, c.as_ptr()) != CAIRO_STATUS_SUCCESS {
+                return Err(format!("could not write {path}"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn id(&self) -> c_ulong {
         self.win
     }

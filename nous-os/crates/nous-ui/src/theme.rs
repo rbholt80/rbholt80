@@ -17,36 +17,30 @@
 
 use crate::draw::{Font, Rgba};
 
-/// The four risk levels the policy engine works in. The UI never invents its
-/// own severity; it renders the one the capability already carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Risk {
-    Read,
-    Write,
-    Elevated,
-    Critical,
+/// The risk levels the policy engine works in, re-exported rather than
+/// redefined. The UI never invents its own severity: a level it renders is
+/// always the one the capability itself carries, and adding a level to the
+/// policy engine is a compile error here until it has a colour.
+pub use nous_core::cap::Risk;
+
+/// Read a risk level back from the name the daemon sends over the wire.
+///
+/// Anything unrecognised is treated as Critical. A risk level this build has
+/// never heard of is not one to render calmly.
+pub fn parse_risk(s: &str) -> Risk {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "read" => Risk::Read,
+        "write" => Risk::Write,
+        "elevated" => Risk::Elevated,
+        _ => Risk::Critical,
+    }
 }
 
-impl Risk {
-    /// Parse the risk name as the daemon spells it. Unknown values are treated
-    /// as Critical: an unrecognised risk is not a safe one.
-    pub fn parse(s: &str) -> Risk {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "read" => Risk::Read,
-            "write" => Risk::Write,
-            "elevated" => Risk::Elevated,
-            _ => Risk::Critical,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Risk::Read => "read",
-            Risk::Write => "write",
-            Risk::Elevated => "elevated",
-            Risk::Critical => "critical",
-        }
-    }
+/// The risk of a capability named as `domain.action:scope`, from the same table
+/// the policy engine consults. An unparseable name is Critical for the reason
+/// above.
+pub fn risk_of(capability: &str) -> Risk {
+    nous_core::cap::Capability::parse(capability).map_or(Risk::Critical, |c| c.risk())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,13 +261,13 @@ mod tests {
 
     #[test]
     fn unknown_risk_names_are_treated_as_the_most_dangerous() {
-        assert_eq!(Risk::parse("read"), Risk::Read);
-        assert_eq!(Risk::parse("  Write "), Risk::Write);
-        assert_eq!(Risk::parse("ELEVATED"), Risk::Elevated);
-        assert_eq!(Risk::parse("critical"), Risk::Critical);
+        assert_eq!(parse_risk("read"), Risk::Read);
+        assert_eq!(parse_risk("  Write "), Risk::Write);
+        assert_eq!(parse_risk("ELEVATED"), Risk::Elevated);
+        assert_eq!(parse_risk("critical"), Risk::Critical);
         // A risk level this build has never heard of must not render as calm.
-        assert_eq!(Risk::parse("catastrophic"), Risk::Critical);
-        assert_eq!(Risk::parse(""), Risk::Critical);
+        assert_eq!(parse_risk("catastrophic"), Risk::Critical);
+        assert_eq!(parse_risk(""), Risk::Critical);
     }
 
     #[test]
@@ -355,7 +349,7 @@ mod tests {
                     ratio >= 3.0,
                     "{:?} {} is {:.1}:1",
                     theme.mode,
-                    r.label(),
+                    r.as_str(),
                     ratio
                 );
             }

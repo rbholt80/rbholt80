@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nous-core",
     "crates/nous-ui",
+    "crates/nous-shell",
     "crates/nousd",
     "crates/nsh",
     "crates/nousctl",

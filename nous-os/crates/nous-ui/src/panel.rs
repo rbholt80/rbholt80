@@ -65,12 +65,8 @@ impl Body {
         let Body::Proposal { steps, .. } = self else {
             return None;
         };
-        steps.iter().map(|s| s.risk).max_by_key(|r| match r {
-            Risk::Read => 0,
-            Risk::Write => 1,
-            Risk::Elevated => 2,
-            Risk::Critical => 3,
-        })
+        // Risk is Ord, ascending in severity, so the maximum is the worst.
+        steps.iter().map(|s| s.risk).max()
     }
 }
 
