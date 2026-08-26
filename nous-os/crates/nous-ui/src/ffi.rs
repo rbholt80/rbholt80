@@ -129,19 +129,10 @@ impl Default for XSetWindowAttributes {
 /// `XEvent` is a union; 192 bytes is comfortably larger than the largest
 /// member on 64-bit, and X11 only ever writes through the union.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct XEvent {
     pub type_: c_int,
     pub pad: [c_long; 24],
-}
-
-impl Default for XEvent {
-    fn default() -> Self {
-        XEvent {
-            type_: 0,
-            pad: [0; 24],
-        }
-    }
 }
 
 #[repr(C)]

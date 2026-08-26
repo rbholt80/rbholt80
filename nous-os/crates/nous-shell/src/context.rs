@@ -78,8 +78,10 @@ mod tests {
         assert_eq!(Context::default().label(), None);
         // A window title alone is not worth a chip: the panel is always over
         // something, so showing it every time says nothing.
-        let mut only_focus = Context::default();
-        only_focus.focus = Some("Firefox".into());
+        let only_focus = Context {
+            focus: Some("Firefox".into()),
+            ..Default::default()
+        };
         assert_eq!(only_focus.label(), None);
         // It is still sent, though: the resolver uses it even when the panel
         // does not show it.

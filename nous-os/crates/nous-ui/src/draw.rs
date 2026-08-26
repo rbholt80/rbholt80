@@ -15,6 +15,12 @@ impl Rgba {
         Rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0)
     }
 
+    // clippy objects that `rgba` matches the type name, on the grounds that
+    // `Type::type()` reads as a conversion rather than a constructor. It does
+    // not read that way here: `rgb` and `rgba` are how colours are written
+    // everywhere from CSS to Cairo, and the pair is what makes the alpha
+    // argument obvious at the call site. Renaming one would break the pair.
+    #[allow(clippy::self_named_constructors)]
     pub const fn rgba(r: u8, g: u8, b: u8, a: f64) -> Rgba {
         Rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a)
     }
