@@ -22,7 +22,7 @@
 //! be able to say so — which is a different and much better problem than a
 //! grid that was never claiming anything at all.
 
-use crate::draw::{Canvas, Rect, Rgba};
+use crate::draw::{Canvas, Picture, Rect, Rgba};
 use crate::files::Entry;
 use crate::theme::{Metrics, Risk, Theme};
 
@@ -381,6 +381,24 @@ pub fn family_hue(name: &str) -> Rgba {
     }
 }
 
+/// Loaded previews, kept between frames.
+///
+/// A `None` is a picture that failed to load, remembered so it is not retried
+/// sixty times a second.
+#[derive(Default)]
+pub struct Pictures {
+    loaded: std::collections::HashMap<String, Option<Picture>>,
+}
+
+impl Pictures {
+    pub fn get(&mut self, path: &str) -> Option<&Picture> {
+        self.loaded
+            .entry(path.to_string())
+            .or_insert_with(|| Picture::load(path).ok())
+            .as_ref()
+    }
+}
+
 pub fn render(
     c: &Canvas,
     field: &Field,
@@ -388,6 +406,7 @@ pub fn render(
     chosen: &[usize],
     theme: &Theme,
     area: Rect,
+    pictures: &mut Pictures,
 ) {
     c.fill_rect(area, theme.backdrop_opaque);
     let small = theme.small_font();
@@ -443,6 +462,30 @@ pub fn render(
                 None => hue.with_alpha(0.20),
             };
             c.fill_rounded(r, Metrics::RADIUS_SMALL / 2.0, ground);
+
+            // A picture, where there is one and where there is room to see it.
+            // Cropped to fill, so a row of photographs lines up rather than
+            // each sitting in its own letterbox.
+            let mut has_picture = false;
+            if cell.readable() {
+                if let Some(path) = e.thumb.clone() {
+                    if let Some(pic) = pictures.get(&path) {
+                        c.picture_rounded(pic, r, Metrics::RADIUS_SMALL / 2.0);
+                        has_picture = true;
+                    }
+                }
+            }
+            // Over a photograph the caption needs its own ground, or a name
+            // lands on whatever the picture happens to be there — which is
+            // sometimes white, and then there is no name.
+            if has_picture {
+                let band = Rect::new(r.x, r.y, r.w, 30.0_f64.min(r.h));
+                c.fill_rect(band, theme.backdrop_opaque.with_alpha(0.62));
+                if e.mark.is_some() {
+                    let under = Rect::new(r.x, r.y + band.h, r.w, 22.0_f64.min(r.h - band.h));
+                    c.fill_rect(under, theme.backdrop_opaque.with_alpha(0.62));
+                }
+            }
 
             // Whether a name is worth drawing is measured, not guessed — but
             // measured against how much of it survives, not against a fraction
@@ -883,7 +926,15 @@ mod tests {
             ];
             let f = Field::arrange(&entries, AREA, NOW);
             let img = Image::new(900, 600).unwrap();
-            render(&img.canvas(), &f, &entries, &[0], &theme, AREA);
+            render(
+                &img.canvas(),
+                &f,
+                &entries,
+                &[0],
+                &theme,
+                AREA,
+                &mut Pictures::default(),
+            );
             assert!(img.variety(AREA) > 6, "the field is blank");
 
             // Two different families do not draw the same colour, or the
@@ -916,7 +967,15 @@ mod tests {
         });
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, &[], &theme, AREA);
+        render(
+            &img.canvas(),
+            &f,
+            &entries,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
         let at = |i: usize| {
             let c = f.cell_of(i).unwrap();
             img.pixel(
@@ -944,7 +1003,15 @@ mod tests {
         }
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, &[], &theme, AREA);
+        render(
+            &img.canvas(),
+            &f,
+            &entries,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
 
         // The recent one is named.
         let fresh = f.cell_of(0).unwrap();
@@ -1011,7 +1078,15 @@ mod tests {
         });
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, &[], &theme, AREA);
+        render(
+            &img.canvas(),
+            &f,
+            &entries,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
 
         let at = |i: usize| {
             let c = f.cell_of(i).unwrap();
@@ -1056,6 +1131,91 @@ mod tests {
     }
 
     #[test]
+    fn a_file_with_a_preview_shows_it_and_its_name_stays_readable() {
+        // A photograph behind a caption is the whole point, and a caption on
+        // a photograph is unreadable without a ground of its own — sometimes
+        // the picture is white just there, and then there is no name.
+        let dir = std::env::temp_dir().join(format!("nous-field-pic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("thumb.png");
+        let src = Image::new(120, 120).unwrap();
+        let sc = src.canvas();
+        // Deliberately pale, so a caption drawn straight onto it would vanish.
+        sc.fill_rect(Rect::new(0.0, 0.0, 120.0, 120.0), Rgba::rgb(248, 246, 240));
+        src.write_png(png.to_str().unwrap()).unwrap();
+
+        let theme = Theme::dark();
+        let plain = vec![entry("holiday.jpg", 4_000_000)];
+        let mut shown = plain.clone();
+        shown[0].thumb = Some(png.to_string_lossy().to_string());
+
+        let f = Field::arrange(&plain, AREA, NOW);
+        let without = Image::new(900, 600).unwrap();
+        render(
+            &without.canvas(),
+            &f,
+            &plain,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
+        let with = Image::new(900, 600).unwrap();
+        render(
+            &with.canvas(),
+            &f,
+            &shown,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
+
+        let cell = f.cell_of(0).unwrap().rect;
+        // The picture is there: the middle of the cell, well below the
+        // caption, is not what it was.
+        let mid = (
+            (cell.x + cell.w / 2.0) as i32,
+            (cell.y + cell.h * 0.7) as i32,
+        );
+        assert_ne!(
+            without.pixel(mid.0, mid.1),
+            with.pixel(mid.0, mid.1),
+            "the preview was not drawn"
+        );
+
+        // And the name is still legible: the strip it sits on is darker than
+        // the pale picture below it.
+        let band = with.pixel((cell.x + cell.w - 12.0) as i32, (cell.y + 14.0) as i32);
+        let body = with.pixel(
+            (cell.x + cell.w - 12.0) as i32,
+            (cell.y + cell.h * 0.7) as i32,
+        );
+        let lum = |p: (u8, u8, u8, u8)| p.0 as i32 + p.1 as i32 + p.2 as i32;
+        assert!(
+            lum(band) < lum(body) - 60,
+            "the caption has no ground under it: band {band:?} against picture {body:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cell_too_small_for_a_name_gets_no_preview_either() {
+        // A cell that cannot show a name cannot show a photograph, and
+        // decoding one to draw it at forty pixels is work for nothing.
+        let entries: Vec<Entry> = (0..300)
+            .map(|i| Entry {
+                modified: NOW - (300 + i as u64) * 86400,
+                ..entry(&format!("f{i:03}.jpg"), 40_000)
+            })
+            .collect();
+        let f = Field::arrange(&entries, AREA, NOW);
+        let tiny = f.cells().filter(|c| !c.readable()).count();
+        assert!(tiny > 200, "only {tiny} of three hundred are too small");
+    }
+
+    #[test]
     fn the_selection_is_as_clear_in_one_theme_as_the_other() {
         // A ring that reads as bright on a dark ground can be a hairline on a
         // pale one, and "which files am I about to delete" is not a question
@@ -1069,7 +1229,15 @@ mod tests {
         for theme in [Theme::dark(), Theme::light()] {
             let shot = |sel: &[usize]| {
                 let img = Image::new(900, 600).unwrap();
-                render(&img.canvas(), &f, &entries, sel, &theme, AREA);
+                render(
+                    &img.canvas(),
+                    &f,
+                    &entries,
+                    sel,
+                    &theme,
+                    AREA,
+                    &mut Pictures::default(),
+                );
                 img
             };
             let none = shot(&[]);
@@ -1101,9 +1269,25 @@ mod tests {
             .collect();
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, &[1, 3], &theme, AREA);
+        render(
+            &img.canvas(),
+            &f,
+            &entries,
+            &[1, 3],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
         let plain = Image::new(900, 600).unwrap();
-        render(&plain.canvas(), &f, &entries, &[], &theme, AREA);
+        render(
+            &plain.canvas(),
+            &f,
+            &entries,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+        );
 
         for i in [1usize, 3] {
             let c = f.cell_of(i).unwrap().rect;

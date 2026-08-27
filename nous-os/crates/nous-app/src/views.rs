@@ -88,6 +88,11 @@ pub struct App {
     pub said: Option<String>,
     /// The one line at the top that knows what you are looking at.
     pub ask: Ask,
+    /// The window's size as of the last frame.
+    ///
+    /// Work put off until between frames still has to know how big the window
+    /// is — which cells are large enough to be worth a preview depends on it.
+    last_size: (f64, f64),
     /// The tab rectangles from the last frame, so a click can be tested against
     /// what was actually drawn rather than against a guess at where it was.
     tabs: Vec<(View, Rect)>,
@@ -119,6 +124,7 @@ impl App {
             seen_changes: u64::MAX,
             said: None,
             ask: Ask::new(),
+            last_size: (1180.0, 720.0),
             tabs: Vec::new(),
         }
     }
@@ -639,11 +645,18 @@ impl App {
         self.queue.scrubbing = false;
     }
 
-    pub fn hover(&mut self, x: f64, y: f64, w: f64, h: f64) {
-        if self.view == View::Files {
-            let body = self.body(w, h);
-            self.pane.hover(x - body.x, y - body.y);
+    /// Follow the pointer. Says whether anything changed because of it.
+    ///
+    /// Almost always nothing does: the pointer crossing the window is not news
+    /// unless a menu is open under it. Repainting anyway means a full frame per
+    /// motion event, and X sends a great many of those — which is seen as the
+    /// interface flickering whenever the mouse moves across it.
+    pub fn hover(&mut self, x: f64, y: f64, w: f64, h: f64) -> bool {
+        if self.view != View::Files {
+            return false;
         }
+        let body = self.body(w, h);
+        self.pane.hover(x - body.x, y - body.y)
     }
 
     pub fn scroll(&mut self, dy: f64, w: f64, h: f64) {
@@ -694,10 +707,21 @@ impl App {
     /// Navigation happens in the middle of handling a key and must stay a pure
     /// move; asking the daemon what it makes of a folder is a round trip. This
     /// is where the two meet, once per frame.
-    pub fn settle(&mut self) {
+    /// Do the work that was put off until between frames, and say whether any
+    /// of it changed what is on screen.
+    pub fn settle(&mut self) -> bool {
+        let mut changed = false;
         if self.view == View::Files && self.pane.wants_curating {
             self.pane.wants_curating = false;
             self.pane.curate(&mut self.link);
+            changed = true;
+        }
+        // A few more previews, if any are still wanted. Bounded per pass, so
+        // a folder of five hundred photographs fills in over a couple of
+        // seconds instead of freezing the window until it is done.
+        if self.view == View::Files {
+            let body = at_origin(self.body(self.last_size.0, self.last_size.1));
+            changed |= self.pane.fetch_thumbs(&mut self.link, body);
         }
         // The ledger is read when it is being looked at and known to be
         // behind. Re-reading it on every frame would be a round trip per
@@ -705,10 +729,13 @@ impl App {
         // done.
         if self.view == View::History && self.seen_changes != self.link.changes {
             self.refresh_history();
+            changed = true;
         }
+        changed
     }
 
     pub fn render(&mut self, c: &Canvas, theme: &Theme, w: f64, h: f64) {
+        self.last_size = (w, h);
         c.fill_rect(Rect::new(0.0, 0.0, w, h), theme.backdrop_opaque);
         self.draw_tabs(c, theme, w);
         let bar = ask::Layout::compute(&self.ask, w, TABS_H);

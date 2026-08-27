@@ -335,7 +335,11 @@ fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     }
     let cache = nous_core::ipc::state_dir().join("media/thumbs");
     std::fs::create_dir_all(&cache).map_err(|e| format!("cannot create thumb cache: {}", e))?;
-    let out = cache.join(format!("{}.jpg", stable_key(&path)));
+    // PNG rather than JPEG. The only thing that reads these is the interface,
+    // which draws with Cairo, and Cairo reads PNG and nothing else — so a
+    // cache full of JPEGs is a cache nothing can open. Every thumbnail this
+    // has ever made was unusable by the one program that wanted them.
+    let out = cache.join(format!("{}.png", stable_key(&path)));
 
     if out.exists() {
         return Ok(Effect::read_only(
@@ -364,8 +368,11 @@ fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
             &src,
             "-frames:v",
             "1",
+            // Bounded on both sides: a very tall picture scaled by width alone
+            // becomes a strip thousands of pixels long, and the cache is for
+            // thumbnails.
             "-vf",
-            "scale=480:-1",
+            "scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease",
             &dst,
         ],
         Duration::from_secs(45),

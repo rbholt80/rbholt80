@@ -143,6 +143,8 @@ fn main() {
 
     loop {
         // A generous wait: this is a window, not a game. It wakes on input.
+        // Anything reaching the bottom of this loop causes a frame, so an
+        // event that changed nothing must `continue` instead.
         match window.wait(250) {
             Event::Close => break,
             Event::Redraw => {}
@@ -174,10 +176,29 @@ fn main() {
                 5 => app.scroll(3.0, w, h),
                 b => app.click(x, y, b, ctrl, shift, w, h),
             },
-            Event::MouseUp { x, y, button } => app.release(x, y, button),
-            Event::MouseMove { x, y } => app.hover(x, y, w, h),
-            // Nothing happened, and nothing needs redrawing for it.
-            Event::Tick | Event::FocusLost => continue,
+            // Releasing a button ends a scrub and changes nothing else.
+            Event::MouseUp { x, y, button } => {
+                app.release(x, y, button);
+                continue;
+            }
+            // The pointer crossing the window is not news unless a menu is
+            // open under it. X sends a great many motion events, and a frame
+            // for each of them is what "glitchy when you drag the mouse over
+            // it" looks like from the outside.
+            Event::MouseMove { x, y } => {
+                if !app.hover(x, y, w, h) {
+                    continue;
+                }
+            }
+            // A tick is the chance to pick up work put off between frames —
+            // a preview that has since been made, a ledger gone stale. It
+            // draws only if settling actually changed something.
+            Event::Tick => {
+                if !app.settle() {
+                    continue;
+                }
+            }
+            Event::FocusLost => continue,
         }
         app.settle();
         window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));

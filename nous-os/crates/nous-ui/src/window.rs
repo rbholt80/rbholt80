@@ -101,6 +101,16 @@ pub struct Window {
     dpy: *mut Display,
     win: crate::ffi::Window,
     surface: *mut cairo_surface_t,
+    /// Where frames are actually drawn, before being put on screen in one go.
+    ///
+    /// Painting straight onto the window means the clear that starts a frame
+    /// is visible: the X server can show the emptied window before anything
+    /// has been drawn back into it, which is seen as the whole interface
+    /// flickering under the pointer. Drawing offscreen and blitting once
+    /// makes a frame atomic.
+    back: *mut cairo_surface_t,
+    back_w: i32,
+    back_h: i32,
     colormap: Colormap,
     im: XIM,
     ic: XIC,
@@ -289,6 +299,9 @@ impl Window {
         }
 
         let surface = cairo_xlib_surface_create(dpy, win, visual, w, h);
+        // The offscreen surface is made on the first frame, when the window's
+        // real size is known — a window manager may have resized it already.
+        let back: *mut cairo_surface_t = std::ptr::null_mut();
         if surface.is_null() {
             XDestroyWindow(dpy, win);
             XCloseDisplay(dpy);
@@ -347,6 +360,9 @@ impl Window {
             dpy,
             win,
             surface,
+            back,
+            back_w: 0,
+            back_h: 0,
             colormap: if argb { colormap } else { 0 },
             im,
             ic,
@@ -375,9 +391,37 @@ impl Window {
 
     /// Paint one frame. The closure gets a [`Canvas`] already cleared to
     /// transparent (or to `opaque` when there is no compositor).
-    pub fn draw<F: FnOnce(&Canvas)>(&mut self, opaque: crate::draw::Rgba, f: F) {
+    /// Make sure the offscreen surface matches the window's size.
+    ///
+    /// Recreated only when the size actually changes, so a stream of motion
+    /// events costs nothing.
+    fn ensure_back(&mut self) {
+        if !self.back.is_null() && self.back_w == self.width && self.back_h == self.height {
+            return;
+        }
         unsafe {
-            let cr = cairo_create(self.surface);
+            if !self.back.is_null() {
+                cairo_surface_destroy(self.back);
+            }
+            self.back = cairo_image_surface_create(
+                CAIRO_FORMAT_ARGB32,
+                self.width.max(1),
+                self.height.max(1),
+            );
+        }
+        self.back_w = self.width;
+        self.back_h = self.height;
+    }
+
+    pub fn draw<F: FnOnce(&Canvas)>(&mut self, opaque: crate::draw::Rgba, f: F) {
+        self.ensure_back();
+        if self.back.is_null() {
+            return;
+        }
+        unsafe {
+            // The frame is built offscreen, where the clear that starts it
+            // cannot be seen.
+            let cr = cairo_create(self.back);
             if cr.is_null() {
                 return;
             }
@@ -395,8 +439,19 @@ impl Window {
 
             let canvas = Canvas::from_raw(cr);
             f(&canvas);
-
             cairo_destroy(cr);
+            cairo_surface_flush(self.back);
+
+            // And put on screen in one operation, so what the server shows is
+            // either the last frame or this one and never the gap between.
+            let front = cairo_create(self.surface);
+            if front.is_null() {
+                return;
+            }
+            cairo_set_operator(front, CAIRO_OPERATOR_SOURCE);
+            cairo_set_source_surface(front, self.back, 0.0, 0.0);
+            cairo_paint(front);
+            cairo_destroy(front);
             cairo_surface_flush(self.surface);
             XFlush(self.dpy);
         }
@@ -663,6 +718,9 @@ impl Drop for Window {
             }
             if !self.im.is_null() {
                 XCloseIM(self.im);
+            }
+            if !self.back.is_null() {
+                cairo_surface_destroy(self.back);
             }
             cairo_surface_destroy(self.surface);
             XDestroyWindow(self.dpy, self.win);

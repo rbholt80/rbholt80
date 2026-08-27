@@ -78,6 +78,8 @@ pub enum Editing {
 pub struct FilePane {
     pub files: Files,
     pub mode: Mode,
+    /// Previews, kept between frames so a photograph is decoded once.
+    pictures: nous_ui::field::Pictures,
     pub history: History,
     pub home: PathBuf,
     pub clipboard: Option<Clipboard>,
@@ -91,6 +93,9 @@ pub struct FilePane {
     /// new one yet. Checked once a frame, so navigation stays a pure move and
     /// the round trip happens in one place.
     pub wants_curating: bool,
+    /// Paths already asked about, so a file with no thumbnail is not asked
+    /// for on every pass forever.
+    asked_thumbs: std::collections::HashSet<String>,
     typed: String,
     typed_at: Option<Instant>,
     /// Rectangles from the last frame, so clicks are tested against what was
@@ -108,6 +113,7 @@ impl FilePane {
         let mut p = FilePane {
             files: Files::new("", Vec::new()),
             mode: Mode::Field,
+            pictures: nous_ui::field::Pictures::default(),
             history: History::new(start.clone()),
             home,
             clipboard: None,
@@ -116,6 +122,7 @@ impl FilePane {
             menu_hover: None,
             status: None,
             wants_curating: true,
+            asked_thumbs: std::collections::HashSet::new(),
             typed: String::new(),
             typed_at: None,
             drawn_places: Vec::new(),
@@ -140,6 +147,93 @@ impl FilePane {
     pub fn refresh(&mut self, link: &mut Link) {
         self.reload();
         self.curate(link);
+    }
+
+    /// The largest PNG worth drawing from directly rather than thumbnailing.
+    ///
+    /// Four megabytes: comfortably more than any screenshot or diagram, and
+    /// well short of the scanned page that would cost a hundred megabytes to
+    /// decode.
+    const DIRECT_PNG_MAX: u64 = 4 * 1024 * 1024;
+
+    /// How many thumbnails to ask for per pass.
+    ///
+    /// Each one may spawn ffmpeg, which takes as long as it takes. Asking for
+    /// a folder's worth at once would freeze the window for as long as the
+    /// folder is large; asking for a few per frame fills the view in over a
+    /// second or two while it stays usable throughout.
+    const THUMBS_PER_PASS: usize = 3;
+
+    /// Fetch a few more previews for the biggest cells that have none.
+    ///
+    /// Biggest first, because those are the ones a picture actually helps:
+    /// a cell too small to show a name is too small to show a photograph.
+    pub fn fetch_thumbs(&mut self, link: &mut Link, body: Rect) -> bool {
+        let grid = self.grid_rect(body);
+        if grid.w <= 0.0 || grid.h <= 0.0 {
+            return false;
+        }
+        // Which entries are worth a picture, largest first.
+        let mut want: Vec<(f64, usize)> = match self.mode {
+            Mode::Field => self
+                .field(grid)
+                .cells()
+                .filter(|c| c.readable())
+                .map(|c| (c.rect.w * c.rect.h, c.index))
+                .collect(),
+            // The grid gives every tile the same room, so order by the folder.
+            Mode::Grid => (0..self.files.entries.len()).map(|i| (0.0, i)).collect(),
+        };
+        want.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut got = false;
+        let mut asked = 0;
+        for (_, i) in want {
+            if asked >= Self::THUMBS_PER_PASS {
+                break;
+            }
+            let Some(e) = self.files.entries.get(i) else {
+                continue;
+            };
+            if e.is_dir || e.thumb.is_some() || !can_preview(&e.kind()) {
+                continue;
+            }
+            if !self.asked_thumbs.insert(e.path.clone()) {
+                continue;
+            }
+            let path = e.path.clone();
+
+            // A PNG small enough to decode is already the thing the interface
+            // can draw, so it is its own preview: no round trip, no ffmpeg,
+            // and it appears the moment the folder does. Large ones still go
+            // to the thumbnailer, because a forty-megapixel screenshot decoded
+            // to draw at two hundred pixels is a great deal of memory for a
+            // picture nobody is looking at closely.
+            if e.kind() == "PNG" && e.size <= Self::DIRECT_PNG_MAX {
+                if let Some(e) = self.files.entries.get_mut(i) {
+                    e.thumb = Some(path);
+                    got = true;
+                }
+                continue;
+            }
+            asked += 1;
+            // Everything else needs the daemon, which needs ffmpeg.
+            if !link.connected() {
+                continue;
+            }
+            let args = nous_core::json::json_obj([("path", path.clone().into())]);
+            if let Some(reply) = link.ask("media.thumbnail", args) {
+                let v = crate::link::report::value(&reply);
+                let made = v.str_or("thumbnail", "").to_string();
+                if !made.is_empty() {
+                    if let Some(e) = self.files.entries.get_mut(i) {
+                        e.thumb = Some(made);
+                        got = true;
+                    }
+                }
+            }
+        }
+        got
     }
 
     /// Ask the curator about this folder and draw what it says onto the tiles.
@@ -181,6 +275,12 @@ impl FilePane {
         self.files = f;
     }
 
+    /// Forget which files have been asked about. Called when the folder
+    /// changes, since the answers were about the old one.
+    fn forget_thumbs(&mut self) {
+        self.asked_thumbs.clear();
+    }
+
     /// Keep the selection on a named file after the folder changed under it.
     pub fn reload_selecting(&mut self, name: &str) {
         self.reload();
@@ -197,6 +297,7 @@ impl FilePane {
         self.files.scroll = 0.0;
         self.editing = Editing::None;
         self.menu = None;
+        self.forget_thumbs();
         self.reload();
         self.files.selected = 0;
         // Whoever moved us is expected to ask the curator; `go` is called from
@@ -698,10 +799,18 @@ impl FilePane {
         };
     }
 
-    pub fn hover(&mut self, x: f64, y: f64) {
-        if self.menu.is_some() {
-            self.menu_hover = self.drawn_menu.iter().position(|(_, r)| r.contains(x, y));
+    /// Follow the pointer, and say whether it changed anything.
+    ///
+    /// Only an open menu cares where the pointer is. Everything else is
+    /// indifferent to it, and saying so is what keeps a moving mouse from
+    /// costing a repaint per motion event.
+    pub fn hover(&mut self, x: f64, y: f64) -> bool {
+        if self.menu.is_none() {
+            return false;
         }
+        let was = self.menu_hover;
+        self.menu_hover = self.drawn_menu.iter().position(|(_, r)| r.contains(x, y));
+        was != self.menu_hover
     }
 
     pub fn scroll(&mut self, dy: f64, body: Rect) {
@@ -749,7 +858,15 @@ impl FilePane {
                 let area = Rect::new(0.0, 0.0, grid.w, grid.h);
                 let f = self.field(grid);
                 let chosen = self.files.chosen();
-                nous_ui::field::render(c, &f, &self.files.entries, &chosen, theme, area);
+                nous_ui::field::render(
+                    c,
+                    &f,
+                    &self.files.entries,
+                    &chosen,
+                    theme,
+                    area,
+                    &mut self.pictures,
+                );
             }
             Mode::Grid => {
                 let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
@@ -1087,6 +1204,19 @@ fn recent_click(last: &mut Option<Instant>, _index: usize) -> bool {
         .unwrap_or(false);
     *last = Some(Instant::now());
     quick
+}
+
+/// Whether a preview of this kind of file is worth asking for.
+///
+/// Pictures and video only. Everything else either has no picture to make —
+/// a spreadsheet is not an image — or would cost an ffmpeg run to find that
+/// out, which is a poor trade for a folder of documents.
+pub fn can_preview(kind: &str) -> bool {
+    const SHOWN: [&str; 17] = [
+        "JPG", "JPEG", "PNG", "GIF", "WEBP", "HEIC", "TIF", "TIFF", "BMP", "MP4", "MKV", "MOV",
+        "AVI", "WEBM", "M4V", "WMV", "AVIF",
+    ];
+    SHOWN.contains(&kind)
 }
 
 /// List a directory: folders first, then files, both case-insensitively
