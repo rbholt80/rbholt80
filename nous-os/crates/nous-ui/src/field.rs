@@ -41,7 +41,7 @@ const LEGIBLE_STUB: &str = "mmmmmmmmmmmm";
 
 /// The smallest a cell may be before it is not worth drawing separately.
 /// Below this it is sediment, and sediment is drawn as texture.
-pub const SEDIMENT: f64 = 26.0;
+pub const SEDIMENT: f64 = 22.0;
 
 /// A cell's share of the folder.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +52,16 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// Whether a picture is worth drawing here.
+    ///
+    /// Much smaller than [`Cell::readable`], and deliberately: a photograph is
+    /// recognisable at thirty pixels and a filename is not. Gating the picture
+    /// on the name's threshold — which is what this did — left every small
+    /// block blank when it could have been showing the thing itself.
+    pub fn shows_a_picture(&self) -> bool {
+        self.rect.w >= 30.0 && self.rect.h >= 24.0
+    }
+
     /// Whether this cell is big enough to say what it is.
     ///
     /// A name is a line of text, so it needs width far more than height: a
@@ -495,8 +505,8 @@ pub fn render(
                 continue;
             }
             let on = chosen.contains(&cell.index);
-            // Sediment: too small for a name, so it is drawn as what it is —
-            // the texture of a folder's forgotten remainder.
+            // Sediment: too small even for a picture, so it is drawn as what
+            // it is — the texture of a folder's forgotten remainder.
             if r.w < SEDIMENT || r.h < SEDIMENT {
                 c.fill_rect(r, hue.with_alpha(0.22));
                 if on {
@@ -514,11 +524,11 @@ pub fn render(
             };
             c.fill_rounded(r, Metrics::RADIUS_SMALL / 2.0, ground);
 
-            // A picture, where there is one and where there is room to see it.
-            // Cropped to fill, so a row of photographs lines up rather than
-            // each sitting in its own letterbox.
+            // A picture, wherever there is room to make one out. Cropped to
+            // fill, so a row of photographs lines up rather than each sitting
+            // in its own letterbox.
             let mut has_picture = false;
-            if cell.readable() {
+            if cell.shows_a_picture() {
                 if let Some(path) = e.thumb.clone() {
                     if let Some(pic) = pictures.get(&path) {
                         c.picture_rounded(pic, r, Metrics::RADIUS_SMALL / 2.0);
@@ -553,6 +563,14 @@ pub fn render(
             let worth_naming = cell.readable() && room >= full.min(least);
             if worth_naming {
                 c.clip_rect(r);
+                // What is actually in it, under the name, where there is room.
+                // A folder of documents drawn as coloured rectangles labelled
+                // "PDF" tells you nothing the names did not.
+                if !has_picture {
+                    if let Some(lines) = &e.blurb {
+                        draw_blurb(c, lines, r, theme, e.mark.is_some());
+                    }
+                }
                 c.text(&e.name, r.x + 8.0, r.y + 6.0, &body, theme.text, Some(room));
                 if let Some(m) = &e.mark {
                     c.text(
@@ -633,11 +651,32 @@ fn draw_lens(c: &Canvas, e: &Entry, l: &Lens, theme: &Theme, pictures: &mut Pict
             }
         }
     } else {
-        c.fill_rounded(
-            Rect::new(r.x, r.y, r.w, r.h - 46.0),
-            radius,
-            hue.with_alpha(0.22),
-        );
+        let body = Rect::new(r.x, r.y, r.w, r.h - 46.0);
+        c.fill_rounded(body, radius, hue.with_alpha(0.22));
+        // With no picture, the enlarged card is the place to actually read
+        // some of the file — which is the whole reason for enlarging it.
+        if let Some(lines) = &e.blurb {
+            c.clip_rect(body);
+            let f = theme.small_font();
+            let mut y = body.y + 10.0;
+            for line in lines {
+                if y + 14.0 > body.bottom() - 4.0 {
+                    break;
+                }
+                if !line.trim().is_empty() {
+                    c.text(
+                        line,
+                        body.x + 10.0,
+                        y,
+                        &f,
+                        theme.text_dim,
+                        Some(body.w - 20.0),
+                    );
+                }
+                y += 14.0;
+            }
+            c.restore();
+        }
     }
 
     // The caption on its own ground along the bottom, always, so it reads the
@@ -671,6 +710,33 @@ fn draw_lens(c: &Canvas, e: &Entry, l: &Lens, theme: &Theme, pictures: &mut Pict
     );
     c.restore();
     c.stroke_rounded(r, radius, 1.0, theme.hairline);
+}
+
+/// The first lines of a text file, set small and faint inside its cell.
+///
+/// Faint because it is not the point of the cell — the name is — but present
+/// because it is the difference between "a text file" and "the note about the
+/// boiler". Drawn from the top down and simply running out where the cell
+/// does, which is what a page of text does anyway.
+fn draw_blurb(c: &Canvas, lines: &[String], r: Rect, theme: &Theme, marked: bool) {
+    // Below the name, and below the curator's note where there is one.
+    let top = r.y + if marked { 44.0 } else { 28.0 };
+    let f = theme.small_font();
+    let step = 13.0;
+    let room = r.w - 16.0;
+    if room < 40.0 {
+        return;
+    }
+    let mut y = top;
+    for line in lines {
+        if y + step > r.bottom() - 6.0 {
+            break;
+        }
+        if !line.trim().is_empty() {
+            c.text(line, r.x + 8.0, y, &f, theme.text_faint, Some(room));
+        }
+        y += step;
+    }
 }
 
 /// A size the way a person says it.
@@ -707,6 +773,7 @@ mod tests {
             size,
             modified: NOW - 86400,
             thumb: None,
+            blurb: None,
             mark: None,
         }
     }

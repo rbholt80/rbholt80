@@ -24,6 +24,7 @@ fn e(name: &str, size: u64, days: u64) -> Entry {
         size,
         modified: now().saturating_sub(days * 86400),
         thumb: None,
+        blurb: None,
         mark: None,
     }
 }

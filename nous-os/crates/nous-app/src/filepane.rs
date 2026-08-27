@@ -180,7 +180,7 @@ impl FilePane {
     ///
     /// Biggest first, because those are the ones a picture actually helps:
     /// a cell too small to show a name is too small to show a photograph.
-    pub fn fetch_thumbs(&mut self, link: &mut Link, body: Rect) -> bool {
+    pub fn fetch_previews(&mut self, link: &mut Link, body: Rect) -> bool {
         let grid = self.grid_rect(body);
         if grid.w <= 0.0 || grid.h <= 0.0 {
             return false;
@@ -190,7 +190,10 @@ impl FilePane {
             Mode::Field => self
                 .field(grid)
                 .cells()
-                .filter(|c| c.readable())
+                // Anything big enough to make a picture out, not merely big
+                // enough to hold a name — which is a far higher bar and left
+                // every small block without even asking for one.
+                .filter(|c| c.shows_a_picture())
                 .map(|c| (c.rect.w * c.rect.h, c.index))
                 .collect(),
             // The grid gives every tile the same room, so order by the folder.
@@ -207,7 +210,9 @@ impl FilePane {
             let Some(e) = self.files.entries.get(i) else {
                 continue;
             };
-            if e.is_dir || e.thumb.is_some() || !can_preview(&e.kind()) {
+            let kind = e.kind();
+            let shown = can_preview(&kind) || is_texty(&kind);
+            if e.is_dir || e.thumb.is_some() || e.blurb.is_some() || !shown {
                 continue;
             }
             if !self.asked_thumbs.insert(e.path.clone()) {
@@ -228,11 +233,27 @@ impl FilePane {
                 }
                 continue;
             }
-            asked += 1;
-            // Everything else needs the daemon, which needs ffmpeg.
+            // Text is its own preview, and reading the head of a file is
+            // cheap enough to do here: no daemon, no ffmpeg, no cache. A
+            // folder of notes should show what the notes say.
+            //
+            // Not charged against the budget below, which exists because
+            // ffmpeg is slow. Reading four kilobytes off a disk is not, and
+            // rationing it meant a folder of five documents showed three.
+            if let Some(lines) = read_head(Path::new(&path)) {
+                if let Some(e) = self.files.entries.get_mut(i) {
+                    e.blurb = Some(lines);
+                    got = true;
+                }
+                continue;
+            }
+
+            // Everything else needs the daemon, which needs ffmpeg — and that
+            // is what the budget is for.
             if !link.connected() {
                 continue;
             }
+            asked += 1;
             let args = nous_core::json::json_obj([("path", path.clone().into())]);
             if let Some(reply) = link.ask("media.thumbnail", args) {
                 let v = crate::link::report::value(&reply);
@@ -1327,15 +1348,69 @@ fn recent_click(last: &mut Option<Instant>, _index: usize) -> bool {
     quick
 }
 
+/// Whether this is something whose first lines are worth showing.
+///
+/// Plain text of any sort. Not a PDF or a spreadsheet: those are text to a
+/// person and binary to a reader, and the head of one is a header block.
+pub fn is_texty(kind: &str) -> bool {
+    const TEXT: [&str; 18] = [
+        "TXT", "MD", "MARKDOWN", "LOG", "CSV", "TSV", "JSON", "YAML", "YML", "TOML", "INI", "CONF",
+        "SH", "RS", "PY", "JS", "HTML", "CSS",
+    ];
+    TEXT.contains(&kind)
+}
+
+/// How much of a text file to read, and how many lines to keep.
+const HEAD_BYTES: usize = 4096;
+const HEAD_LINES: usize = 8;
+
+/// The first few lines of a text file, or `None` if it is not readable as one.
+///
+/// Bounded on the way in: reading a whole log file to show four lines of it
+/// would make opening a folder of logs a slow business.
+pub fn read_head(path: &Path) -> Option<Vec<String>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; HEAD_BYTES];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    // A file with a null byte in its first few kilobytes is not text, whatever
+    // its name says.
+    if buf.contains(&0) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            // Tabs become spaces so indentation does not vanish, and a very
+            // long line is cut rather than measured against a cell it will
+            // never fit in.
+            let flat = l.replace('\t', "    ");
+            flat.chars().take(120).collect::<String>()
+        })
+        // Leading blank lines say nothing; blank lines in the middle do.
+        .skip_while(|l| l.trim().is_empty())
+        .take(HEAD_LINES)
+        .collect();
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        return None;
+    }
+    Some(lines)
+}
+
 /// Whether a preview of this kind of file is worth asking for.
 ///
 /// Pictures and video only. Everything else either has no picture to make —
 /// a spreadsheet is not an image — or would cost an ffmpeg run to find that
 /// out, which is a poor trade for a folder of documents.
 pub fn can_preview(kind: &str) -> bool {
-    const SHOWN: [&str; 17] = [
+    const SHOWN: [&str; 18] = [
         "JPG", "JPEG", "PNG", "GIF", "WEBP", "HEIC", "TIF", "TIFF", "BMP", "MP4", "MKV", "MOV",
         "AVI", "WEBM", "M4V", "WMV", "AVIF",
+        // A document's first page is a picture of what is in it, which is
+        // more use than the word "PDF" on a coloured rectangle.
+        "PDF",
     ];
     SHOWN.contains(&kind)
 }
@@ -1368,6 +1443,7 @@ pub fn read_folder(dir: &Path) -> Vec<Entry> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             thumb: None,
+            blurb: None,
             mark: None,
         });
     }
@@ -1785,6 +1861,97 @@ mod tests {
     }
 
     #[test]
+    fn a_text_file_shows_what_is_in_it() {
+        // A folder of notes drawn as coloured rectangles labelled "TXT" tells
+        // you nothing the names did not.
+        let dir = scratch("blurb");
+        std::fs::write(
+            dir.join("boiler.txt"),
+            b"\n\nThe boiler service is due in March.\nEngineer: 0114 555 0199\nModel: Worcester 8000\n",
+        )
+        .unwrap();
+        let lines = read_head(&dir.join("boiler.txt")).expect("a text file has a head");
+        assert_eq!(
+            lines[0], "The boiler service is due in March.",
+            "leading blank lines were kept, so the preview starts with nothing"
+        );
+        assert!(lines.len() >= 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_binary_file_is_not_read_as_text() {
+        // A .log with a null byte in it is not a log, whatever it is called,
+        // and drawing its bytes as lines is drawing noise.
+        let dir = scratch("blurb-binary");
+        std::fs::write(dir.join("thing.log"), [b'h', b'i', 0u8, 1, 2, 3]).unwrap();
+        assert!(read_head(&dir.join("thing.log")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_file_offers_no_preview_rather_than_a_blank_one() {
+        let dir = scratch("blurb-empty");
+        std::fs::write(dir.join("empty.txt"), b"").unwrap();
+        std::fs::write(dir.join("blank.txt"), b"\n\n   \n\n").unwrap();
+        assert!(read_head(&dir.join("empty.txt")).is_none());
+        assert!(read_head(&dir.join("blank.txt")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_very_long_line_is_cut_rather_than_measured_against_a_cell() {
+        let dir = scratch("blurb-long");
+        std::fs::write(dir.join("wide.txt"), "x".repeat(9000).as_bytes()).unwrap();
+        let lines = read_head(&dir.join("wide.txt")).unwrap();
+        assert!(
+            lines[0].chars().count() <= 120,
+            "{} characters",
+            lines[0].len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_huge_log_is_not_read_whole_to_show_four_lines_of_it() {
+        let dir = scratch("blurb-huge");
+        let big = dir.join("huge.log");
+        std::fs::write(&big, "line of text\n".repeat(200_000).as_bytes()).unwrap();
+        let began = std::time::Instant::now();
+        let lines = read_head(&big).unwrap();
+        let took = began.elapsed();
+        assert!(lines.len() <= 8);
+        assert!(
+            took < std::time::Duration::from_millis(50),
+            "reading the head of a large file took {took:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_small_block_still_gets_a_picture_asked_for() {
+        // Gating the picture on whether a name fits left every small block
+        // blank when it could have been showing the thing itself.
+        let dir = scratch("small-thumbs");
+        // Enough that the cells land between the two thresholds, which is the
+        // whole population this is about.
+        for i in 0..400 {
+            std::fs::write(dir.join(format!("p{i:03}.png")), b"x").unwrap();
+        }
+        let p = pane(&dir);
+        let grid = p.grid_rect(BODY);
+        let f = p.field(grid);
+        let showable = f.cells().filter(|c| c.shows_a_picture()).count();
+        let namable = f.cells().filter(|c| c.readable()).count();
+        assert!(
+            showable > namable + 50,
+            "a picture needs no more room than a name: {showable} against {namable}"
+        );
+        assert!(showable > 100, "only {showable} cells can show a picture");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn opening_a_picture_stays_in_the_window() {
         // Handing off loses the window and everything you knew when you left.
         let dir = scratch("view-open");
@@ -2195,6 +2362,48 @@ mod tests {
             "a file was deleted without the daemon"
         );
         assert!(p.status.is_some(), "it failed silently");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_csv_and_a_json_are_read_as_text_like_any_other() {
+        // Both are plain text a person reads. Being sorted into the
+        // "Spreadsheets" family is about where they sit in the folder, not
+        // about whether their first lines can be shown.
+        let dir = scratch("texty-kinds");
+        std::fs::write(
+            dir.join("spend.csv"),
+            b"date,amount,who\n2026-01-04,42.50,plumber\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("config.json"), b"{\n  \"name\": \"nous\"\n}\n").unwrap();
+        for (name, kind) in [("spend.csv", "CSV"), ("config.json", "JSON")] {
+            assert!(is_texty(kind), "{kind} is not counted as text");
+            let head = read_head(&dir.join(name));
+            assert!(head.is_some(), "{name} has no readable head");
+            assert!(!head.unwrap()[0].trim().is_empty());
+        }
+
+        // And the pane fills in every one of them in a single pass. Charging
+        // a text read against the thumbnail budget meant a folder of five
+        // documents showed three of them.
+        for i in 0..8 {
+            std::fs::write(
+                dir.join(format!("note-{i}.txt")),
+                b"something written here\n",
+            )
+            .unwrap();
+        }
+        let mut p = pane(&dir);
+        let mut link = Link::to_socket(NOWHERE);
+        p.fetch_previews(&mut link, BODY);
+        for e in &p.files.entries {
+            assert!(
+                e.blurb.is_some(),
+                "{} was left without a preview of what is in it",
+                e.name
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

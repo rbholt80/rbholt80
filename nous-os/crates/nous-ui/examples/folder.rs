@@ -47,6 +47,7 @@ fn main() {
         size: 0,
         modified: 0,
         thumb: None,
+        blurb: None,
         mark: None,
     });
     for i in 1..=6 {
@@ -58,6 +59,7 @@ fn main() {
             size: 2_400_000 + i as u64 * 130_000,
             modified: 0,
             thumb: Some(make_thumb(&thumbs, &format!("h{i}.png"), a, b)),
+            blurb: None,
             mark: None,
         });
     }
@@ -69,6 +71,7 @@ fn main() {
         size: 2_400_000,
         modified: 0,
         thumb: Some(make_thumb(&thumbs, "dupe.png", a, b)),
+        blurb: None,
         mark: Some(Mark {
             risk: Risk::Elevated,
             note: "same picture as holiday-1.jpg".into(),
@@ -81,6 +84,7 @@ fn main() {
         size: 48_200_000,
         modified: 0,
         thumb: Some(make_thumb(&thumbs, "clip.png", palette[2].0, palette[2].1)),
+        blurb: None,
         mark: Some(Mark {
             risk: Risk::Write,
             note: "a video, filed with photos".into(),
@@ -93,6 +97,7 @@ fn main() {
         size: 184_000,
         modified: 0,
         thumb: None,
+        blurb: None,
         mark: None,
     });
     push(Entry {
@@ -102,6 +107,7 @@ fn main() {
         size: 1_900_000_000,
         modified: 0,
         thumb: None,
+        blurb: None,
         mark: Some(Mark {
             risk: Risk::Critical,
             note: "1.8 GB, never opened".into(),
@@ -114,6 +120,7 @@ fn main() {
         size: 3_100,
         modified: 0,
         thumb: None,
+        blurb: None,
         mark: None,
     });
 

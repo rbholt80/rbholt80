@@ -330,7 +330,13 @@ fn search(step: &Step, _ctx: &ExecCtx) -> Result<Effect, String> {
 fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     let path = arg_path(step, "path")?;
     let at = step.args.f64_or("at", 3.0);
-    if !have("ffmpeg") {
+    // A document is not a video and ffmpeg cannot read one. Poppler can, and
+    // is on almost every desktop already because something else wanted it.
+    let is_doc = is_document(&path.to_string_lossy());
+    if is_doc && !have("pdftoppm") {
+        return Err("pdftoppm is not installed (install the poppler-utils package)".to_string());
+    }
+    if !is_doc && !have("ffmpeg") {
         return Err("ffmpeg is not installed".to_string());
     }
     let cache = nous_core::ipc::state_dir().join("media/thumbs");
@@ -356,10 +362,24 @@ fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     let src = path.to_string_lossy().to_string();
     let dst = out.to_string_lossy().to_string();
-    let args = thumb_args(&src, &dst, at);
+    let (prog, args) = if is_doc {
+        ("pdftoppm", page_args(&src, &dst))
+    } else {
+        ("ffmpeg", thumb_args(&src, &dst, at))
+    };
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let r = run("ffmpeg", &borrowed, Duration::from_secs(45))?;
-    r.require("ffmpeg")?;
+    let r = run(prog, &borrowed, Duration::from_secs(45))?;
+    r.require(prog)?;
+    // Poppler names its output for us. Put it where the caller was told to
+    // look, or the cache holds a file under a name nothing asks for.
+    if is_doc && !out.exists() {
+        let stem = dst.strip_suffix(".png").unwrap_or(&dst);
+        let made = PathBuf::from(format!("{stem}-1.png"));
+        if made.exists() {
+            std::fs::rename(&made, &out)
+                .map_err(|e| format!("cannot put the page where it belongs: {e}"))?;
+        }
+    }
     Ok(Effect::read_only(
         json_obj([("thumbnail", dst.into()), ("cached", false.into())]),
         format!("made a thumbnail of {}", path.display()),
@@ -391,6 +411,36 @@ pub fn thumb_args(src: &str, dst: &str, at: f64) -> Vec<String> {
     a.push("scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease".into());
     a.push(dst.to_string());
     a
+}
+
+/// Whether this is a document whose first page is its preview.
+fn is_document(path: &str) -> bool {
+    path.rsplit('.')
+        .next()
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
+/// The poppler invocation that renders a document's first page.
+///
+/// `pdftoppm` appends `-1.png` to the name it is given, so the destination has
+/// its extension taken off first and the file is moved into place afterwards.
+/// Getting that wrong produces `x.png-1.png`, which nothing looks for.
+pub fn page_args(src: &str, dst: &str) -> Vec<String> {
+    let stem = dst.strip_suffix(".png").unwrap_or(dst).to_string();
+    vec![
+        "-png".into(),
+        "-f".into(),
+        "1".into(),
+        "-l".into(),
+        "1".into(),
+        // Scaled on the long edge, so a landscape page is not rendered at
+        // poster size to reach 480 pixels of height.
+        "-scale-to".into(),
+        "480".into(),
+        src.to_string(),
+        stem,
+    ]
 }
 
 /// Whether this is a single picture rather than something with a timeline.
@@ -1527,5 +1577,35 @@ mod tests {
                 a[vf + 1]
             );
         }
+    }
+
+    #[test]
+    fn a_document_is_rendered_by_poppler_under_the_name_the_cache_expects() {
+        // pdftoppm appends "-1.png" to whatever name it is given. Handing it
+        // the full destination produces "x.png-1.png", which nothing looks for.
+        let a = page_args("/d/report.pdf", "/c/abc123.png");
+        assert_eq!(
+            a.last().unwrap(),
+            "/c/abc123",
+            "poppler was given a name it will append to: {a:?}"
+        );
+        assert!(a.contains(&"-png".to_string()));
+        // One page, the first.
+        let f = a.iter().position(|x| x == "-f").unwrap();
+        assert_eq!(a[f + 1], "1");
+        let l = a.iter().position(|x| x == "-l").unwrap();
+        assert_eq!(a[l + 1], "1");
+        // Scaled on the long edge, so a landscape page is not rendered at
+        // poster size to reach 480 pixels of height.
+        assert!(a.contains(&"-scale-to".to_string()));
+    }
+
+    #[test]
+    fn a_pdf_does_not_go_to_ffmpeg() {
+        assert!(is_document("/d/a.PDF"));
+        assert!(is_document("/d/report-2026.pdf"));
+        assert!(!is_document("/d/a.png"));
+        assert!(!is_document("/d/a.mp4"));
+        assert!(!is_document("/d/pdf"));
     }
 }

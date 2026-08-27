@@ -40,6 +40,12 @@ pub struct Entry {
     /// A cached PNG. Everything the daemon indexes gets one; a file it has not
     /// looked at yet has none and draws its extension instead.
     pub thumb: Option<String>,
+    /// The first few lines of a text file, for showing what is in it.
+    ///
+    /// A folder of documents drawn as coloured rectangles with "PDF" on them
+    /// tells you nothing you did not already know from the names. The point of
+    /// giving a file room is to put something in it.
+    pub blurb: Option<Vec<String>>,
     pub mark: Option<Mark>,
 }
 
@@ -873,6 +879,7 @@ mod tests {
             size,
             modified: 0,
             thumb: None,
+            blurb: None,
             mark: None,
         }
     }

@@ -242,6 +242,7 @@ mod tests {
             size: 1000,
             modified: 0,
             thumb: thumb.then(|| format!("/thumbs/{name}.png")),
+            blurb: None,
             mark: None,
         }
     }

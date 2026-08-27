@@ -733,7 +733,7 @@ impl App {
         // seconds instead of freezing the window until it is done.
         if self.view == View::Files {
             let body = at_origin(self.body(self.last_size.0, self.last_size.1));
-            changed |= self.pane.fetch_thumbs(&mut self.link, body);
+            changed |= self.pane.fetch_previews(&mut self.link, body);
         }
         // The ledger is read when it is being looked at and known to be
         // behind. Re-reading it on every frame would be a round trip per

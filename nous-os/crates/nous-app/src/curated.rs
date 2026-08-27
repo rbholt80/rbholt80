@@ -118,6 +118,7 @@ mod tests {
             size: 0,
             modified: 0,
             thumb: None,
+            blurb: None,
             mark: None,
         }
     }

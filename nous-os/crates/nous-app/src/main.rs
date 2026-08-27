@@ -54,6 +54,19 @@ fn main() {
         .position(|a| a == "--view")
         .and_then(|i| args.get(i + 1))
         .and_then(|n| View::named(n));
+    // Open on a particular folder. What a file manager's "open in..." needs,
+    // and what anyone typing `nous ~/Pictures` expects — so a bare path works
+    // as well as the flag.
+    let folder = args
+        .iter()
+        .position(|a| a == "--folder")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .or_else(|| {
+            args.iter()
+                .find(|a| !a.starts_with('-') && std::path::Path::new(a).is_dir())
+                .cloned()
+        });
 
     // Detected from the desktop's own setting, and overridable — detection
     // reads a GTK preference that not every desktop sets, and being stuck in
@@ -83,6 +96,9 @@ fn main() {
 
     let (mut w, mut h) = (WIDTH as f64, HEIGHT as f64);
     let mut app = App::new(start.unwrap_or(View::Files));
+    if let Some(f) = &folder {
+        app.pane.go(std::path::PathBuf::from(f));
+    }
     app.load();
 
     // Draw twice before anything is read back: the first frame can go out
@@ -217,6 +233,8 @@ const HELP: &str = "\
 nous — the interface window
 
     nous                     open it
+    nous ~/Pictures          open on a folder
+    nous --folder ~/Music    the same, said plainly
     nous --view files        open on a particular view
     nous --theme light       force a theme (dark, light)
     nous --check             say what is reachable and what is not
