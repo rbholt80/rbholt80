@@ -61,6 +61,12 @@ pub enum Event {
         x: f64,
         y: f64,
         button: u32,
+        /// Held modifiers. Carried because a click means different things with
+        /// them: ctrl adds to a selection, shift takes everything in between.
+        /// Dropping them here is why a file manager can only ever act on one
+        /// file at a time.
+        ctrl: bool,
+        shift: bool,
     },
     MouseUp {
         x: f64,
@@ -486,6 +492,8 @@ impl Window {
                     x: b.x as f64,
                     y: b.y as f64,
                     button: b.button,
+                    ctrl: b.state & ControlMask != 0,
+                    shift: b.state & ShiftMask != 0,
                 });
             }
             ButtonRelease => {

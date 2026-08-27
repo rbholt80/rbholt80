@@ -105,7 +105,7 @@ fn main() {
         let area = nous_ui::draw::Rect::new(0.0, 0.0, w, h);
         let field = Field::arrange(&entries, area, now);
         let img = Image::new(w as i32, h as i32).expect("surface");
-        render(&img.canvas(), &field, &entries, 2, &theme, area);
+        render(&img.canvas(), &field, &entries, &[2, 3], &theme, area);
         let path = format!("{out}/field-{suffix}.png");
         match img.write_png(&path) {
             Ok(()) => println!(

@@ -104,6 +104,9 @@ impl Capability {
 
             // Local, reversible mutation
             ("fs", "write") | ("fs", "mkdir") | ("fs", "move") => Risk::Write,
+            // Copying adds without removing, so the worst it can do is fill a
+            // disk — and undoing it removes only what it made.
+            ("fs", "copy") => Risk::Write,
             ("ctx", "write") | ("ui", "notify") | ("ui", "render") => Risk::Write,
             ("svc", "start") | ("svc", "stop") | ("svc", "restart") => Risk::Write,
             // Undo changes state, so it is a write -- but see the policy: it is
@@ -226,6 +229,7 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "fs.write",
     "fs.mkdir",
     "fs.move",
+    "fs.copy",
     "fs.delete",
     "fs.chmod",
     "fs.chown",

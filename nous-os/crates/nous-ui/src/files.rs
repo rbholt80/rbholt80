@@ -64,6 +64,14 @@ pub struct Files {
     pub folder: String,
     pub entries: Vec<Entry>,
     pub selected: usize,
+    /// Everything else that is chosen, besides `selected`.
+    ///
+    /// Kept separate rather than folding `selected` into a set, because the
+    /// two answer different questions: `selected` is where the keyboard is and
+    /// what a rename or a preview acts on, while this is what a copy or a
+    /// deletion acts on. Every file manager keeps both, and the ones that do
+    /// not are the ones where shift-clicking loses your place.
+    pub also: Vec<usize>,
     /// Vertical offset in pixels. Pixels rather than rows so a drag or a wheel
     /// can move by less than a whole tile.
     pub scroll: f64,
@@ -81,6 +89,7 @@ impl Files {
             folder: folder.to_string(),
             entries,
             selected: 0,
+            also: Vec::new(),
             scroll: 0.0,
             proposal: None,
             cache: HashMap::new(),
@@ -89,6 +98,88 @@ impl Files {
 
     pub fn selected_entry(&self) -> Option<&Entry> {
         self.entries.get(self.selected)
+    }
+
+    /// Everything chosen, in the order it appears in the folder.
+    ///
+    /// Ordered rather than as it was clicked, because an operation on several
+    /// files should happen in an order the person can predict from what they
+    /// can see.
+    pub fn chosen(&self) -> Vec<usize> {
+        let mut all = self.also.clone();
+        if self.selected < self.entries.len() {
+            all.push(self.selected);
+        }
+        all.sort_unstable();
+        all.dedup();
+        all.retain(|i| *i < self.entries.len());
+        all
+    }
+
+    pub fn is_chosen(&self, i: usize) -> bool {
+        i == self.selected || self.also.contains(&i)
+    }
+
+    /// How many files an action would touch. One unless several are chosen.
+    pub fn chosen_count(&self) -> usize {
+        self.chosen().len()
+    }
+
+    /// Choose only this one, forgetting anything else. A plain click.
+    pub fn choose_only(&mut self, i: usize) {
+        self.selected = i;
+        self.also.clear();
+    }
+
+    /// Add or remove one from the choice, keeping the rest. Ctrl-click.
+    pub fn toggle(&mut self, i: usize) {
+        if i >= self.entries.len() {
+            return;
+        }
+        if i == self.selected {
+            // Un-choosing where the keyboard is: hand that role to another
+            // chosen file rather than leaving nothing selected.
+            if let Some(next) = self.also.pop() {
+                self.selected = next;
+            }
+            return;
+        }
+        match self.also.iter().position(|x| *x == i) {
+            Some(at) => {
+                self.also.remove(at);
+            }
+            None => {
+                // The old selection stays chosen; the keyboard moves to the
+                // new one, which is what makes a run of ctrl-clicks build up
+                // rather than swap round.
+                self.also.push(self.selected);
+                self.selected = i;
+            }
+        }
+    }
+
+    /// Choose everything between where the keyboard is and `i`. Shift-click.
+    pub fn extend_to(&mut self, i: usize) {
+        if i >= self.entries.len() {
+            return;
+        }
+        let (lo, hi) = if i < self.selected {
+            (i, self.selected)
+        } else {
+            (self.selected, i)
+        };
+        self.also = (lo..=hi).filter(|x| *x != i).collect();
+        self.selected = i;
+    }
+
+    pub fn choose_all(&mut self) {
+        self.also = (0..self.entries.len())
+            .filter(|i| *i != self.selected)
+            .collect();
+    }
+
+    pub fn choose_none(&mut self) {
+        self.also.clear();
     }
 
     /// How many files carry a mark. Drawn in the header, because "3 of 137
@@ -136,6 +227,10 @@ impl Files {
             (cur + dx).clamp(0, n - 1)
         };
         self.selected = next as usize;
+        // An arrow key without shift means "go here", not "add here". Leaving
+        // a stale multiple choice behind is how a file manager deletes six
+        // files when you meant one.
+        self.also.clear();
     }
 
     /// Pull the scroll along so the selection is on screen. Called after any
@@ -335,12 +430,12 @@ pub fn render(c: &Canvas, files: &mut Files, theme: &Theme, layout: &Layout) {
 
     c.clip_rect(layout.body);
     let scroll = files.scroll;
-    let selected = files.selected;
+    let chosen = files.chosen();
     for i in 0..files.entries.len() {
         let Some(tile) = layout.tile_for(i, scroll) else {
             continue;
         };
-        draw_tile(c, files, theme, i, tile, i == selected);
+        draw_tile(c, files, theme, i, tile, chosen.contains(&i));
     }
     c.restore();
 
@@ -1070,6 +1165,106 @@ mod tests {
         // The footer stays blank on purpose: it reports the selected file, and
         // an empty folder has none to report.
         assert!(img.variety(l.header) > 2, "no header on an empty folder");
+    }
+
+    #[test]
+    fn several_files_can_be_chosen_at_once() {
+        // Without this you can copy one file at a time, which is not a file
+        // manager.
+        let mut f = Files::new(
+            "/d",
+            (0..8).map(|i| file(&format!("f{i}.txt"), 1)).collect(),
+        );
+        f.choose_only(2);
+        assert_eq!(f.chosen(), vec![2]);
+        f.toggle(5);
+        assert_eq!(
+            f.chosen(),
+            vec![2, 5],
+            "ctrl-click did not add to the choice"
+        );
+        f.toggle(7);
+        assert_eq!(f.chosen(), vec![2, 5, 7]);
+        // Ctrl-clicking a chosen one takes it away again.
+        f.toggle(5);
+        assert_eq!(f.chosen(), vec![2, 7]);
+        // And the result is always in folder order, whatever order it was
+        // clicked in, so an action on it happens in an order you can predict.
+        f.choose_only(6);
+        f.toggle(1);
+        f.toggle(4);
+        assert_eq!(f.chosen(), vec![1, 4, 6]);
+    }
+
+    #[test]
+    fn shift_takes_everything_in_between() {
+        let mut f = Files::new(
+            "/d",
+            (0..10).map(|i| file(&format!("f{i}.txt"), 1)).collect(),
+        );
+        f.choose_only(2);
+        f.extend_to(6);
+        assert_eq!(f.chosen(), vec![2, 3, 4, 5, 6]);
+        // Backwards too, and it replaces rather than accumulating.
+        f.choose_only(8);
+        f.extend_to(5);
+        assert_eq!(f.chosen(), vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn moving_the_keyboard_forgets_a_stale_choice() {
+        // Six files chosen, then an arrow key, then Delete: without this that
+        // deletes six files when you meant one.
+        let mut f = Files::new(
+            "/d",
+            (0..8).map(|i| file(&format!("f{i}.txt"), 1)).collect(),
+        );
+        f.choose_only(0);
+        f.extend_to(5);
+        assert_eq!(f.chosen().len(), 6);
+        f.move_selection(1, 0, 4);
+        assert_eq!(
+            f.chosen().len(),
+            1,
+            "an arrow key kept the old choice: {:?}",
+            f.chosen()
+        );
+    }
+
+    #[test]
+    fn un_choosing_where_the_keyboard_is_leaves_it_somewhere_real() {
+        let mut f = Files::new(
+            "/d",
+            (0..5).map(|i| file(&format!("f{i}.txt"), 1)).collect(),
+        );
+        f.choose_only(1);
+        f.toggle(3);
+        assert_eq!(f.selected, 3);
+        f.toggle(3);
+        assert!(
+            f.chosen().contains(&f.selected),
+            "the keyboard is on nothing"
+        );
+        assert_eq!(f.chosen(), vec![1]);
+    }
+
+    #[test]
+    fn choosing_everything_and_nothing() {
+        let mut f = Files::new(
+            "/d",
+            (0..6).map(|i| file(&format!("f{i}.txt"), 1)).collect(),
+        );
+        f.choose_all();
+        assert_eq!(f.chosen_count(), 6);
+        f.choose_none();
+        assert_eq!(f.chosen(), vec![f.selected]);
+        // An empty folder has nothing to choose and does not panic saying so.
+        let mut empty = Files::new("/d", Vec::new());
+        empty.choose_all();
+        assert_eq!(empty.chosen_count(), 0);
+        empty.toggle(3);
+        empty.extend_to(9);
+        assert_eq!(empty.chosen_count(), 0);
     }
 
     #[test]

@@ -178,10 +178,7 @@ pub fn new_folder(inside: &Path, name: &str) -> Result<Job, String> {
 /// than quietly turned into a move — losing the original is not a rounding
 /// error on "copy".
 pub fn paste(item: &Path, into: &Path, cut: bool) -> Result<Job, String> {
-    if !cut {
-        return Err("copying is not wired up yet — cut and paste moves instead".to_string());
-    }
-    if item.parent() == Some(into) {
+    if cut && item.parent() == Some(into) {
         return Err("it is already there".to_string());
     }
     // Moving a folder inside itself destroys it. The daemon would refuse, but
@@ -189,15 +186,56 @@ pub fn paste(item: &Path, into: &Path, cut: bool) -> Result<Job, String> {
     if into.starts_with(item) {
         return Err("a folder cannot be moved inside itself".to_string());
     }
-    let dest = into.join(name_of(item));
+    // Pasting a copy back where it came from makes a second one, so it needs
+    // a name that says so rather than a refusal.
+    let dest = if cut {
+        into.join(name_of(item))
+    } else {
+        free_name(into, &name_of(item))
+    };
     Ok(Job {
-        cap: "fs.move",
+        cap: if cut { "fs.move" } else { "fs.copy" },
         args: json_obj([
             ("from", item.to_string_lossy().to_string().into()),
             ("to", dest.to_string_lossy().to_string().into()),
         ]),
-        why: format!("move {} into {}", name_of(item), name_of(into)),
+        why: format!(
+            "{} {} into {}",
+            if cut { "move" } else { "copy" },
+            name_of(item),
+            name_of(into)
+        ),
     })
+}
+
+/// A name in `dir` that nothing is using, from `name`.
+///
+/// "report.pdf" becomes "report (copy).pdf", then "report (copy 2).pdf". The
+/// extension is kept on the end where it belongs: a duplicate called
+/// "report.pdf (copy)" no longer opens in anything.
+pub fn free_name(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    for n in 1..1000 {
+        let candidate = if n == 1 {
+            format!("{stem} (copy){ext}")
+        } else {
+            format!("{stem} (copy {n}){ext}")
+        };
+        let p = dir.join(&candidate);
+        if !p.exists() {
+            return p;
+        }
+    }
+    // A thousand copies of one file is not a case worth being clever about;
+    // the daemon refuses a name that is taken, which is the right answer here.
+    dir.join(name)
 }
 
 pub fn name_of(p: &Path) -> String {
@@ -301,11 +339,63 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_is_refused_rather_than_quietly_becoming_a_move() {
-        // There is no fs.copy behind this. Doing a move instead would delete
-        // the original, which is not a small difference from copying it.
-        let e = paste(Path::new("/home/j/a.txt"), Path::new("/home/j/Docs"), false).unwrap_err();
-        assert!(e.contains("copying"), "{e}");
+    fn a_copy_copies_and_a_cut_moves() {
+        // Two different verbs behind one gesture, and getting them the wrong
+        // way round means "copy" deletes the original.
+        let cut = paste(Path::new("/home/j/a.txt"), Path::new("/home/j/Docs"), true).unwrap();
+        assert_eq!(cut.cap, "fs.move");
+        let copy = paste(Path::new("/home/j/a.txt"), Path::new("/home/j/Docs"), false).unwrap();
+        assert_eq!(copy.cap, "fs.copy");
+        assert!(copy.why.starts_with("copy"), "{}", copy.why);
+    }
+
+    #[test]
+    fn pasting_a_copy_where_it_already_is_makes_a_second_one() {
+        // Copy then paste in the same folder is how people duplicate a file,
+        // and refusing it because the name is taken is not an answer.
+        let dir = std::env::temp_dir().join(format!("nous-copyname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("report.pdf");
+        std::fs::write(&src, b"x").unwrap();
+
+        let j = paste(&src, &dir, false).expect("a copy in place is allowed");
+        assert_eq!(
+            j.args.str_or("to", ""),
+            dir.join("report (copy).pdf").to_string_lossy(),
+            "the copy took a name that is already used"
+        );
+        // The extension stays on the end, or the duplicate opens in nothing.
+        assert!(j.args.str_or("to", "").ends_with(".pdf"));
+
+        // And again, once that one exists too.
+        std::fs::write(dir.join("report (copy).pdf"), b"x").unwrap();
+        let j = paste(&src, &dir, false).unwrap();
+        assert!(
+            j.args.str_or("to", "").ends_with("report (copy 2).pdf"),
+            "{}",
+            j.args.str_or("to", "")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cut_back_into_the_same_folder_is_still_nothing_to_do() {
+        let e = paste(Path::new("/home/j/a.txt"), Path::new("/home/j"), true).unwrap_err();
+        assert!(e.contains("already"), "{e}");
+    }
+
+    #[test]
+    fn a_name_with_no_extension_still_gets_a_sensible_copy() {
+        let dir = std::env::temp_dir().join(format!("nous-copyname2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Makefile"), b"x").unwrap();
+        assert_eq!(free_name(&dir, "Makefile"), dir.join("Makefile (copy)"));
+        // A dotfile is all extension and no stem; it must not become " (copy)".
+        std::fs::write(dir.join(".bashrc"), b"x").unwrap();
+        assert_eq!(free_name(&dir, ".bashrc"), dir.join(".bashrc (copy)"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

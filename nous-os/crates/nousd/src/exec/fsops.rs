@@ -25,6 +25,7 @@ pub fn execute(cap: &Capability, step: &Step, ctx: &ExecCtx) -> Result<Effect, S
         "write" => write(step, ctx),
         "mkdir" => mkdir(step, ctx),
         "move" => rename(step, ctx),
+        "copy" => copy(step, ctx),
         "delete" => delete(step, ctx),
         other => Err(format!("fs executor cannot '{}'", other)),
     }
@@ -385,6 +386,73 @@ fn rename(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
     ))
 }
 
+/// Duplicate a file or a whole folder.
+///
+/// The one verb the file manager was missing, and its absence made "copy" a
+/// lie: with only `move` behind it, pasting a copy deleted the original. That
+/// is not a rounding error on copying.
+///
+/// Undone by removing what was made — `RestoreFile` with `existed: false`,
+/// which is the journal's way of saying "this was not here before, so putting
+/// it back means taking it away". Only ever removes the destination, never the
+/// source, and refuses outright if the destination is already there.
+fn copy(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
+    let from = arg_path(step, "from")?;
+    let to = arg_path(step, "to")?;
+    if !from.exists() {
+        return Err(format!("{} does not exist", from.display()));
+    }
+    if to.exists() {
+        return Err(format!(
+            "{} already exists — choose another name",
+            to.display()
+        ));
+    }
+    // Copying a folder into itself never terminates: each pass finds the copy
+    // it just made and copies that too.
+    if to.starts_with(&from) {
+        return Err(format!(
+            "{} is inside {} — copying it there would never finish",
+            to.display(),
+            from.display()
+        ));
+    }
+    if ctx.dry_run {
+        return Ok(Effect::read_only(
+            json_obj([
+                ("from", from.to_string_lossy().to_string().into()),
+                ("to", to.to_string_lossy().to_string().into()),
+            ]),
+            format!("would copy {} to {}", from.display(), to.display()),
+        ));
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot make {}: {}", parent.display(), e))?;
+    }
+    // A single file is a plain copy; a directory goes through the tree walk
+    // that already exists for restoring things out of the trash.
+    if from.is_dir() {
+        copy_tree(&from, &to)?;
+    } else {
+        std::fs::copy(&from, &to).map_err(|e| format!("cannot copy {}: {}", from.display(), e))?;
+    }
+    Ok(Effect::with_undo(
+        json_obj([
+            ("from", from.to_string_lossy().to_string().into()),
+            ("to", to.to_string_lossy().to_string().into()),
+        ]),
+        // "Did not exist beforehand", so undoing it is a removal — of the
+        // copy, never of what it was copied from.
+        Undo::RestoreFile {
+            path: to.to_string_lossy().to_string(),
+            backup: None,
+            existed: false,
+        },
+        format!("copied {} to {}", from.display(), to.display()),
+    ))
+}
+
 /// Deletion is a move into the trash store. Nothing in NOUS OS calls `unlink`
 /// on a user's file.
 fn delete(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
@@ -701,5 +769,125 @@ mod tests {
         let mut out = Vec::new();
         walk(&f.dir, 4, &[], &mut out, 10);
         assert_eq!(out.len(), 10);
+    }
+
+    #[test]
+    fn copying_leaves_the_original_where_it_was() {
+        // With only `move` behind it, "copy" was a lie: pasting a copy deleted
+        // what it copied. That is not a rounding error on copying.
+        let f = Fixture::new("copy-keeps");
+        let src = f.dir.join("original.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let dst = f.dir.join("duplicate.txt");
+
+        let e = run(
+            &f,
+            "fs.copy",
+            json_obj([
+                ("from", src.to_string_lossy().to_string().into()),
+                ("to", dst.to_string_lossy().to_string().into()),
+            ]),
+            false,
+        )
+        .expect("copied");
+        assert!(src.exists(), "the original was removed");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
+
+        // And undoing it removes the copy, never the original.
+        match &e.undo {
+            Undo::RestoreFile { path, existed, .. } => {
+                assert_eq!(
+                    path,
+                    &dst.to_string_lossy().to_string(),
+                    "undo points at the wrong file"
+                );
+                assert!(
+                    !existed,
+                    "undo would restore something that was never there"
+                );
+            }
+            other => panic!("a copy cannot be undone: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_copy_never_writes_over_something_that_is_already_there() {
+        let f = Fixture::new("copy-clobber");
+        let src = f.dir.join("a.txt");
+        let dst = f.dir.join("b.txt");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"precious").unwrap();
+        let err = run(
+            &f,
+            "fs.copy",
+            json_obj([
+                ("from", src.to_string_lossy().to_string().into()),
+                ("to", dst.to_string_lossy().to_string().into()),
+            ]),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"precious",
+            "it was overwritten anyway"
+        );
+    }
+
+    #[test]
+    fn a_folder_cannot_be_copied_into_itself() {
+        // Each pass would find the copy it just made and copy that too.
+        let f = Fixture::new("copy-into-self");
+        let src = f.dir.join("tree");
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("inner/a.txt"), b"x").unwrap();
+        let err = run(
+            &f,
+            "fs.copy",
+            json_obj([
+                ("from", src.to_string_lossy().to_string().into()),
+                (
+                    "to",
+                    src.join("inner/copy").to_string_lossy().to_string().into(),
+                ),
+            ]),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("never finish"), "{err}");
+    }
+
+    #[test]
+    fn copying_a_folder_brings_everything_under_it() {
+        let f = Fixture::new("copy-tree");
+        let src = f.dir.join("project");
+        std::fs::create_dir_all(src.join("deep/deeper")).unwrap();
+        std::fs::write(src.join("top.txt"), b"1").unwrap();
+        std::fs::write(src.join("deep/mid.txt"), b"2").unwrap();
+        std::fs::write(src.join("deep/deeper/bottom.txt"), b"3").unwrap();
+        let dst = f.dir.join("project-copy");
+
+        run(
+            &f,
+            "fs.copy",
+            json_obj([
+                ("from", src.to_string_lossy().to_string().into()),
+                ("to", dst.to_string_lossy().to_string().into()),
+            ]),
+            false,
+        )
+        .expect("copied the tree");
+
+        assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"1");
+        assert_eq!(std::fs::read(dst.join("deep/mid.txt")).unwrap(), b"2");
+        assert_eq!(
+            std::fs::read(dst.join("deep/deeper/bottom.txt")).unwrap(),
+            b"3"
+        );
+        assert!(
+            src.join("deep/deeper/bottom.txt").exists(),
+            "the original tree was moved"
+        );
     }
 }

@@ -379,7 +379,7 @@ pub fn render(
     c: &Canvas,
     field: &Field,
     entries: &[Entry],
-    selected: usize,
+    chosen: &[usize],
     theme: &Theme,
     area: Rect,
 ) {
@@ -418,7 +418,7 @@ pub fn render(
             if r.w <= 0.5 || r.h <= 0.5 {
                 continue;
             }
-            let on = cell.index == selected;
+            let on = chosen.contains(&cell.index);
             // Sediment: too small for a name, so it is drawn as what it is —
             // the texture of a folder's forgotten remainder.
             if r.w < SEDIMENT || r.h < SEDIMENT {
@@ -872,7 +872,7 @@ mod tests {
             ];
             let f = Field::arrange(&entries, AREA, NOW);
             let img = Image::new(900, 600).unwrap();
-            render(&img.canvas(), &f, &entries, 0, &theme, AREA);
+            render(&img.canvas(), &f, &entries, &[0], &theme, AREA);
             assert!(img.variety(AREA) > 6, "the field is blank");
 
             // Two different families do not draw the same colour, or the
@@ -905,7 +905,7 @@ mod tests {
         });
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, usize::MAX, &theme, AREA);
+        render(&img.canvas(), &f, &entries, &[], &theme, AREA);
         let at = |i: usize| {
             let c = f.cell_of(i).unwrap();
             img.pixel(
@@ -933,7 +933,7 @@ mod tests {
         }
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, usize::MAX, &theme, AREA);
+        render(&img.canvas(), &f, &entries, &[], &theme, AREA);
 
         // The recent one is named.
         let fresh = f.cell_of(0).unwrap();
@@ -997,7 +997,7 @@ mod tests {
         });
         let f = Field::arrange(&entries, AREA, NOW);
         let img = Image::new(900, 600).unwrap();
-        render(&img.canvas(), &f, &entries, usize::MAX, &theme, AREA);
+        render(&img.canvas(), &f, &entries, &[], &theme, AREA);
 
         let at = |i: usize| {
             let c = f.cell_of(i).unwrap();
@@ -1014,19 +1014,47 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_of_five_thousand_files_arranges_fast_enough_to_type_through() {
+        // The field is recomputed every frame. If that is slow, the whole
+        // interface is slow, and it is slowest on the folders most in need of
+        // it. Five thousand is a real Downloads folder that has been left
+        // alone for a few years.
+        let entries: Vec<Entry> = (0..5000)
+            .map(|i| Entry {
+                modified: NOW - (i as u64 % 900) * 86400,
+                ..entry(
+                    &format!(
+                        "file-{i:05}.{}",
+                        ["jpg", "pdf", "flac", "mp4", "zip"][i % 5]
+                    ),
+                    (i as u64 % 400) * 100_000 + 1000,
+                )
+            })
+            .collect();
+        let began = std::time::Instant::now();
+        let f = Field::arrange(&entries, AREA, NOW);
+        let took = began.elapsed();
+        assert_eq!(f.cells().count(), 5000, "files were lost");
+        assert!(
+            took < std::time::Duration::from_millis(60),
+            "arranging five thousand files took {took:?}, which is felt while typing"
+        );
+    }
+
+    #[test]
     fn the_selected_cell_is_marked() {
         let theme = Theme::dark();
         let entries: Vec<Entry> = (0..6)
             .map(|i| entry(&format!("f{i}.jpg"), 1_000_000))
             .collect();
         let f = Field::arrange(&entries, AREA, NOW);
-        let shot = |sel: usize| {
+        let shot = |sel: &[usize]| {
             let img = Image::new(900, 600).unwrap();
             render(&img.canvas(), &f, &entries, sel, &theme, AREA);
             img
         };
-        let none = shot(usize::MAX);
-        let one = shot(0);
+        let none = shot(&[]);
+        let one = shot(&[0]);
         let c = f.cell_of(0).unwrap().rect;
         let mut differs = 0;
         for y in c.y as i32..c.bottom() as i32 {

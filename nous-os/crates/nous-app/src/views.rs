@@ -145,8 +145,15 @@ impl App {
         }
         let body = at_origin(self.body(w, h));
         let grid = self.pane.grid_rect(body);
-        self.pane
-            .click(grid.x + 120.0, grid.y + 90.0, 3, body, &mut self.link);
+        self.pane.click(
+            grid.x + 120.0,
+            grid.y + 90.0,
+            3,
+            false,
+            false,
+            body,
+            &mut self.link,
+        );
     }
 
     /// Draw the curator's marks from a report given on the command line, or
@@ -545,7 +552,8 @@ impl App {
         }
     }
 
-    pub fn click(&mut self, x: f64, y: f64, button: u32, w: f64, h: f64) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn click(&mut self, x: f64, y: f64, button: u32, ctrl: bool, shift: bool, w: f64, h: f64) {
         // A tab, if the click landed on one. Tested against the rectangles the
         // last frame actually drew.
         if let Some((v, _)) = self.tabs.iter().find(|(_, r)| r.contains(x, y)) {
@@ -581,9 +589,10 @@ impl App {
         match self.view {
             // The file pane draws its own furniture from the body's origin, so
             // it is given the body and does its own arithmetic within it.
-            View::Files => self
-                .pane
-                .click(lx, ly, button, at_origin(body), &mut self.link),
+            View::Files => {
+                self.pane
+                    .click(lx, ly, button, ctrl, shift, at_origin(body), &mut self.link)
+            }
             View::Player => {
                 let layout = nous_ui::queue::Layout::compute(&self.queue, body.w, body.h);
                 if layout.scrub.contains(lx, ly) {
@@ -968,7 +977,7 @@ mod tests {
         // between the tabs and the view, and hard-coding the offset here would
         // make this test agree with a stale idea of the layout.
         let top = a.body(w, h).y;
-        a.click(vx, vy + top, 1, w, h);
+        a.click(vx, vy + top, 1, false, false, w, h);
         assert_eq!(
             a.pane.files.selected, i,
             "the click landed on the wrong tile"
@@ -976,7 +985,7 @@ mod tests {
 
         let mut b = app_on(&dir);
         b.pane.mode = crate::filepane::Mode::Grid;
-        b.click(vx, vy, 1, w, h);
+        b.click(vx, vy, 1, false, false, w, h);
         assert_ne!(
             b.pane.files.selected, i,
             "the offset makes no difference, so this proves nothing"
@@ -1002,7 +1011,15 @@ mod tests {
             .find(|(v, _)| *v == View::Player)
             .cloned()
             .expect("a Player tab was drawn");
-        a.click(player_tab.x + 4.0, player_tab.y + 4.0, 1, 1180.0, 720.0);
+        a.click(
+            player_tab.x + 4.0,
+            player_tab.y + 4.0,
+            1,
+            false,
+            false,
+            1180.0,
+            720.0,
+        );
         assert_eq!(a.view, View::Player);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1012,7 +1029,7 @@ mod tests {
         let dir = scratch("early-click");
         let mut a = app_on(&dir);
         assert!(a.tabs.is_empty());
-        a.click(30.0, 20.0, 1, 1180.0, 720.0); // where a tab will be
+        a.click(30.0, 20.0, 1, false, false, 1180.0, 720.0); // where a tab will be
         assert_eq!(
             a.view,
             View::Files,
@@ -1218,7 +1235,15 @@ mod tests {
             "move it",
         );
         let body = a.body(1180.0, 720.0);
-        a.click(body.x + 60.0, body.y + 120.0, 1, 1180.0, 720.0);
+        a.click(
+            body.x + 60.0,
+            body.y + 120.0,
+            1,
+            false,
+            false,
+            1180.0,
+            720.0,
+        );
         assert!(a.ask.has_proposal(), "clicking a file discarded the plan");
         assert!(!a.ask.focused, "the keyboard stayed in the bar");
         let _ = std::fs::remove_dir_all(&dir);

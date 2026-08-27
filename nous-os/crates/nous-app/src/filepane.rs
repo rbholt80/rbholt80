@@ -241,16 +241,6 @@ impl FilePane {
 
     // --- doing things -----------------------------------------------------
 
-    fn run(&mut self, link: &mut Link, job: manage::Job) {
-        match link.invoke(job.cap, job.args, &job.why) {
-            Ok(_) => {
-                self.status = Some(job.why);
-                self.reload();
-            }
-            Err(e) => self.status = Some(e),
-        }
-    }
-
     /// Open what is selected: into a folder, or out to whatever program the
     /// desktop already uses for that kind of file.
     pub fn open_selected(&mut self, link: &mut Link) {
@@ -288,17 +278,24 @@ impl FilePane {
                 }
             }
             Action::Copy | Action::Cut => {
-                if let Some(e) = selected {
-                    self.clipboard = Some(Clipboard {
-                        paths: vec![PathBuf::from(&e.path)],
-                        cut: a == Action::Cut,
-                    });
-                    self.status = Some(format!(
-                        "{} {}",
-                        if a == Action::Cut { "cut" } else { "copied" },
-                        e.name
-                    ));
+                let chosen = self.files.chosen();
+                if chosen.is_empty() {
+                    return;
                 }
+                let paths: Vec<PathBuf> = chosen
+                    .iter()
+                    .filter_map(|i| self.files.entries.get(*i))
+                    .map(|e| PathBuf::from(&e.path))
+                    .collect();
+                let verb = if a == Action::Cut { "cut" } else { "copied" };
+                self.status = Some(match paths.len() {
+                    1 => format!("{verb} {}", manage::name_of(&paths[0])),
+                    n => format!("{verb} {n} items"),
+                });
+                self.clipboard = Some(Clipboard {
+                    paths,
+                    cut: a == Action::Cut,
+                });
             }
             Action::Paste => {
                 let Some(c) = self.clipboard.clone() else {
@@ -322,17 +319,53 @@ impl FilePane {
                     }
                 }
                 if moved > 0 {
-                    // A cut is spent once pasted; a copy could be pasted again,
-                    // but there is no copy behind it yet.
-                    self.clipboard = None;
-                    self.status = Some(format!("moved {moved} here"));
+                    let verb = if c.cut { "moved" } else { "copied" };
+                    // A cut is spent once pasted. A copy is not: pasting the
+                    // same thing into three folders is a thing people do.
+                    if c.cut {
+                        self.clipboard = None;
+                    }
+                    self.status = Some(format!("{verb} {moved} here"));
                     self.reload();
                 }
             }
             Action::Trash => {
-                if let Some(e) = selected {
-                    self.run(link, manage::trash(Path::new(&e.path)));
+                let paths: Vec<PathBuf> = self
+                    .files
+                    .chosen()
+                    .iter()
+                    .filter_map(|i| self.files.entries.get(*i))
+                    .map(|e| PathBuf::from(&e.path))
+                    .collect();
+                if paths.is_empty() {
+                    return;
                 }
+                let mut done = 0;
+                for p in &paths {
+                    let job = manage::trash(p);
+                    match link.invoke(job.cap, job.args, &job.why) {
+                        Ok(_) => done += 1,
+                        Err(e) => {
+                            // Stop at the first refusal rather than carrying
+                            // on: whatever stopped this one probably stops the
+                            // rest, and a half-finished deletion nobody asked
+                            // about is worse than none.
+                            self.status = Some(if done == 0 {
+                                e
+                            } else {
+                                format!("{e} — {done} already moved to the trash")
+                            });
+                            self.reload();
+                            return;
+                        }
+                    }
+                }
+                self.status = Some(match done {
+                    1 => format!("moved {} to the trash", manage::name_of(&paths[0])),
+                    n => format!("moved {n} items to the trash"),
+                });
+                self.files.choose_none();
+                self.reload();
             }
             Action::NewFolder => {
                 self.editing = Editing::NewFolder {
@@ -441,6 +474,7 @@ impl FilePane {
                 s if s == 'v' as u64 => self.act(Action::Paste, link),
                 s if s == 'n' as u64 && k.shift => self.act(Action::NewFolder, link),
                 s if s == 'h' as u64 => self.go(self.home.clone()),
+                s if s == 'a' as u64 => self.files.choose_all(),
                 _ => {}
             }
             return;
@@ -458,6 +492,22 @@ impl FilePane {
         let grid = self.grid_rect(body);
         let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
         let cols = layout.columns.max(1);
+        // Shift with an arrow grows the choice rather than moving it, which
+        // is the gesture every list in every system uses.
+        if k.shift {
+            let before = self.files.selected;
+            match k.sym {
+                s if s == ffi::XK_Left => self.files.move_selection(-1, 0, cols),
+                s if s == ffi::XK_Right => self.files.move_selection(1, 0, cols),
+                s if s == ffi::XK_Up => self.files.move_selection(0, -1, cols),
+                s if s == ffi::XK_Down => self.files.move_selection(0, 1, cols),
+                _ => return,
+            }
+            let to = self.files.selected;
+            self.files.selected = before;
+            self.files.extend_to(to);
+            return;
+        }
         match k.sym {
             s if s == ffi::XK_Left => self.files.move_selection(-1, 0, cols),
             s if s == ffi::XK_Right => self.files.move_selection(1, 0, cols),
@@ -538,7 +588,19 @@ impl FilePane {
         }
     }
 
-    pub fn click(&mut self, x: f64, y: f64, button: u32, body: Rect, link: &mut Link) {
+    /// `ctrl` and `shift` are the click's own modifiers, which decide
+    /// whether it starts a choice, adds to one, or extends one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn click(
+        &mut self,
+        x: f64,
+        y: f64,
+        button: u32,
+        ctrl: bool,
+        shift: bool,
+        body: Rect,
+        link: &mut Link,
+    ) {
         // An open menu takes the next click, wherever it lands: choosing from it
         // or dismissing it.
         if self.menu.is_some() {
@@ -587,11 +649,22 @@ impl FilePane {
             return self.go(p);
         }
         if let Some(i) = self.hit_tile(x, y, body) {
+            // Ctrl adds one, shift takes everything in between, and a plain
+            // click starts again — which is what every file manager does and
+            // therefore what people's hands already expect.
+            if ctrl {
+                self.files.toggle(i);
+                return;
+            }
+            if shift {
+                self.files.extend_to(i);
+                return;
+            }
             // Double-click opens, which is what a double-click does. A single
             // click that opened whatever was already chosen made every attempt
             // to re-select something into an accidental launch.
             let again = self.files.selected == i && recent_click(&mut self.typed_at, i);
-            self.files.selected = i;
+            self.files.choose_only(i);
             if again {
                 self.open_selected(link);
             }
@@ -682,14 +755,8 @@ impl FilePane {
             Mode::Field => {
                 let area = Rect::new(0.0, 0.0, grid.w, grid.h);
                 let f = self.field(grid);
-                nous_ui::field::render(
-                    c,
-                    &f,
-                    &self.files.entries,
-                    self.files.selected,
-                    theme,
-                    area,
-                );
+                let chosen = self.files.chosen();
+                nous_ui::field::render(c, &f, &self.files.entries, &chosen, theme, area);
             }
             Mode::Grid => {
                 let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
@@ -1217,7 +1284,15 @@ mod tests {
         let mut link = Link::new();
         // Right-click in the far bottom-right corner: the menu must flip
         // rather than draw off the edge where nothing can reach it.
-        p.click(BODY.right() - 6.0, BODY.bottom() - 6.0, 3, BODY, &mut link);
+        p.click(
+            BODY.right() - 6.0,
+            BODY.bottom() - 6.0,
+            3,
+            false,
+            false,
+            BODY,
+            &mut link,
+        );
         assert!(p.menu.is_some(), "right-click opened no menu");
         let img = Image::new(1180, 720).unwrap();
         p.render(&img.canvas(), &Theme::dark(), BODY, &link);
@@ -1270,7 +1345,7 @@ mod tests {
             };
 
             // Where the menu will be, before there is one.
-            p.click(cx, cy, 3, BODY, &mut link);
+            p.click(cx, cy, 3, false, false, BODY, &mut link);
             let img = render(&mut p, &link);
             let spots: Vec<(i32, i32)> = p
                 .drawn_menu
@@ -1307,7 +1382,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
         let mut link = Link::new();
-        p.click(300.0, 200.0, 3, BODY, &mut link);
+        p.click(300.0, 200.0, 3, false, false, BODY, &mut link);
         let img = Image::new(1180, 720).unwrap();
         let c = img.canvas();
         p.render(&c, &Theme::dark(), BODY, &link);
@@ -1337,11 +1412,11 @@ mod tests {
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
         let mut link = Link::new();
-        p.click(300.0, 300.0, 3, BODY, &mut link);
+        p.click(300.0, 300.0, 3, false, false, BODY, &mut link);
         let img = Image::new(1180, 720).unwrap();
         p.render(&img.canvas(), &Theme::dark(), BODY, &link);
         assert!(p.menu.is_some());
-        p.click(20.0, BODY.bottom() - 60.0, 1, BODY, &mut link);
+        p.click(20.0, BODY.bottom() - 60.0, 1, false, false, BODY, &mut link);
         assert!(p.menu.is_none(), "the menu stayed open");
         assert!(
             dir.join("a.txt").exists(),
@@ -1385,7 +1460,7 @@ mod tests {
                     (3, grid.x + t.x + t.w / 2.0, grid.y + t.y + t.h / 2.0)
                 }
             };
-            p.click(x, y, 1, BODY, &mut link);
+            p.click(x, y, 1, false, false, BODY, &mut link);
             assert_eq!(p.files.selected, want, "clicked the wrong file in {mode:?}");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -1456,7 +1531,7 @@ mod tests {
         let layout = nous_ui::files::Layout::compute(&p.files, grid.w, grid.h);
         let t = layout.tile_rect(0, 0.0);
         let (x, y) = (grid.x + t.x + t.w / 2.0, grid.y + t.y + t.h / 2.0);
-        p.click(x, y, 1, BODY, &mut link);
+        p.click(x, y, 1, false, false, BODY, &mut link);
         assert_eq!(p.files.selected, 0);
         assert_eq!(p.here(), dir, "a single click walked into the folder");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1535,7 +1610,7 @@ mod tests {
             .cloned()
             .expect("a Music shortcut was drawn");
         let mut link = Link::new();
-        p.click(r.x + 4.0, r.y + 4.0, 1, BODY, &mut link);
+        p.click(r.x + 4.0, r.y + 4.0, 1, false, false, BODY, &mut link);
         assert_eq!(p.here(), path);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1556,7 +1631,7 @@ mod tests {
             .cloned()
             .expect("an 'a' crumb was drawn");
         let mut link = Link::new();
-        p.click(r.x + 2.0, r.y + r.h / 2.0, 1, BODY, &mut link);
+        p.click(r.x + 2.0, r.y + r.h / 2.0, 1, false, false, BODY, &mut link);
         assert_eq!(p.here(), path, "clicking the path went nowhere");
         let _ = std::fs::remove_dir_all(&dir);
     }

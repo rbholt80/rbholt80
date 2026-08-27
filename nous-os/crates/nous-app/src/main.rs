@@ -133,10 +133,16 @@ fn main() {
             // X reports the wheel as buttons four and five. Nothing else in
             // the interface treats them as clicks, so they are turned back into
             // scrolling here rather than in every view.
-            Event::MouseDown { x, y, button } => match button {
+            Event::MouseDown {
+                x,
+                y,
+                button,
+                ctrl,
+                shift,
+            } => match button {
                 4 => app.scroll(-3.0, w, h),
                 5 => app.scroll(3.0, w, h),
-                b => app.click(x, y, b, w, h),
+                b => app.click(x, y, b, ctrl, shift, w, h),
             },
             Event::MouseUp { x, y, button } => app.release(x, y, button),
             Event::MouseMove { x, y } => app.hover(x, y, w, h),
