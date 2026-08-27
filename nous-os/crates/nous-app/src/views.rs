@@ -948,6 +948,11 @@ mod tests {
             std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
         }
         let mut a = app_on(&dir);
+        // Pinned to the grid: this is about the translation from window
+        // coordinates to the view's own, not about how the folder is
+        // arranged, and equal tiles in a known order make the target
+        // unambiguous.
+        a.pane.mode = crate::filepane::Mode::Grid;
         let (w, h) = (1180.0, 720.0);
         let body = at_origin(a.body(w, h));
         let grid = a.pane.grid_rect(body);
@@ -970,6 +975,7 @@ mod tests {
         );
 
         let mut b = app_on(&dir);
+        b.pane.mode = crate::filepane::Mode::Grid;
         b.click(vx, vy, 1, w, h);
         assert_ne!(
             b.pane.files.selected, i,

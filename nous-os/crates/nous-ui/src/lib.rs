@@ -1,5 +1,6 @@
 pub mod draw;
 pub mod ffi;
+pub mod field;
 pub mod files;
 pub mod input;
 pub mod panel;

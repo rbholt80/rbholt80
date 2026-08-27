@@ -116,6 +116,7 @@ mod tests {
             path: path.to_string(),
             is_dir: false,
             size: 0,
+            modified: 0,
             thumb: None,
             mark: None,
         }

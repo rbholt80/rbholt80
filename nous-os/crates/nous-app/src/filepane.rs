@@ -17,12 +17,20 @@ use crate::places::{crumbs, places, History};
 use nous_core::json::Json;
 use nous_ui::draw::{Canvas, Rect};
 use nous_ui::ffi;
+use nous_ui::field::Field;
 use nous_ui::files::{Entry, Files};
 use nous_ui::input::{Edit, Step as EditStep};
 use nous_ui::theme::{Metrics, Theme};
 use nous_ui::window::Key;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 const SIDEBAR_W: f64 = 186.0;
 /// Below this the sidebar goes away rather than crushing the grid.
@@ -40,6 +48,19 @@ const MENU_GAP: f64 = 26.0;
 /// How long typed letters keep accumulating into one search before it restarts.
 const TYPE_AHEAD_GAP: Duration = Duration::from_millis(900);
 
+/// How the folder is arranged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Weighted by what is likely to matter, grouped by kind. The default,
+    /// because it is the one that answers "what is in here" rather than
+    /// "what is in here, alphabetically".
+    Field,
+    /// Equal tiles in name order. Kept because sometimes the question really
+    /// is "where is the file called X", and then equal and alphabetical is
+    /// exactly right.
+    Grid,
+}
+
 /// What is being typed into, if anything.
 pub enum Editing {
     None,
@@ -56,6 +77,7 @@ pub enum Editing {
 
 pub struct FilePane {
     pub files: Files,
+    pub mode: Mode,
     pub history: History,
     pub home: PathBuf,
     pub clipboard: Option<Clipboard>,
@@ -85,6 +107,7 @@ impl FilePane {
     pub fn new(start: PathBuf, home: PathBuf) -> FilePane {
         let mut p = FilePane {
             files: Files::new("", Vec::new()),
+            mode: Mode::Field,
             history: History::new(start.clone()),
             home,
             clipboard: None,
@@ -447,6 +470,10 @@ impl FilePane {
             s if s == ffi::XK_Return || s == ffi::XK_KP_Enter => self.open_selected(link),
             s if s == ffi::XK_BackSpace => self.up(),
             s if s == ffi::XK_Delete => self.act(Action::Trash, link),
+            // Backslash: near Return, unused everywhere else, and the two
+            // arrangements are close enough in spirit that flipping between
+            // them should cost one key rather than a menu.
+            s if s == '\\' as u64 => self.toggle_mode(),
             // F2 and F5, which are the same everywhere and worth being the same
             // here.
             0xffbf => self.act(Action::Rename, link),
@@ -576,8 +603,33 @@ impl FilePane {
         if !grid.contains(x, y) {
             return None;
         }
-        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
-        self.files.hit(&layout, x - grid.x, y - grid.y)
+        match self.mode {
+            Mode::Field => self.field(grid).hit(x - grid.x, y - grid.y),
+            Mode::Grid => {
+                let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+                self.files.hit(&layout, x - grid.x, y - grid.y)
+            }
+        }
+    }
+
+    /// The arrangement for the space available.
+    ///
+    /// Recomputed rather than cached: it is a treemap over a few hundred
+    /// numbers and no disk is touched, since every entry carries its own
+    /// modification time.
+    fn field(&self, grid: Rect) -> Field {
+        Field::arrange(
+            &self.files.entries,
+            Rect::new(0.0, 0.0, grid.w, grid.h),
+            now_secs(),
+        )
+    }
+
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            Mode::Field => Mode::Grid,
+            Mode::Grid => Mode::Field,
+        };
     }
 
     pub fn hover(&mut self, x: f64, y: f64) {
@@ -626,9 +678,25 @@ impl FilePane {
         let grid = self.grid_rect(body);
         c.clip_rect(grid);
         c.translate(grid.x, grid.y);
-        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
-        nous_ui::files::render(c, &mut self.files, theme, &layout);
-        self.draw_edit_overlay(c, theme, &layout);
+        match self.mode {
+            Mode::Field => {
+                let area = Rect::new(0.0, 0.0, grid.w, grid.h);
+                let f = self.field(grid);
+                nous_ui::field::render(
+                    c,
+                    &f,
+                    &self.files.entries,
+                    self.files.selected,
+                    theme,
+                    area,
+                );
+            }
+            Mode::Grid => {
+                let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+                nous_ui::files::render(c, &mut self.files, theme, &layout);
+                self.draw_edit_overlay(c, theme, &layout);
+            }
+        }
         c.restore();
 
         self.draw_status(
@@ -963,6 +1031,14 @@ pub fn read_folder(dir: &Path) -> Vec<Entry> {
             path: e.path().to_string_lossy().to_string(),
             is_dir,
             size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            // Taken here, where the metadata is already in hand, rather than
+            // by the view that wants it — which lays out every frame.
+            modified: meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
             thumb: None,
             mark: None,
         });
@@ -1271,6 +1347,100 @@ mod tests {
             dir.join("a.txt").exists(),
             "dismissing a menu did something"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_lands_on_the_right_file_in_either_arrangement() {
+        // The two arrangements put files in completely different places. A
+        // hit test written for one of them silently selects the wrong file in
+        // the other.
+        let dir = scratch("modes-hit");
+        for i in 0..14 {
+            std::fs::write(dir.join(format!("f{i:02}.jpg")), vec![b'x'; 1000 * (i + 1)]).unwrap();
+        }
+        for mode in [Mode::Field, Mode::Grid] {
+            let mut p = pane(&dir);
+            p.mode = mode;
+            let mut link = Link::new();
+            let grid = p.grid_rect(BODY);
+
+            // Pick a target from whichever arrangement is in force.
+            let (want, x, y) = match mode {
+                Mode::Field => {
+                    let f = p.field(grid);
+                    let cell = f
+                        .cells()
+                        .find(|c| c.rect.w > 40.0 && c.rect.h > 40.0)
+                        .expect("some cell is big enough to aim at");
+                    (
+                        cell.index,
+                        grid.x + cell.rect.x + cell.rect.w / 2.0,
+                        grid.y + cell.rect.y + cell.rect.h / 2.0,
+                    )
+                }
+                Mode::Grid => {
+                    let l = nous_ui::files::Layout::compute_bare(&p.files, grid.w, grid.h);
+                    let t = l.tile_rect(3, 0.0);
+                    (3, grid.x + t.x + t.w / 2.0, grid.y + t.y + t.h / 2.0)
+                }
+            };
+            p.click(x, y, 1, BODY, &mut link);
+            assert_eq!(p.files.selected, want, "clicked the wrong file in {mode:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_arrangements_draw_and_they_do_not_draw_the_same() {
+        let dir = scratch("modes-draw");
+        for i in 0..20 {
+            std::fs::write(
+                dir.join(format!("f{i:02}.{}", ["jpg", "pdf", "flac"][i % 3])),
+                vec![b'x'; 500 * (i + 1)],
+            )
+            .unwrap();
+        }
+        let link = Link::new();
+        let shot = |mode: Mode| {
+            let mut p = pane(&dir);
+            p.mode = mode;
+            let img = Image::new(1180, 720).unwrap();
+            p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+            img
+        };
+        let field = shot(Mode::Field);
+        let grid = shot(Mode::Grid);
+        let p = pane(&dir);
+        let area = p.grid_rect(BODY);
+        assert!(field.variety(area) > 5, "the field is blank");
+        assert!(grid.variety(area) > 5, "the grid is blank");
+
+        let mut differs = 0;
+        for y in area.y as i32..area.bottom() as i32 {
+            for x in area.x as i32..area.right() as i32 {
+                if field.pixel(x, y) != grid.pixel(x, y) {
+                    differs += 1;
+                }
+            }
+        }
+        assert!(
+            differs > 5000,
+            "the two arrangements draw the same thing: {differs} pixels differ"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_opens_arranged_by_what_matters_rather_than_alphabetically() {
+        // Which is the whole argument. Alphabetical is still one key away.
+        let dir = scratch("modes-default");
+        let mut p = pane(&dir);
+        assert_eq!(p.mode, Mode::Field);
+        p.toggle_mode();
+        assert_eq!(p.mode, Mode::Grid);
+        p.toggle_mode();
+        assert_eq!(p.mode, Mode::Field);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

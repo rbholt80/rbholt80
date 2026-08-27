@@ -45,6 +45,7 @@ fn main() {
         path: "/home/joey/Pictures".into(),
         is_dir: true,
         size: 0,
+        modified: 0,
         thumb: None,
         mark: None,
     });
@@ -55,6 +56,7 @@ fn main() {
             path: format!("/home/joey/Downloads/holiday-{i}.jpg"),
             is_dir: false,
             size: 2_400_000 + i as u64 * 130_000,
+            modified: 0,
             thumb: Some(make_thumb(&thumbs, &format!("h{i}.png"), a, b)),
             mark: None,
         });
@@ -65,6 +67,7 @@ fn main() {
         path: "/home/joey/Downloads/holiday-1-copy.jpg".into(),
         is_dir: false,
         size: 2_400_000,
+        modified: 0,
         thumb: Some(make_thumb(&thumbs, "dupe.png", a, b)),
         mark: Some(Mark {
             risk: Risk::Elevated,
@@ -76,6 +79,7 @@ fn main() {
         path: "/home/joey/Downloads/clip.mp4".into(),
         is_dir: false,
         size: 48_200_000,
+        modified: 0,
         thumb: Some(make_thumb(&thumbs, "clip.png", palette[2].0, palette[2].1)),
         mark: Some(Mark {
             risk: Risk::Write,
@@ -87,6 +91,7 @@ fn main() {
         path: "/home/joey/Downloads/invoice-2024.pdf".into(),
         is_dir: false,
         size: 184_000,
+        modified: 0,
         thumb: None,
         mark: None,
     });
@@ -95,6 +100,7 @@ fn main() {
         path: "/home/joey/Downloads/installer.run".into(),
         is_dir: false,
         size: 1_900_000_000,
+        modified: 0,
         thumb: None,
         mark: Some(Mark {
             risk: Risk::Critical,
@@ -106,6 +112,7 @@ fn main() {
         path: "/home/joey/Downloads/notes.txt".into(),
         is_dir: false,
         size: 3_100,
+        modified: 0,
         thumb: None,
         mark: None,
     });

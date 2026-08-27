@@ -31,6 +31,12 @@ pub struct Entry {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    /// When it last changed, in seconds since the epoch.
+    ///
+    /// Carried rather than looked up, because the field view weighs files by
+    /// how recently they were touched and it lays out on every frame. Asking
+    /// the disk there would mean one `stat` per file per repaint.
+    pub modified: u64,
     /// A cached PNG. Everything the daemon indexes gets one; a file it has not
     /// looked at yet has none and draws its extension instead.
     pub thumb: Option<String>,
@@ -770,6 +776,7 @@ mod tests {
             path: format!("/home/j/Downloads/{name}"),
             is_dir: false,
             size,
+            modified: 0,
             thumb: None,
             mark: None,
         }
