@@ -210,6 +210,20 @@ impl Theme {
         self.font.clone().size(17.0)
     }
 
+    /// The ground for something that floats over the interface — a menu, a
+    /// popover, a tooltip.
+    ///
+    /// `surface` is a few per cent of white or black, meant to *tint* the
+    /// backdrop it sits on. Used directly on something floating it lets the
+    /// content underneath show through, and a menu you can read the file names
+    /// through is not a menu. This is the colour that tint resolves to, made
+    /// solid.
+    pub fn floating(&self) -> Rgba {
+        self.backdrop_opaque
+            .mix(self.surface, self.surface.3)
+            .with_alpha(1.0)
+    }
+
     /// Running text and list rows: the same family at a readable size and an
     /// ordinary weight, so a title set in it does not compete with a heading.
     pub fn body_font(&self) -> Font {
@@ -292,6 +306,17 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_floating_ground_is_solid_in_both_themes() {
+        // A menu drawn in `surface` shows the file names through it.
+        for t in [Theme::dark(), Theme::light()] {
+            assert_eq!(t.floating().3, 1.0, "a floating panel is see-through");
+            // And it is still recognisably the surface colour rather than the
+            // bare backdrop, or the menu has no edge against the panel.
+            assert_ne!(t.floating(), t.backdrop_opaque);
         }
     }
 

@@ -212,13 +212,26 @@ pub struct Layout {
 
 impl Layout {
     pub fn compute(files: &Files, width: f64, height: f64) -> Layout {
+        Layout::compute_inner(files, width, height, true)
+    }
+
+    /// The same grid with no footer of its own.
+    ///
+    /// For a window that already has a status bar. Two bars saying almost the
+    /// same thing, one above the other, is what it looks like when a view is
+    /// dropped into a frame that was not told the view brought furniture.
+    pub fn compute_bare(files: &Files, width: f64, height: f64) -> Layout {
+        Layout::compute_inner(files, width, height, false)
+    }
+
+    fn compute_inner(files: &Files, width: f64, height: f64, footer: bool) -> Layout {
         let pad = Metrics::PAD;
         let header_h = 58.0;
         let strip_h = if files.entries.is_empty() { 0.0 } else { 30.0 };
         // The footer always has something worth saying: a pending plan, or what
         // the selected file is. An interface that shows a strip only sometimes
         // reflows under you as you move around.
-        let footer_h = 52.0;
+        let footer_h = if footer { 52.0 } else { 0.0 };
 
         let inner_w = (width - pad * 2.0).max(0.0);
         let columns = (((inner_w + TILE_GAP) / (TILE_TARGET_W + TILE_GAP)).floor() as usize).max(1);
@@ -308,7 +321,9 @@ pub fn render(c: &Canvas, files: &mut Files, theme: &Theme, layout: &Layout) {
 
     if files.entries.is_empty() {
         draw_empty(c, theme, layout.body);
-        draw_footer(c, files, theme, layout);
+        if layout.footer.h > 0.0 {
+            draw_footer(c, files, theme, layout);
+        }
         return;
     }
 
@@ -326,7 +341,9 @@ pub fn render(c: &Canvas, files: &mut Files, theme: &Theme, layout: &Layout) {
     if layout.scrollable() {
         draw_scrollbar(c, files, theme, layout);
     }
-    draw_footer(c, files, theme, layout);
+    if layout.footer.h > 0.0 {
+        draw_footer(c, files, theme, layout);
+    }
 }
 
 fn draw_header(c: &Canvas, files: &Files, theme: &Theme, layout: &Layout) {

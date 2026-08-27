@@ -10,6 +10,10 @@
 //! because it is summoned over whatever you are already doing and a view inside
 //! this window could not be.
 
+mod filepane;
+mod link;
+mod manage;
+mod places;
 mod views;
 
 use nous_ui::draw::Image;
@@ -59,6 +63,12 @@ fn main() {
     for _ in 0..2 {
         window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));
         window.sync();
+    }
+
+    // A menu cannot be opened by a screenshot run, which has no pointer. This
+    // opens one so the menu can be looked at like anything else.
+    if args.iter().any(|a| a == "--with-menu") {
+        app.demo_menu(w, h);
     }
 
     if let Some(path) = shot {

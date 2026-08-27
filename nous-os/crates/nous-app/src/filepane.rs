@@ -1,0 +1,1353 @@
+//! A file manager: the grid, and everything around it that makes a grid usable.
+//!
+//! The tiles were already here. What was missing is what a person actually does
+//! with a folder — get to it, go back, open something with the program that
+//! opens it, rename it, throw it away — and the furniture that makes those
+//! reachable without being taught: places down the side, a path you can click
+//! along the top, a menu on the right button, and the keys everyone's hands
+//! already know.
+//!
+//! Nothing here writes to the disk. Every change is a capability the daemon
+//! runs, so it lands in the journal and can be taken back.
+
+use crate::link::Link;
+use crate::manage::{self, Action, Clipboard};
+use crate::places::{crumbs, places, History};
+use nous_ui::draw::{Canvas, Rect};
+use nous_ui::ffi;
+use nous_ui::files::{Entry, Files};
+use nous_ui::input::{Edit, Step as EditStep};
+use nous_ui::theme::{Metrics, Theme};
+use nous_ui::window::Key;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const SIDEBAR_W: f64 = 186.0;
+/// Below this the sidebar goes away rather than crushing the grid.
+const SIDEBAR_MIN_GRID: f64 = 430.0;
+const PLACE_H: f64 = 30.0;
+const CRUMBS_H: f64 = 40.0;
+const STATUS_H: f64 = 28.0;
+const MENU_ROW_H: f64 = 27.0;
+/// The narrowest a menu gets. Wider when its own text needs it — a menu sized
+/// by a constant has its longest label run into its longest shortcut, which is
+/// exactly the pair a reader needs to tell apart.
+const MENU_MIN_W: f64 = 190.0;
+/// Room between the end of a label and the start of its shortcut.
+const MENU_GAP: f64 = 26.0;
+/// How long typed letters keep accumulating into one search before it restarts.
+const TYPE_AHEAD_GAP: Duration = Duration::from_millis(900);
+
+/// What is being typed into, if anything.
+pub enum Editing {
+    None,
+    /// Renaming the entry at this index.
+    Rename {
+        index: usize,
+        edit: Edit,
+    },
+    /// Naming a new folder.
+    NewFolder {
+        edit: Edit,
+    },
+}
+
+pub struct FilePane {
+    pub files: Files,
+    pub history: History,
+    pub home: PathBuf,
+    pub clipboard: Option<Clipboard>,
+    pub editing: Editing,
+    /// The right-button menu, if one is open, and where it was opened.
+    pub menu: Option<(f64, f64, Vec<Action>)>,
+    pub menu_hover: Option<usize>,
+    /// The last thing that went wrong, or the last thing that worked.
+    pub status: Option<String>,
+    typed: String,
+    typed_at: Option<Instant>,
+    /// Rectangles from the last frame, so clicks are tested against what was
+    /// drawn rather than against a second guess at where it went.
+    drawn_places: Vec<(PathBuf, Rect)>,
+    drawn_crumbs: Vec<(PathBuf, Rect)>,
+    drawn_menu: Vec<(Action, Rect)>,
+    back_btn: Rect,
+    fwd_btn: Rect,
+    up_btn: Rect,
+}
+
+impl FilePane {
+    pub fn new(start: PathBuf, home: PathBuf) -> FilePane {
+        let mut p = FilePane {
+            files: Files::new("", Vec::new()),
+            history: History::new(start.clone()),
+            home,
+            clipboard: None,
+            editing: Editing::None,
+            menu: None,
+            menu_hover: None,
+            status: None,
+            typed: String::new(),
+            typed_at: None,
+            drawn_places: Vec::new(),
+            drawn_crumbs: Vec::new(),
+            drawn_menu: Vec::new(),
+            back_btn: Rect::new(0.0, 0.0, 0.0, 0.0),
+            fwd_btn: Rect::new(0.0, 0.0, 0.0, 0.0),
+            up_btn: Rect::new(0.0, 0.0, 0.0, 0.0),
+        };
+        p.reload();
+        p
+    }
+
+    pub fn here(&self) -> PathBuf {
+        self.history.here().to_path_buf()
+    }
+
+    /// Re-read the current folder, keeping the selection on the same file where
+    /// it still exists. A rename that moved the selection to a random neighbour
+    /// would be its own small betrayal.
+    pub fn reload(&mut self) {
+        let was = self.files.selected_entry().map(|e| e.name.clone());
+        let dir = self.here();
+        let entries = read_folder(&dir);
+        let mut f = Files::new(&dir.to_string_lossy(), entries);
+        if let Some(name) = was {
+            if let Some(i) = f.entries.iter().position(|e| e.name == name) {
+                f.selected = i;
+            }
+        }
+        f.scroll = self.files.scroll.min(f.entries.len() as f64 * 200.0);
+        self.files = f;
+    }
+
+    /// Keep the selection on a named file after the folder changed under it.
+    pub fn reload_selecting(&mut self, name: &str) {
+        self.reload();
+        if let Some(i) = self.files.entries.iter().position(|e| e.name == name) {
+            self.files.selected = i;
+        }
+    }
+
+    pub fn go(&mut self, to: PathBuf) {
+        if !to.is_dir() {
+            return;
+        }
+        self.history.go(to);
+        self.files.scroll = 0.0;
+        self.editing = Editing::None;
+        self.menu = None;
+        self.reload();
+        self.files.selected = 0;
+    }
+
+    fn back(&mut self) {
+        if let Some(p) = self.history.back() {
+            let _ = p;
+            self.files.scroll = 0.0;
+            self.reload();
+        }
+    }
+
+    fn forward(&mut self) {
+        if let Some(p) = self.history.forward() {
+            let _ = p;
+            self.files.scroll = 0.0;
+            self.reload();
+        }
+    }
+
+    fn up(&mut self) {
+        // The folder we are leaving, so the eye lands on where it came from
+        // rather than on whatever happens to sort first.
+        let leaving = manage::name_of(&self.here());
+        if let Some(parent) = self.here().parent().map(Path::to_path_buf) {
+            self.go(parent);
+            if let Some(i) = self.files.entries.iter().position(|e| e.name == leaving) {
+                self.files.selected = i;
+            }
+        }
+    }
+
+    // --- doing things -----------------------------------------------------
+
+    fn run(&mut self, link: &mut Link, job: manage::Job) {
+        match link.invoke(job.cap, job.args, &job.why) {
+            Ok(_) => {
+                self.status = Some(job.why);
+                self.reload();
+            }
+            Err(e) => self.status = Some(e),
+        }
+    }
+
+    /// Open what is selected: into a folder, or out to whatever program the
+    /// desktop already uses for that kind of file.
+    pub fn open_selected(&mut self, link: &mut Link) {
+        let Some(e) = self.files.selected_entry().cloned() else {
+            return;
+        };
+        if e.is_dir {
+            self.go(PathBuf::from(&e.path));
+            return;
+        }
+        let job = manage::open(Path::new(&e.path));
+        match link.invoke(job.cap, job.args, &job.why) {
+            // Opening does not change the folder, so nothing is reloaded.
+            Ok(_) => self.status = Some(format!("opened {}", e.name)),
+            Err(err) => self.status = Some(err),
+        }
+    }
+
+    pub fn act(&mut self, a: Action, link: &mut Link) {
+        self.menu = None;
+        let selected = self.files.selected_entry().cloned();
+        match a {
+            Action::Open | Action::OpenWith => self.open_selected(link),
+            Action::Rename => {
+                if let Some(e) = selected {
+                    self.editing = Editing::Rename {
+                        index: self.files.selected,
+                        edit: Edit::from(&e.name),
+                    };
+                    // The extension is rarely what is being changed, so the
+                    // stem is what a fresh rename has selected.
+                    if let Editing::Rename { edit, .. } = &mut self.editing {
+                        edit.select_all();
+                    }
+                }
+            }
+            Action::Copy | Action::Cut => {
+                if let Some(e) = selected {
+                    self.clipboard = Some(Clipboard {
+                        paths: vec![PathBuf::from(&e.path)],
+                        cut: a == Action::Cut,
+                    });
+                    self.status = Some(format!(
+                        "{} {}",
+                        if a == Action::Cut { "cut" } else { "copied" },
+                        e.name
+                    ));
+                }
+            }
+            Action::Paste => {
+                let Some(c) = self.clipboard.clone() else {
+                    return;
+                };
+                let into = self.here();
+                let mut moved = 0;
+                for p in &c.paths {
+                    match manage::paste(p, &into, c.cut) {
+                        Ok(job) => match link.invoke(job.cap, job.args, &job.why) {
+                            Ok(_) => moved += 1,
+                            Err(e) => {
+                                self.status = Some(e);
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            self.status = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if moved > 0 {
+                    // A cut is spent once pasted; a copy could be pasted again,
+                    // but there is no copy behind it yet.
+                    self.clipboard = None;
+                    self.status = Some(format!("moved {moved} here"));
+                    self.reload();
+                }
+            }
+            Action::Trash => {
+                if let Some(e) = selected {
+                    self.run(link, manage::trash(Path::new(&e.path)));
+                }
+            }
+            Action::NewFolder => {
+                self.editing = Editing::NewFolder {
+                    edit: Edit::from("New Folder"),
+                };
+                if let Editing::NewFolder { edit } = &mut self.editing {
+                    edit.select_all();
+                }
+            }
+            Action::Refresh => {
+                self.reload();
+                self.status = None;
+            }
+            Action::Properties => {
+                if let Some(e) = selected {
+                    self.status = Some(format!(
+                        "{} — {} — {}",
+                        e.name,
+                        if e.is_dir {
+                            "folder".to_string()
+                        } else {
+                            manage::human_size(e.size)
+                        },
+                        e.path
+                    ));
+                }
+            }
+        }
+    }
+
+    fn commit_edit(&mut self, link: &mut Link) {
+        let editing = std::mem::replace(&mut self.editing, Editing::None);
+        match editing {
+            Editing::Rename { index, edit } => {
+                let Some(e) = self.files.entries.get(index).cloned() else {
+                    return;
+                };
+                match manage::rename(Path::new(&e.path), edit.text()) {
+                    Ok(job) => {
+                        let name = edit.text().trim().to_string();
+                        match link.invoke(job.cap, job.args, &job.why) {
+                            Ok(_) => {
+                                self.status = Some(job.why);
+                                self.reload_selecting(&name);
+                            }
+                            Err(err) => self.status = Some(err),
+                        }
+                    }
+                    // "that is already its name" is not worth saying out loud:
+                    // pressing Enter on an unchanged name means "never mind".
+                    Err(msg) if msg.contains("already its name") => {}
+                    Err(msg) => self.status = Some(msg),
+                }
+            }
+            Editing::NewFolder { edit } => {
+                let here = self.here();
+                match manage::new_folder(&here, edit.text()) {
+                    Ok(job) => {
+                        let name = edit.text().trim().to_string();
+                        match link.invoke(job.cap, job.args, &job.why) {
+                            Ok(_) => {
+                                self.status = Some(job.why);
+                                self.reload_selecting(&name);
+                            }
+                            Err(err) => self.status = Some(err),
+                        }
+                    }
+                    Err(msg) => self.status = Some(msg),
+                }
+            }
+            Editing::None => {}
+        }
+    }
+
+    // --- input ------------------------------------------------------------
+
+    /// True when the pane wants Escape for itself — closing a menu or
+    /// abandoning a rename, rather than closing the window.
+    pub fn wants_escape(&self) -> bool {
+        self.menu.is_some() || !matches!(self.editing, Editing::None)
+    }
+
+    pub fn key(&mut self, k: Key, body: Rect, link: &mut Link) {
+        // A rename in progress swallows everything: the letters belong to it,
+        // and so does Escape.
+        if !matches!(self.editing, Editing::None) {
+            self.edit_key(k, link);
+            return;
+        }
+        if self.menu.is_some() {
+            if k.is(ffi::XK_Escape) {
+                self.menu = None;
+            }
+            return;
+        }
+
+        if k.ctrl {
+            match k.sym {
+                s if s == 'c' as u64 => self.act(Action::Copy, link),
+                s if s == 'x' as u64 => self.act(Action::Cut, link),
+                s if s == 'v' as u64 => self.act(Action::Paste, link),
+                s if s == 'n' as u64 && k.shift => self.act(Action::NewFolder, link),
+                s if s == 'h' as u64 => self.go(self.home.clone()),
+                _ => {}
+            }
+            return;
+        }
+        if k.alt {
+            match k.sym {
+                s if s == ffi::XK_Left => self.back(),
+                s if s == ffi::XK_Right => self.forward(),
+                s if s == ffi::XK_Up => self.up(),
+                _ => {}
+            }
+            return;
+        }
+
+        let grid = self.grid_rect(body);
+        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+        let cols = layout.columns.max(1);
+        match k.sym {
+            s if s == ffi::XK_Left => self.files.move_selection(-1, 0, cols),
+            s if s == ffi::XK_Right => self.files.move_selection(1, 0, cols),
+            s if s == ffi::XK_Up => self.files.move_selection(0, -1, cols),
+            s if s == ffi::XK_Down => self.files.move_selection(0, 1, cols),
+            s if s == ffi::XK_Home => self.files.selected = 0,
+            s if s == ffi::XK_End => {
+                self.files.selected = self.files.entries.len().saturating_sub(1)
+            }
+            s if s == ffi::XK_Return || s == ffi::XK_KP_Enter => self.open_selected(link),
+            s if s == ffi::XK_BackSpace => self.up(),
+            s if s == ffi::XK_Delete => self.act(Action::Trash, link),
+            // F2 and F5, which are the same everywhere and worth being the same
+            // here.
+            0xffbf => self.act(Action::Rename, link),
+            0xffc2 => self.act(Action::Refresh, link),
+            _ => return,
+        }
+        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+        self.files.reveal(&layout);
+    }
+
+    fn edit_key(&mut self, k: Key, link: &mut Link) {
+        if k.is(ffi::XK_Escape) {
+            self.editing = Editing::None;
+            return;
+        }
+        if k.is(ffi::XK_Return) || k.is(ffi::XK_KP_Enter) {
+            self.commit_edit(link);
+            return;
+        }
+        let step = if k.ctrl {
+            EditStep::Word
+        } else {
+            EditStep::Char
+        };
+        let edit = match &mut self.editing {
+            Editing::Rename { edit, .. } | Editing::NewFolder { edit } => edit,
+            Editing::None => return,
+        };
+        match k.sym {
+            s if s == ffi::XK_BackSpace => edit.backspace(step),
+            s if s == ffi::XK_Delete => edit.delete(step),
+            s if s == ffi::XK_Left => edit.move_caret(-1, step, k.shift),
+            s if s == ffi::XK_Right => edit.move_caret(1, step, k.shift),
+            s if s == 'a' as u64 && k.ctrl => edit.select_all(),
+            _ => {}
+        }
+    }
+
+    /// Letters typed with nothing else going on: jump to a file by name.
+    pub fn text(&mut self, t: &str) {
+        if let Editing::Rename { edit, .. } | Editing::NewFolder { edit } = &mut self.editing {
+            edit.insert(t);
+            return;
+        }
+        if self.menu.is_some() || t.chars().all(char::is_whitespace) {
+            return;
+        }
+        // A pause means a new search rather than a longer one, or hunting for
+        // "budget" an hour later finds nothing because "report" is still there.
+        let fresh = self
+            .typed_at
+            .map(|t| t.elapsed() > TYPE_AHEAD_GAP)
+            .unwrap_or(true);
+        if fresh {
+            self.typed.clear();
+        }
+        self.typed.push_str(t);
+        self.typed_at = Some(Instant::now());
+        let names: Vec<String> = self.files.entries.iter().map(|e| e.name.clone()).collect();
+        if let Some(i) = manage::type_ahead(&names, &self.typed) {
+            self.files.selected = i;
+        }
+    }
+
+    pub fn click(&mut self, x: f64, y: f64, button: u32, body: Rect, link: &mut Link) {
+        // An open menu takes the next click, wherever it lands: choosing from it
+        // or dismissing it.
+        if self.menu.is_some() {
+            if let Some((a, _)) = self.drawn_menu.iter().find(|(_, r)| r.contains(x, y)) {
+                let a = *a;
+                self.act(a, link);
+            } else {
+                self.menu = None;
+            }
+            return;
+        }
+        if !matches!(self.editing, Editing::None) {
+            self.commit_edit(link);
+            return;
+        }
+
+        if button == 3 {
+            let on_file = self
+                .grid_rect(body)
+                .contains(x, y)
+                .then(|| self.hit_tile(x, y, body))
+                .flatten()
+                .map(|i| self.files.selected = i)
+                .is_some();
+            let menu = manage::menu_for(on_file, self.clipboard.is_some());
+            self.menu = Some((x, y, menu));
+            self.menu_hover = None;
+            return;
+        }
+
+        if self.back_btn.contains(x, y) {
+            return self.back();
+        }
+        if self.fwd_btn.contains(x, y) {
+            return self.forward();
+        }
+        if self.up_btn.contains(x, y) {
+            return self.up();
+        }
+        if let Some((p, _)) = self.drawn_places.iter().find(|(_, r)| r.contains(x, y)) {
+            let p = p.clone();
+            return self.go(p);
+        }
+        if let Some((p, _)) = self.drawn_crumbs.iter().find(|(_, r)| r.contains(x, y)) {
+            let p = p.clone();
+            return self.go(p);
+        }
+        if let Some(i) = self.hit_tile(x, y, body) {
+            // Double-click opens, which is what a double-click does. A single
+            // click that opened whatever was already chosen made every attempt
+            // to re-select something into an accidental launch.
+            let again = self.files.selected == i && recent_click(&mut self.typed_at, i);
+            self.files.selected = i;
+            if again {
+                self.open_selected(link);
+            }
+        }
+    }
+
+    fn hit_tile(&self, x: f64, y: f64, body: Rect) -> Option<usize> {
+        let grid = self.grid_rect(body);
+        if !grid.contains(x, y) {
+            return None;
+        }
+        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+        self.files.hit(&layout, x - grid.x, y - grid.y)
+    }
+
+    pub fn hover(&mut self, x: f64, y: f64) {
+        if self.menu.is_some() {
+            self.menu_hover = self.drawn_menu.iter().position(|(_, r)| r.contains(x, y));
+        }
+    }
+
+    pub fn scroll(&mut self, dy: f64, body: Rect) {
+        let grid = self.grid_rect(body);
+        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+        self.files.scroll_by(dy * 26.0, &layout);
+    }
+
+    // --- layout and drawing -----------------------------------------------
+
+    pub fn sidebar_rect(&self, body: Rect) -> Rect {
+        if body.w - SIDEBAR_W < SIDEBAR_MIN_GRID {
+            return Rect::new(body.x, body.y, 0.0, 0.0);
+        }
+        Rect::new(body.x, body.y, SIDEBAR_W, body.h - STATUS_H)
+    }
+
+    pub fn grid_rect(&self, body: Rect) -> Rect {
+        let side = self.sidebar_rect(body).w;
+        Rect::new(
+            body.x + side,
+            body.y + CRUMBS_H,
+            (body.w - side).max(0.0),
+            (body.h - CRUMBS_H - STATUS_H).max(0.0),
+        )
+    }
+
+    pub fn render(&mut self, c: &Canvas, theme: &Theme, body: Rect, link: &Link) {
+        c.fill_rect(body, theme.backdrop_opaque);
+        let side = self.sidebar_rect(body);
+        if side.w > 0.0 {
+            self.draw_sidebar(c, theme, side);
+        }
+        self.draw_crumbs(
+            c,
+            theme,
+            Rect::new(body.x + side.w, body.y, body.w - side.w, CRUMBS_H),
+        );
+
+        let grid = self.grid_rect(body);
+        c.clip_rect(grid);
+        c.translate(grid.x, grid.y);
+        let layout = nous_ui::files::Layout::compute_bare(&self.files, grid.w, grid.h);
+        nous_ui::files::render(c, &mut self.files, theme, &layout);
+        self.draw_edit_overlay(c, theme, &layout);
+        c.restore();
+
+        self.draw_status(
+            c,
+            theme,
+            Rect::new(body.x, body.bottom() - STATUS_H, body.w, STATUS_H),
+            link,
+        );
+        self.draw_menu(c, theme, body);
+    }
+
+    fn draw_sidebar(&mut self, c: &Canvas, theme: &Theme, r: Rect) {
+        c.fill_rect(r, theme.surface.with_alpha(0.5));
+        c.line(
+            r.right() - 0.5,
+            r.y,
+            r.right() - 0.5,
+            r.bottom(),
+            1.0,
+            theme.hairline,
+        );
+        let f = theme.body_font();
+        let small = theme.small_font();
+        c.text(
+            "PLACES",
+            r.x + Metrics::PAD,
+            r.y + 12.0,
+            &small,
+            theme.text_faint,
+            None,
+        );
+        let here = self.here();
+        let mut y = r.y + 34.0;
+        self.drawn_places.clear();
+        for p in places(&self.home) {
+            let row = Rect::new(r.x + 6.0, y, r.w - 12.0, PLACE_H - 2.0);
+            let on = here == p.path;
+            if on {
+                c.fill_rounded(row, Metrics::RADIUS_SMALL / 2.0, theme.surface_active);
+                c.fill_rounded(
+                    Rect::new(row.x, row.y + 5.0, 3.0, row.h - 10.0),
+                    1.5,
+                    theme.voice,
+                );
+            }
+            c.text(
+                &p.name,
+                row.x + 14.0,
+                row.y + 5.0,
+                &f,
+                if on { theme.text } else { theme.text_dim },
+                Some(row.w - 20.0),
+            );
+            self.drawn_places.push((p.path.clone(), row));
+            y += PLACE_H;
+        }
+    }
+
+    fn draw_crumbs(&mut self, c: &Canvas, theme: &Theme, r: Rect) {
+        let f = theme.body_font();
+        let small = theme.small_font();
+        let cy = r.y + r.h / 2.0;
+
+        // Back, forward, up. Drawn dim when there is nowhere to go, because a
+        // button that looks live and does nothing is worse than one that says
+        // it cannot.
+        let mut x = r.x + Metrics::PAD;
+        let btn = |c: &Canvas, x: f64, on: bool, dir: f64| -> Rect {
+            let b = Rect::new(x, cy - 11.0, 22.0, 22.0);
+            let col = if on { theme.text } else { theme.text_faint };
+            // A chevron from two lines.
+            let (mx, my) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+            c.line(mx + 3.0 * dir, my - 5.0, mx - 2.0 * dir, my, 1.6, col);
+            c.line(mx - 2.0 * dir, my, mx + 3.0 * dir, my + 5.0, 1.6, col);
+            b
+        };
+        self.back_btn = btn(c, x, self.history.can_go_back(), 1.0);
+        x += 26.0;
+        self.fwd_btn = btn(c, x, self.history.can_go_forward(), -1.0);
+        x += 30.0;
+        // Up: the same chevron turned, drawn from lines for the same reason.
+        {
+            let b = Rect::new(x, cy - 11.0, 22.0, 22.0);
+            let on = self.here().parent().is_some();
+            let col = if on { theme.text } else { theme.text_faint };
+            let (mx, my) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+            c.line(mx - 5.0, my + 2.0, mx, my - 3.0, 1.6, col);
+            c.line(mx, my - 3.0, mx + 5.0, my + 2.0, 1.6, col);
+            self.up_btn = b;
+            x = b.right() + 12.0;
+        }
+
+        self.drawn_crumbs.clear();
+        let parts = crumbs(&self.here(), &self.home);
+        let last = parts.len().saturating_sub(1);
+        for (i, p) in parts.iter().enumerate() {
+            let (tw, th) = c.measure(&p.name, &f, None);
+            if x + tw > r.right() - 8.0 {
+                // Out of room: say so rather than drawing off the edge.
+                c.text("…", x, cy - th / 2.0, &f, theme.text_faint, None);
+                break;
+            }
+            c.text(
+                &p.name,
+                x,
+                cy - th / 2.0,
+                &f,
+                if i == last {
+                    theme.text
+                } else {
+                    theme.text_dim
+                },
+                None,
+            );
+            self.drawn_crumbs
+                .push((p.path.clone(), Rect::new(x - 3.0, r.y, tw + 6.0, r.h)));
+            x += tw;
+            if i != last {
+                let (sw, _) = c.measure(" › ", &small, None);
+                c.text(" › ", x, cy - th / 2.0, &small, theme.text_faint, None);
+                x += sw;
+            }
+        }
+        c.line(
+            r.x,
+            r.bottom() - 0.5,
+            r.right(),
+            r.bottom() - 0.5,
+            1.0,
+            theme.hairline,
+        );
+    }
+
+    /// The rename box, drawn over the tile it belongs to.
+    fn draw_edit_overlay(&self, c: &Canvas, theme: &Theme, layout: &nous_ui::files::Layout) {
+        let (text, caret, at) = match &self.editing {
+            Editing::Rename { index, edit } => {
+                let Some(t) = layout.tile_for(*index, self.files.scroll) else {
+                    return;
+                };
+                (
+                    edit.text().to_string(),
+                    edit.caret(),
+                    Rect::new(t.x + 4.0, t.bottom() - 32.0, t.w - 8.0, 26.0),
+                )
+            }
+            Editing::NewFolder { edit } => (
+                edit.text().to_string(),
+                edit.caret(),
+                Rect::new(layout.body.x, layout.body.y, 220.0, 28.0),
+            ),
+            Editing::None => return,
+        };
+        c.fill_rounded(at, Metrics::RADIUS_SMALL / 2.0, theme.backdrop_opaque);
+        c.stroke_rounded(at, Metrics::RADIUS_SMALL / 2.0, 1.5, theme.voice);
+        let f = theme.body_font();
+        c.clip_rect(at);
+        c.text(&text, at.x + 6.0, at.y + 5.0, &f, theme.text, None);
+        let (cw, _) = c.measure(&text[..caret.min(text.len())], &f, None);
+        c.line(
+            at.x + 6.0 + cw,
+            at.y + 5.0,
+            at.x + 6.0 + cw,
+            at.bottom() - 5.0,
+            1.5,
+            theme.voice,
+        );
+        c.restore();
+    }
+
+    fn draw_status(&self, c: &Canvas, theme: &Theme, r: Rect, link: &Link) {
+        c.fill_rect(r, theme.backdrop_opaque);
+        c.line(r.x, r.y + 0.5, r.right(), r.y + 0.5, 1.0, theme.hairline);
+        let small = theme.small_font();
+        let cy = r.y + r.h / 2.0;
+
+        // Left: what was said last, or what is here.
+        let left = match &self.status {
+            Some(s) => s.clone(),
+            None => {
+                let n = self.files.entries.len();
+                let total: u64 = self.files.entries.iter().map(|e| e.size).sum();
+                match self.files.selected_entry() {
+                    Some(e) if !e.is_dir => format!("{} — {}", e.name, manage::human_size(e.size)),
+                    Some(e) => format!("{} — folder", e.name),
+                    None => format!("{} items · {}", n, manage::human_size(total)),
+                }
+            }
+        };
+        let (_, lh) = c.measure(&left, &small, None);
+        c.text(
+            &left,
+            r.x + Metrics::PAD,
+            cy - lh / 2.0,
+            &small,
+            if self.status.is_some() {
+                theme.warn
+            } else {
+                theme.text_dim
+            },
+            Some(r.w * 0.65),
+        );
+
+        // Right: whether anything can actually be done.
+        let (note, colour) = if link.connected() {
+            ("daemon connected", theme.ok)
+        } else {
+            (
+                link.trouble.as_deref().unwrap_or("no daemon"),
+                theme.text_faint,
+            )
+        };
+        let (nw, nh) = c.measure(note, &small, None);
+        c.text(
+            note,
+            r.right() - nw - Metrics::PAD,
+            cy - nh / 2.0,
+            &small,
+            colour,
+            None,
+        );
+    }
+
+    fn draw_menu(&mut self, c: &Canvas, theme: &Theme, body: Rect) {
+        self.drawn_menu.clear();
+        let Some((mx, my, actions)) = self.menu.clone() else {
+            return;
+        };
+        let f = theme.body_font();
+        let small = theme.small_font();
+        let gaps = actions.iter().filter(|a| a.starts_group()).count() as f64;
+        let h = actions.len() as f64 * MENU_ROW_H + gaps * 7.0 + 10.0;
+        // Wide enough for its widest row, measured rather than assumed.
+        let width = actions
+            .iter()
+            .map(|a| {
+                let (lw, _) = c.measure(a.label(), &f, None);
+                let sw = if a.shortcut().is_empty() {
+                    0.0
+                } else {
+                    c.measure(a.shortcut(), &small, None).0 + MENU_GAP
+                };
+                lw + sw + 28.0
+            })
+            .fold(MENU_MIN_W, f64::max)
+            .min(body.w - 8.0);
+        // Flip rather than run off: a menu opened near the bottom right of the
+        // window must still be entirely on screen.
+        let x = if mx + width > body.right() {
+            (mx - width).max(body.x)
+        } else {
+            mx
+        };
+        let y = if my + h > body.bottom() {
+            (my - h).max(body.y)
+        } else {
+            my
+        };
+        let box_ = Rect::new(x, y, width, h);
+        c.fill_rounded(box_, Metrics::RADIUS_SMALL, theme.floating());
+        c.stroke_rounded(box_, Metrics::RADIUS_SMALL, 1.0, theme.hairline);
+
+        let mut ry = y + 5.0;
+        for (i, a) in actions.iter().enumerate() {
+            if a.starts_group() && i > 0 {
+                c.line(
+                    box_.x + 8.0,
+                    ry + 3.0,
+                    box_.right() - 8.0,
+                    ry + 3.0,
+                    1.0,
+                    theme.hairline,
+                );
+                ry += 7.0;
+            }
+            let row = Rect::new(box_.x + 4.0, ry, box_.w - 8.0, MENU_ROW_H);
+            if self.menu_hover == Some(self.drawn_menu.len()) {
+                c.fill_rounded(row, Metrics::RADIUS_SMALL / 2.0, theme.surface_active);
+            }
+            c.text(a.label(), row.x + 10.0, row.y + 5.0, &f, theme.text, None);
+            let sc = a.shortcut();
+            if !sc.is_empty() {
+                let (sw, _) = c.measure(sc, &small, None);
+                c.text(
+                    sc,
+                    row.right() - sw - 10.0,
+                    row.y + 7.0,
+                    &small,
+                    theme.text_faint,
+                    None,
+                );
+            }
+            self.drawn_menu.push((*a, row));
+            ry += MENU_ROW_H;
+        }
+    }
+}
+
+/// Whether this click follows close enough on the last to be a double-click.
+///
+/// Reuses the type-ahead clock, which is the last time anything was typed or
+/// clicked — good enough to tell a deliberate second click from one a minute
+/// later, and one fewer piece of state to keep honest.
+fn recent_click(last: &mut Option<Instant>, _index: usize) -> bool {
+    let quick = last
+        .map(|t| t.elapsed() < Duration::from_millis(450))
+        .unwrap_or(false);
+    *last = Some(Instant::now());
+    quick
+}
+
+/// List a directory: folders first, then files, both case-insensitively
+/// alphabetical. Dotfiles are configuration, not things you filed.
+pub fn read_folder(dir: &Path) -> Vec<Entry> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Entry> = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let meta = e.metadata().ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        out.push(Entry {
+            name,
+            path: e.path().to_string_lossy().to_string(),
+            is_dir,
+            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            thumb: None,
+            mark: None,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nous_ui::draw::Image;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("nous-pane-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn pane(dir: &Path) -> FilePane {
+        FilePane::new(dir.to_path_buf(), dir.to_path_buf())
+    }
+
+    fn key(sym: u64) -> Key {
+        Key {
+            sym,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
+    }
+
+    const BODY: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1180.0,
+        h: 676.0,
+    };
+
+    #[test]
+    fn a_folder_is_read_folders_first_then_alphabetically() {
+        let dir = scratch("listing");
+        for name in ["zebra.txt", "apple.txt", ".hidden", "Middle.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.join("zzz-folder")).unwrap();
+        std::fs::create_dir(dir.join("aaa-folder")).unwrap();
+
+        let e = read_folder(&dir);
+        let names: Vec<&str> = e.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "aaa-folder",
+                "zzz-folder",
+                "apple.txt",
+                "Middle.txt",
+                "zebra.txt"
+            ],
+            "a folder buried among files is a folder you cannot find"
+        );
+        assert!(
+            !names.contains(&".hidden"),
+            "dotfiles are configuration, not things you filed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_read_is_empty_rather_than_a_crash() {
+        assert!(read_folder(Path::new("/nonexistent/never/was")).is_empty());
+    }
+
+    #[test]
+    fn going_into_a_folder_and_back_out_lands_where_you_left() {
+        // Coming up should put the eye on the folder just left, not on
+        // whatever happens to sort first.
+        let dir = scratch("updown");
+        for n in ["aaa", "target", "zzz"] {
+            std::fs::create_dir(dir.join(n)).unwrap();
+        }
+        let mut p = pane(&dir);
+        p.files.selected = p
+            .files
+            .entries
+            .iter()
+            .position(|e| e.name == "target")
+            .unwrap();
+        p.open_selected(&mut Link::new());
+        assert_eq!(p.here(), dir.join("target"));
+
+        p.up();
+        assert_eq!(p.here(), dir);
+        assert_eq!(
+            p.files.selected_entry().map(|e| e.name.as_str()),
+            Some("target"),
+            "came back out to the wrong file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_selection_on_the_same_file() {
+        // A file appearing earlier in the sort must not drag the selection to
+        // a different file under the hand about to act on it.
+        let dir = scratch("reload");
+        for n in ["b.txt", "c.txt"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut p = pane(&dir);
+        p.files.selected = 1; // c.txt
+        assert_eq!(p.files.selected_entry().unwrap().name, "c.txt");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        p.reload();
+        assert_eq!(
+            p.files.selected_entry().unwrap().name,
+            "c.txt",
+            "the selection slid onto another file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_letters_jumps_to_a_file_by_name() {
+        let dir = scratch("typeahead");
+        for n in ["alpha.txt", "beta.txt", "gamma.txt"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut p = pane(&dir);
+        p.text("g");
+        assert_eq!(p.files.selected_entry().unwrap().name, "gamma.txt");
+        p.text("b");
+        // "gb" matches nothing, so the selection stays rather than jumping
+        // somewhere arbitrary.
+        assert_eq!(p.files.selected_entry().unwrap().name, "gamma.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typed_letters_go_into_a_rename_instead_of_hunting_for_files() {
+        let dir = scratch("rename-type");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        p.act(Action::Rename, &mut Link::new());
+        p.text("hello");
+        match &p.editing {
+            Editing::Rename { edit, .. } => assert_eq!(edit.text(), "hello"),
+            _ => panic!("the rename was abandoned by typing into it"),
+        }
+    }
+
+    #[test]
+    fn escape_abandons_a_rename_and_changes_nothing() {
+        let dir = scratch("rename-escape");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        p.act(Action::Rename, &mut link);
+        p.text("something-else");
+        p.key(key(ffi::XK_Escape), BODY, &mut link);
+        assert!(matches!(p.editing, Editing::None));
+        assert!(dir.join("a.txt").exists(), "the file was renamed anyway");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_menu_opens_where_it_was_asked_for_and_stays_on_screen() {
+        let dir = scratch("menu");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        // Right-click in the far bottom-right corner: the menu must flip
+        // rather than draw off the edge where nothing can reach it.
+        p.click(BODY.right() - 6.0, BODY.bottom() - 6.0, 3, BODY, &mut link);
+        assert!(p.menu.is_some(), "right-click opened no menu");
+        let img = Image::new(1180, 720).unwrap();
+        p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+        for (a, r) in &p.drawn_menu {
+            assert!(
+                r.right() <= BODY.right() + 0.5,
+                "{:?} runs off the right",
+                a
+            );
+            assert!(
+                r.bottom() <= BODY.bottom() + 0.5,
+                "{:?} runs off the bottom",
+                a
+            );
+            assert!(
+                r.x >= BODY.x - 0.5 && r.y >= BODY.y - 0.5,
+                "{:?} runs off the top-left",
+                a
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_menu_hides_what_is_under_it() {
+        // Drawn in the surface tint the menu was a few per cent of white laid
+        // over the grid, and the file names read straight through it.
+        //
+        // The property is uniformity: the menu's ground must be one colour
+        // wherever it is sampled, whatever happens to be behind that spot.
+        // Comparing against a computed colour instead would fail on a
+        // one-unit rounding difference from eight-bit compositing, which is
+        // not the bug.
+        for theme in [Theme::dark(), Theme::light()] {
+            let dir = scratch("menu-opaque");
+            for i in 0..14 {
+                std::fs::write(dir.join(format!("a-longish-file-name-{i}.txt")), b"x").unwrap();
+            }
+            let mut p = pane(&dir);
+            let mut link = Link::new();
+            let grid = p.grid_rect(BODY);
+            let t =
+                nous_ui::files::Layout::compute_bare(&p.files, grid.w, grid.h).tile_rect(0, 0.0);
+            let (cx, cy) = (grid.x + t.x + 20.0, grid.y + t.y + 20.0);
+
+            let render = |p: &mut FilePane, link: &Link| {
+                let img = Image::new(1180, 720).unwrap();
+                p.render(&img.canvas(), &theme, BODY, link);
+                img
+            };
+
+            // Where the menu will be, before there is one.
+            p.click(cx, cy, 3, BODY, &mut link);
+            let img = render(&mut p, &link);
+            let spots: Vec<(i32, i32)> = p
+                .drawn_menu
+                .iter()
+                .map(|(_, r)| ((r.right() - 3.0) as i32, (r.y + r.h / 2.0) as i32))
+                .collect();
+            assert!(spots.len() > 3, "no menu was drawn");
+
+            let under: Vec<_> = spots.iter().map(|(x, y)| img.pixel(*x, *y)).collect();
+            assert!(
+                under.iter().all(|c| *c == under[0]),
+                "the menu is see-through: its ground varies with what is behind it — {under:?}"
+            );
+
+            // And those same points are not all alike without a menu over
+            // them, or uniformity would be no achievement.
+            p.menu = None;
+            let bare = render(&mut p, &link);
+            let showing: Vec<_> = spots.iter().map(|(x, y)| bare.pixel(*x, *y)).collect();
+            assert!(
+                showing.iter().any(|c| *c != showing[0]),
+                "nothing varies behind the menu, so this proves nothing"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn no_menu_label_runs_into_its_shortcut() {
+        // "New Folder" and "Ctrl+Shift+N" are the widest pair, and at a fixed
+        // width they overlapped — which is precisely the pair a reader has to
+        // tell apart to learn the shortcut.
+        let dir = scratch("menu-width");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        p.click(300.0, 200.0, 3, BODY, &mut link);
+        let img = Image::new(1180, 720).unwrap();
+        let c = img.canvas();
+        p.render(&c, &Theme::dark(), BODY, &link);
+
+        let f = Theme::dark().body_font();
+        let small = Theme::dark().small_font();
+        for (a, r) in &p.drawn_menu {
+            if a.shortcut().is_empty() {
+                continue;
+            }
+            let label_end = r.x + 10.0 + c.measure(a.label(), &f, None).0;
+            let shortcut_start = r.right() - 10.0 - c.measure(a.shortcut(), &small, None).0;
+            assert!(
+                shortcut_start > label_end,
+                "{} overlaps {} by {:.0}px",
+                a.label(),
+                a.shortcut(),
+                label_end - shortcut_start
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_click_away_from_an_open_menu_dismisses_it_without_acting() {
+        let dir = scratch("menu-dismiss");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        p.click(300.0, 300.0, 3, BODY, &mut link);
+        let img = Image::new(1180, 720).unwrap();
+        p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+        assert!(p.menu.is_some());
+        p.click(20.0, BODY.bottom() - 60.0, 1, BODY, &mut link);
+        assert!(p.menu.is_none(), "the menu stayed open");
+        assert!(
+            dir.join("a.txt").exists(),
+            "dismissing a menu did something"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_single_click_selects_and_does_not_open() {
+        // A single click that opened whatever was already chosen turned every
+        // attempt to re-select into an accidental launch.
+        let dir = scratch("single-click");
+        std::fs::create_dir(dir.join("inner")).unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        let grid = p.grid_rect(BODY);
+        let layout = nous_ui::files::Layout::compute(&p.files, grid.w, grid.h);
+        let t = layout.tile_rect(0, 0.0);
+        let (x, y) = (grid.x + t.x + t.w / 2.0, grid.y + t.y + t.h / 2.0);
+        p.click(x, y, 1, BODY, &mut link);
+        assert_eq!(p.files.selected, 0);
+        assert_eq!(p.here(), dir, "a single click walked into the folder");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_sidebar_gives_way_before_it_crushes_the_grid() {
+        let dir = scratch("narrow");
+        let p = pane(&dir);
+        let wide = p.sidebar_rect(Rect::new(0.0, 0.0, 1100.0, 600.0));
+        assert!(wide.w > 0.0, "no sidebar in 1100px");
+        let narrow = p.sidebar_rect(Rect::new(0.0, 0.0, 500.0, 600.0));
+        assert_eq!(narrow.w, 0.0, "the grid was crushed to keep a sidebar");
+        assert!(p.grid_rect(Rect::new(0.0, 0.0, 500.0, 600.0)).w > 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_grid_does_not_bring_a_second_status_bar() {
+        // The pane has one, and it says more: what went wrong, and whether the
+        // daemon is even there. Two bars stacked saying nearly the same thing
+        // is what a view dropped into a frame looks like when the frame was
+        // never told the view brought its own furniture.
+        let dir = scratch("one-status");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let p = pane(&dir);
+        let grid = p.grid_rect(BODY);
+        let bare = nous_ui::files::Layout::compute_bare(&p.files, grid.w, grid.h);
+        assert_eq!(bare.footer.h, 0.0, "the grid still reserves a footer");
+        // And the space is given to the files rather than left as a gap.
+        let with = nous_ui::files::Layout::compute(&p.files, grid.w, grid.h);
+        assert!(bare.body.h > with.body.h, "the footer's room went nowhere");
+        assert!(
+            (bare.body.bottom() - grid.h).abs() < 0.001,
+            "the grid stops {}px short of the bottom",
+            grid.h - bare.body.bottom()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_whole_pane_draws_in_both_themes() {
+        let dir = scratch("draw");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hello").unwrap();
+        for theme in [Theme::dark(), Theme::light()] {
+            let mut p = pane(&dir);
+            let link = Link::new();
+            let img = Image::new(1180, 720).unwrap();
+            p.render(&img.canvas(), &theme, BODY, &link);
+            assert!(
+                img.variety(p.sidebar_rect(BODY)) > 3,
+                "the sidebar is blank"
+            );
+            assert!(img.variety(p.grid_rect(BODY)) > 4, "the grid is blank");
+            let crumbs = Rect::new(0.0, 0.0, BODY.w, CRUMBS_H);
+            assert!(img.variety(crumbs) > 3, "no path bar");
+            let status = Rect::new(0.0, BODY.bottom() - STATUS_H, BODY.w, STATUS_H);
+            assert!(img.variety(status) > 3, "no status bar");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_a_place_goes_there() {
+        let dir = scratch("places-click");
+        std::fs::create_dir(dir.join("Music")).unwrap();
+        let mut p = pane(&dir);
+        let link = Link::new();
+        let img = Image::new(1180, 720).unwrap();
+        p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+        let (path, r) = p
+            .drawn_places
+            .iter()
+            .find(|(path, _)| path.ends_with("Music"))
+            .cloned()
+            .expect("a Music shortcut was drawn");
+        let mut link = Link::new();
+        p.click(r.x + 4.0, r.y + 4.0, 1, BODY, &mut link);
+        assert_eq!(p.here(), path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_a_crumb_walks_back_up_the_path() {
+        let dir = scratch("crumb-click");
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        let mut p = pane(&dir);
+        p.go(dir.join("a/b"));
+        let link = Link::new();
+        let img = Image::new(1180, 720).unwrap();
+        p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+        let (path, r) = p
+            .drawn_crumbs
+            .iter()
+            .find(|(path, _)| path.ends_with("a"))
+            .cloned()
+            .expect("an 'a' crumb was drawn");
+        let mut link = Link::new();
+        p.click(r.x + 2.0, r.y + r.h / 2.0, 1, BODY, &mut link);
+        assert_eq!(p.here(), path, "clicking the path went nowhere");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_no_daemon_nothing_is_changed_and_the_reason_is_shown() {
+        // Every change goes through the broker. With no broker there is no
+        // change — and no silent failure either.
+        let dir = scratch("no-daemon");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        p.act(Action::Trash, &mut link);
+        assert!(
+            dir.join("a.txt").exists(),
+            "a file was deleted without the daemon"
+        );
+        assert!(p.status.is_some(), "it failed silently");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
