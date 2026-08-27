@@ -399,6 +399,56 @@ impl Pictures {
     }
 }
 
+/// How much a cell grows when the pointer is on it, and the least it may be.
+///
+/// A small cell needs to become useful, not merely bigger: a forty-pixel block
+/// grown by half is still forty-eight pixels of nothing. So the rule is a
+/// floor — whatever it was, it comes up to something a name and a picture fit
+/// in — and cells already that big are left alone, because a tile jumping
+/// under the pointer for no reason is worse than one that does not move.
+const LENS_MIN_W: f64 = 210.0;
+const LENS_MIN_H: f64 = 150.0;
+
+/// Where the pointer is, and the cell it has grown.
+pub struct Lens {
+    pub index: usize,
+    pub rect: Rect,
+}
+
+/// Work out the enlarged rectangle for the cell under `(x, y)`, if it needs
+/// one.
+///
+/// Kept inside the field's own area: a lens that runs off the edge shows half
+/// a picture and puts the other half where nothing can reach it.
+pub fn lens_at(field: &Field, area: Rect, x: f64, y: f64) -> Option<Lens> {
+    let cell = field.cells().find(|c| c.rect.contains(x, y))?;
+    if cell.rect.w >= LENS_MIN_W && cell.rect.h >= LENS_MIN_H {
+        return None;
+    }
+    let w = cell.rect.w.max(LENS_MIN_W).min(area.w);
+    let h = cell.rect.h.max(LENS_MIN_H).min(area.h);
+    // Grown about its own middle, so the thing under the pointer stays under
+    // the pointer.
+    let cx = cell.rect.x + cell.rect.w / 2.0;
+    let cy = cell.rect.y + cell.rect.h / 2.0;
+    let rect = Rect::new(
+        (cx - w / 2.0).clamp(area.x, (area.right() - w).max(area.x)),
+        (cy - h / 2.0).clamp(area.y, (area.bottom() - h).max(area.y)),
+        w,
+        h,
+    );
+    Some(Lens {
+        index: cell.index,
+        rect,
+    })
+}
+
+/// Everything one frame of the field needs.
+///
+/// Eight arguments is too many to read at a call site, and grouping them says
+/// something true: these are all *this frame's* answer to "what is in the
+/// folder, what is chosen, what is the pointer on".
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     c: &Canvas,
     field: &Field,
@@ -407,6 +457,7 @@ pub fn render(
     theme: &Theme,
     area: Rect,
     pictures: &mut Pictures,
+    lens: Option<&Lens>,
 ) {
     c.fill_rect(area, theme.backdrop_opaque);
     let small = theme.small_font();
@@ -538,6 +589,105 @@ pub fn render(
                 c.stroke_rounded(r, Metrics::RADIUS_SMALL / 2.0, 1.75, theme.voice);
             }
         }
+    }
+
+    // The pointer's cell, drawn last and larger, over whatever it covers.
+    if let Some(l) = lens {
+        if let Some(e) = entries.get(l.index) {
+            draw_lens(c, e, l, theme, pictures);
+        }
+    }
+}
+
+/// One cell, enlarged under the pointer.
+///
+/// Everything the small version could not fit: the whole name, the picture at
+/// a size worth looking at, the kind and how big it is. A shadow under it, so
+/// it reads as lifted off the field rather than as part of it.
+fn draw_lens(c: &Canvas, e: &Entry, l: &Lens, theme: &Theme, pictures: &mut Pictures) {
+    let r = l.rect;
+    let radius = Metrics::RADIUS_SMALL;
+    // A soft edge, drawn as a few widening rounded strokes rather than a real
+    // blur: cheap, and enough to lift the card off what is behind it.
+    for i in (1..=4).rev() {
+        let k = i as f64;
+        c.fill_rounded(
+            r.inset(-k * 1.5),
+            radius + k * 1.5,
+            Rgba::rgba(0, 0, 0, 0.055),
+        );
+    }
+    c.fill_rounded(r, radius, theme.floating());
+
+    let hue = family_hue(&if e.is_dir {
+        "Folders".to_string()
+    } else {
+        family(&e.kind())
+    });
+    let picture = e.thumb.as_ref().and_then(|p| pictures.get(p)).is_some();
+    if picture {
+        if let Some(path) = e.thumb.clone() {
+            if let Some(pic) = pictures.get(&path) {
+                let into = Rect::new(r.x, r.y, r.w, r.h - 46.0);
+                c.picture_rounded(pic, into, radius);
+            }
+        }
+    } else {
+        c.fill_rounded(
+            Rect::new(r.x, r.y, r.w, r.h - 46.0),
+            radius,
+            hue.with_alpha(0.22),
+        );
+    }
+
+    // The caption on its own ground along the bottom, always, so it reads the
+    // same whether or not there is a picture behind it.
+    let strip = Rect::new(r.x, r.bottom() - 46.0, r.w, 46.0);
+    c.fill_rect(strip, theme.floating());
+    c.clip_rect(strip);
+    c.text(
+        &e.name,
+        strip.x + 10.0,
+        strip.y + 5.0,
+        &theme.body_font(),
+        theme.text,
+        Some(strip.w - 20.0),
+    );
+    let under = match &e.mark {
+        Some(m) => m.note.clone(),
+        None if e.is_dir => "folder".to_string(),
+        None => format!("{} · {}", e.kind(), human_size(e.size)),
+    };
+    c.text(
+        &under,
+        strip.x + 10.0,
+        strip.y + 25.0,
+        &theme.small_font(),
+        match &e.mark {
+            Some(m) => theme.risk(m.risk),
+            None => theme.text_faint,
+        },
+        Some(strip.w - 20.0),
+    );
+    c.restore();
+    c.stroke_rounded(r, radius, 1.0, theme.hairline);
+}
+
+/// A size the way a person says it.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut n = bytes as f64;
+    let mut u = 0;
+    while n >= 1024.0 && u < UNITS.len() - 1 {
+        n /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} B")
+    } else if n < 10.0 {
+        format!("{n:.1} {}", UNITS[u])
+    } else {
+        format!("{n:.0} {}", UNITS[u])
     }
 }
 
@@ -934,6 +1084,7 @@ mod tests {
                 &theme,
                 AREA,
                 &mut Pictures::default(),
+                None,
             );
             assert!(img.variety(AREA) > 6, "the field is blank");
 
@@ -975,6 +1126,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
         let at = |i: usize| {
             let c = f.cell_of(i).unwrap();
@@ -1011,6 +1163,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
 
         // The recent one is named.
@@ -1086,6 +1239,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
 
         let at = |i: usize| {
@@ -1131,6 +1285,138 @@ mod tests {
     }
 
     #[test]
+    fn a_small_cell_grows_enough_to_be_worth_looking_at() {
+        // A forty-pixel block grown by half is forty-eight pixels of nothing.
+        // The rule is a floor, not a factor.
+        let entries: Vec<Entry> = (0..300)
+            .map(|i| Entry {
+                modified: NOW - (300 + i as u64) * 86400,
+                ..entry(&format!("f{i:03}.jpg"), 40_000)
+            })
+            .collect();
+        let f = Field::arrange(&entries, AREA, NOW);
+        let small = f
+            .cells()
+            .find(|c| !c.readable() && c.rect.w > 4.0)
+            .expect("three hundred files leave small cells");
+        let l = lens_at(&f, AREA, small.rect.x + 2.0, small.rect.y + 2.0)
+            .expect("a small cell gets a lens");
+        assert_eq!(l.index, small.index, "the lens grew the wrong cell");
+        assert!(
+            l.rect.w >= LENS_MIN_W && l.rect.h >= LENS_MIN_H,
+            "{:?}",
+            l.rect
+        );
+        // Enough for a name, which is the point of it.
+        assert!(
+            Cell {
+                index: 0,
+                rect: l.rect,
+                weight: 0.0
+            }
+            .readable(),
+            "the enlarged cell still cannot show a name"
+        );
+    }
+
+    #[test]
+    fn a_cell_that_is_already_big_does_not_jump_under_the_pointer() {
+        // A tile that moves for no reason is worse than one that never moves.
+        let entries = vec![entry("one.jpg", 4_000_000)];
+        let f = Field::arrange(&entries, AREA, NOW);
+        let c = f.cell_of(0).unwrap().rect;
+        assert!(
+            lens_at(&f, AREA, c.x + c.w / 2.0, c.y + c.h / 2.0).is_none(),
+            "enlarged a cell that already filled the folder"
+        );
+    }
+
+    #[test]
+    fn the_lens_stays_inside_the_folder() {
+        // One that runs off the edge shows half a picture and puts the other
+        // half where nothing can reach it.
+        let entries: Vec<Entry> = (0..200)
+            .map(|i| Entry {
+                modified: NOW - (300 + i as u64) * 86400,
+                ..entry(&format!("f{i:03}.jpg"), 40_000)
+            })
+            .collect();
+        let f = Field::arrange(&entries, AREA, NOW);
+        let mut checked = 0;
+        for cell in f.cells() {
+            if cell.rect.w < 4.0 || cell.rect.h < 4.0 {
+                continue;
+            }
+            if let Some(l) = lens_at(&f, AREA, cell.rect.x + 1.0, cell.rect.y + 1.0) {
+                assert!(
+                    l.rect.x >= AREA.x - 0.01
+                        && l.rect.y >= AREA.y - 0.01
+                        && l.rect.right() <= AREA.right() + 0.01
+                        && l.rect.bottom() <= AREA.bottom() + 0.01,
+                    "the lens on {} escapes: {:?}",
+                    entries[l.index].name,
+                    l.rect
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} lenses were checked");
+    }
+
+    #[test]
+    fn the_lens_is_drawn_over_what_it_covers() {
+        let theme = Theme::dark();
+        let entries: Vec<Entry> = (0..300)
+            .map(|i| Entry {
+                modified: NOW - (300 + i as u64) * 86400,
+                ..entry(&format!("f{i:03}.jpg"), 40_000)
+            })
+            .collect();
+        let f = Field::arrange(&entries, AREA, NOW);
+        let small = f
+            .cells()
+            .find(|c| !c.readable() && c.rect.w > 4.0)
+            .expect("three hundred files leave small cells");
+        let l = lens_at(&f, AREA, small.rect.x + 2.0, small.rect.y + 2.0)
+            .expect("a small cell gets a lens");
+
+        let without = Image::new(900, 600).unwrap();
+        render(
+            &without.canvas(),
+            &f,
+            &entries,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+            None,
+        );
+        let with = Image::new(900, 600).unwrap();
+        render(
+            &with.canvas(),
+            &f,
+            &entries,
+            &[],
+            &theme,
+            AREA,
+            &mut Pictures::default(),
+            Some(&l),
+        );
+        let mid = (
+            (l.rect.x + l.rect.w / 2.0) as i32,
+            (l.rect.y + l.rect.h / 2.0) as i32,
+        );
+        assert_ne!(
+            without.pixel(mid.0, mid.1),
+            with.pixel(mid.0, mid.1),
+            "the lens drew nothing"
+        );
+        // And it can show a name, which the cell under it could not.
+        let band = Rect::new(l.rect.x, l.rect.bottom() - 46.0, l.rect.w, 46.0);
+        assert!(with.variety(band) > 4, "the enlarged cell has no caption");
+    }
+
+    #[test]
     fn a_file_with_a_preview_shows_it_and_its_name_stays_readable() {
         // A photograph behind a caption is the whole point, and a caption on
         // a photograph is unreadable without a ground of its own — sometimes
@@ -1160,6 +1446,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
         let with = Image::new(900, 600).unwrap();
         render(
@@ -1170,6 +1457,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
 
         let cell = f.cell_of(0).unwrap().rect;
@@ -1237,6 +1525,7 @@ mod tests {
                     &theme,
                     AREA,
                     &mut Pictures::default(),
+                    None,
                 );
                 img
             };
@@ -1277,6 +1566,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
         let plain = Image::new(900, 600).unwrap();
         render(
@@ -1287,6 +1577,7 @@ mod tests {
             &theme,
             AREA,
             &mut Pictures::default(),
+            None,
         );
 
         for i in [1usize, 3] {

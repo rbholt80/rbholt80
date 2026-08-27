@@ -356,32 +356,50 @@ fn thumbnail(step: &Step, ctx: &ExecCtx) -> Result<Effect, String> {
 
     let src = path.to_string_lossy().to_string();
     let dst = out.to_string_lossy().to_string();
-    let at_s = format!("{}", at);
-    let r = run(
-        "ffmpeg",
-        &[
-            "-nostdin",
-            "-y",
-            "-ss",
-            &at_s,
-            "-i",
-            &src,
-            "-frames:v",
-            "1",
-            // Bounded on both sides: a very tall picture scaled by width alone
-            // becomes a strip thousands of pixels long, and the cache is for
-            // thumbnails.
-            "-vf",
-            "scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease",
-            &dst,
-        ],
-        Duration::from_secs(45),
-    )?;
+    let args = thumb_args(&src, &dst, at);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let r = run("ffmpeg", &borrowed, Duration::from_secs(45))?;
     r.require("ffmpeg")?;
     Ok(Effect::read_only(
         json_obj([("thumbnail", dst.into()), ("cached", false.into())]),
         format!("made a thumbnail of {}", path.display()),
     ))
+}
+
+/// The ffmpeg invocation that makes one thumbnail.
+///
+/// Separated out because the interesting decision in it is invisible at the
+/// call site: **a still image must not be seeked into**. Seeking three seconds
+/// into a photograph lands past the end of a one-frame file and ffmpeg writes
+/// nothing, so every photograph in the cache came back empty while every video
+/// worked. Which looks, from the outside, like previews that sometimes work.
+pub fn thumb_args(src: &str, dst: &str, at: f64) -> Vec<String> {
+    let mut a: Vec<String> = vec!["-nostdin".into(), "-y".into()];
+    if !is_still(src) {
+        // Only a thing with a timeline can be seeked. Three seconds in, so a
+        // film does not get its black opening frame.
+        a.push("-ss".into());
+        a.push(format!("{at}"));
+    }
+    a.push("-i".into());
+    a.push(src.to_string());
+    a.push("-frames:v".into());
+    a.push("1".into());
+    // Bounded on both sides: scaling by width alone turns a very tall picture
+    // into a strip thousands of pixels long, and this is a thumbnail cache.
+    a.push("-vf".into());
+    a.push("scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease".into());
+    a.push(dst.to_string());
+    a
+}
+
+/// Whether this is a single picture rather than something with a timeline.
+fn is_still(path: &str) -> bool {
+    const STILLS: [&str; 11] = [
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "avif",
+    ];
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    STILLS.contains(&ext.as_str())
 }
 
 /// A filename-safe, stable key for a path. FNV-1a: short, fast, and this is a
@@ -1453,5 +1471,61 @@ mod tests {
         assert_eq!(a, stable_key(Path::new("/m/a.mp4")));
         assert_ne!(a, stable_key(Path::new("/m/b.mp4")));
         assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn a_photograph_is_not_seeked_into() {
+        // Three seconds into a one-frame file is past the end, and ffmpeg
+        // writes nothing. Every photograph in the cache came back empty while
+        // every video worked — which from the outside is "previews sometimes
+        // work".
+        let a = thumb_args("/p/holiday.jpg", "/c/x.png", 3.0);
+        assert!(
+            !a.contains(&"-ss".to_string()),
+            "seeked into a still: {a:?}"
+        );
+        for still in ["/p/a.JPEG", "/p/b.png", "/p/c.HEIC", "/p/d.webp"] {
+            let a = thumb_args(still, "/c/x.png", 3.0);
+            assert!(!a.contains(&"-ss".to_string()), "{still} was seeked into");
+        }
+    }
+
+    #[test]
+    fn a_video_is_seeked_past_its_opening_frame() {
+        // Which is usually black, and a wall of black thumbnails is no more
+        // use than no thumbnails.
+        let a = thumb_args("/v/film.mkv", "/c/x.png", 3.0);
+        let at = a
+            .iter()
+            .position(|x| x == "-ss")
+            .expect("a video is seeked");
+        assert_eq!(a[at + 1], "3");
+        // And the seek comes before the input, which is what makes it fast.
+        let input = a.iter().position(|x| x == "-i").unwrap();
+        assert!(
+            at < input,
+            "the seek is after the input, so it decodes the lot"
+        );
+    }
+
+    #[test]
+    fn every_thumbnail_is_one_frame_and_bounded_in_both_directions() {
+        for f in ["/p/a.jpg", "/v/b.mp4"] {
+            let a = thumb_args(f, "/c/x.png", 3.0);
+            assert_eq!(a.last().unwrap(), "/c/x.png", "the output must come last");
+            let frames = a.iter().position(|x| x == "-frames:v").unwrap();
+            assert_eq!(a[frames + 1], "1");
+            let vf = a.iter().position(|x| x == "-vf").unwrap();
+            assert!(
+                a[vf + 1].contains("min(480,ih)"),
+                "height is unbounded: {}",
+                a[vf + 1]
+            );
+            assert!(
+                a[vf + 1].contains("min(480,iw)"),
+                "width is unbounded: {}",
+                a[vf + 1]
+            );
+        }
     }
 }

@@ -113,6 +113,7 @@ fn main() {
             &theme,
             area,
             &mut nous_ui::field::Pictures::default(),
+            None,
         );
         let path = format!("{out}/field-{suffix}.png");
         match img.write_png(&path) {

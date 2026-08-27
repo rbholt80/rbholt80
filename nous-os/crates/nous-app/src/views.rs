@@ -279,6 +279,18 @@ impl App {
         }
     }
 
+    /// Place the pointer at "x,y", as a mouse would. Never reachable from the
+    /// keyboard or the mouse.
+    pub fn demo_point(&mut self, at: &str, w: f64, h: f64) {
+        let mut it = at.split(',').filter_map(|n| n.trim().parse::<f64>().ok());
+        if let (Some(x), Some(y)) = (it.next(), it.next()) {
+            // Drawn once first, so the pane knows where its grid is.
+            let probe = nous_ui::draw::Image::new(1, 1).expect("probe");
+            self.render(&probe.canvas(), &Theme::dark(), w, h);
+            self.hover(x, y, w, h);
+        }
+    }
+
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
             let inner = crate::link::report::value(&report);

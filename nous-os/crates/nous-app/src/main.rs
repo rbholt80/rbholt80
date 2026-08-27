@@ -19,6 +19,7 @@ mod history;
 mod link;
 mod manage;
 mod places;
+mod viewer;
 mod views;
 
 use nous_ui::draw::Image;
@@ -112,6 +113,13 @@ fn main() {
     }
     // Choose several files, so a multiple selection can be looked at without
     // a pointer to make one with.
+    // Put the pointer somewhere, so the hover lens can be looked at without a
+    // pointer to hover with.
+    if let Some(i) = args.iter().position(|a| a == "--point") {
+        if let Some(at) = args.get(i + 1) {
+            app.demo_point(at, w, h);
+        }
+    }
     if let Some(i) = args.iter().position(|a| a == "--choose") {
         if let Some(list) = args.get(i + 1) {
             app.demo_choose(list);

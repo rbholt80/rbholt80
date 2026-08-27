@@ -14,6 +14,7 @@ use crate::curated;
 use crate::link::Link;
 use crate::manage::{self, Action, Clipboard};
 use crate::places::{crumbs, places, History};
+use crate::viewer::{self, Viewer};
 use nous_core::json::Json;
 use nous_ui::draw::{Canvas, Rect};
 use nous_ui::ffi;
@@ -80,6 +81,14 @@ pub struct FilePane {
     pub mode: Mode,
     /// Previews, kept between frames so a photograph is decoded once.
     pictures: nous_ui::field::Pictures,
+    /// Where the pointer is, in the pane's own coordinates. `None` when it is
+    /// somewhere else entirely.
+    pointer: Option<(f64, f64)>,
+    /// The grid's rectangle as of the last frame, so the pointer can be
+    /// tested against the arrangement that is actually on screen.
+    last_grid: Rect,
+    /// Set while a file is open. Everything the folder can do still works.
+    pub viewing: Option<Viewer>,
     pub history: History,
     pub home: PathBuf,
     pub clipboard: Option<Clipboard>,
@@ -114,6 +123,9 @@ impl FilePane {
             files: Files::new("", Vec::new()),
             mode: Mode::Field,
             pictures: nous_ui::field::Pictures::default(),
+            pointer: None,
+            last_grid: Rect::new(0.0, 0.0, 0.0, 0.0),
+            viewing: None,
             history: History::new(start.clone()),
             home,
             clipboard: None,
@@ -335,8 +347,12 @@ impl FilePane {
 
     // --- doing things -----------------------------------------------------
 
-    /// Open what is selected: into a folder, or out to whatever program the
-    /// desktop already uses for that kind of file.
+    /// Open what is selected: into a folder, or into the viewer.
+    ///
+    /// Staying here rather than handing off, because handing off loses the
+    /// window and everything you knew when you left it. Looking through a
+    /// folder of photographs should not mean opening one, closing it, opening
+    /// the next.
     pub fn open_selected(&mut self, link: &mut Link) {
         let Some(e) = self.files.selected_entry().cloned() else {
             return;
@@ -345,12 +361,73 @@ impl FilePane {
             self.go(PathBuf::from(&e.path));
             return;
         }
+        // Something with a preview can be looked at here. Everything else
+        // goes to whatever the desktop already uses for it, because a viewer
+        // that shows a spreadsheet badly is worse than the spreadsheet
+        // program.
+        if e.thumb.is_some() {
+            self.viewing = Some(Viewer::open(self.files.selected));
+            self.status = None;
+        } else {
+            self.hand_off(link);
+        }
+    }
+
+    /// Hand the selected file to whatever the desktop uses for it.
+    pub fn hand_off(&mut self, link: &mut Link) {
+        let Some(e) = self.files.selected_entry().cloned() else {
+            return;
+        };
         let job = manage::open(Path::new(&e.path));
         match link.invoke(job.cap, job.args, &job.why) {
-            // Opening does not change the folder, so nothing is reloaded.
+            // Opening changes nothing here, so nothing is reloaded.
             Ok(_) => self.status = Some(format!("opened {}", e.name)),
             Err(err) => self.status = Some(err),
         }
+    }
+
+    /// Keys while a file is open. `false` means the pane did not want it.
+    fn viewer_key(&mut self, k: Key, link: &mut Link) -> bool {
+        let Some(v) = &mut self.viewing else {
+            return false;
+        };
+        match k.sym {
+            s if s == ffi::XK_Escape => self.viewing = None,
+            s if s == ffi::XK_Right || s == ffi::XK_Down => {
+                let order = viewer::viewable(&self.files.entries);
+                if let Some(next) = viewer::step(&order, v.index, 1) {
+                    v.go_to(next);
+                    self.files.choose_only(next);
+                }
+            }
+            s if s == ffi::XK_Left || s == ffi::XK_Up => {
+                let order = viewer::viewable(&self.files.entries);
+                if let Some(prev) = viewer::step(&order, v.index, -1) {
+                    v.go_to(prev);
+                    self.files.choose_only(prev);
+                }
+            }
+            s if s == '+' as u64 || s == '=' as u64 => v.zoom_by(1.4),
+            s if s == '-' as u64 || s == '_' as u64 => v.zoom_by(1.0 / 1.4),
+            s if s == '0' as u64 => v.reset_zoom(),
+            // The things the folder can do, still reachable from in here.
+            s if s == 'o' as u64 => self.hand_off(link),
+            s if s == ffi::XK_Delete => {
+                // Trashing re-reads the folder, so every index after it means
+                // something different. Closing is the honest answer: showing
+                // whatever now sits at the old position would be showing a
+                // file nobody asked for.
+                self.viewing = None;
+                self.act(Action::Trash, link);
+            }
+            0xffbf => {
+                // F2: rename, which needs the folder, so this steps back out.
+                self.viewing = None;
+                self.act(Action::Rename, link);
+            }
+            _ => return true,
+        }
+        true
     }
 
     pub fn act(&mut self, a: Action, link: &mut Link) {
@@ -544,10 +621,13 @@ impl FilePane {
     /// True when the pane wants Escape for itself — closing a menu or
     /// abandoning a rename, rather than closing the window.
     pub fn wants_escape(&self) -> bool {
-        self.menu.is_some() || !matches!(self.editing, Editing::None)
+        self.viewing.is_some() || self.menu.is_some() || !matches!(self.editing, Editing::None)
     }
 
     pub fn key(&mut self, k: Key, body: Rect, link: &mut Link) {
+        if self.viewing.is_some() && self.viewer_key(k, link) {
+            return;
+        }
         // A rename in progress swallows everything: the letters belong to it,
         // and so does Escape.
         if !matches!(self.editing, Editing::None) {
@@ -805,12 +885,38 @@ impl FilePane {
     /// indifferent to it, and saying so is what keeps a moving mouse from
     /// costing a repaint per motion event.
     pub fn hover(&mut self, x: f64, y: f64) -> bool {
-        if self.menu.is_none() {
+        if self.menu.is_some() {
+            let was = self.menu_hover;
+            self.menu_hover = self.drawn_menu.iter().position(|(_, r)| r.contains(x, y));
+            return was != self.menu_hover;
+        }
+        // In the field, the pointer decides which cell is enlarged, so a move
+        // is worth a frame — but only when it crosses from one cell to
+        // another, not for every pixel of travel within one.
+        if self.mode != Mode::Field {
+            self.pointer = None;
             return false;
         }
-        let was = self.menu_hover;
-        self.menu_hover = self.drawn_menu.iter().position(|(_, r)| r.contains(x, y));
-        was != self.menu_hover
+        let before = self.lens_index();
+        self.pointer = Some((x, y));
+        before != self.lens_index()
+    }
+
+    /// Which cell the pointer has enlarged, if any.
+    fn lens_index(&self) -> Option<usize> {
+        let (x, y) = self.pointer?;
+        let grid = self.last_grid;
+        if grid.w <= 0.0 {
+            return None;
+        }
+        let f = self.field(grid);
+        nous_ui::field::lens_at(
+            &f,
+            Rect::new(0.0, 0.0, grid.w, grid.h),
+            x - grid.x,
+            y - grid.y,
+        )
+        .map(|l| l.index)
     }
 
     pub fn scroll(&mut self, dy: f64, body: Rect) {
@@ -851,6 +957,7 @@ impl FilePane {
         );
 
         let grid = self.grid_rect(body);
+        self.last_grid = grid;
         c.clip_rect(grid);
         c.translate(grid.x, grid.y);
         match self.mode {
@@ -858,6 +965,9 @@ impl FilePane {
                 let area = Rect::new(0.0, 0.0, grid.w, grid.h);
                 let f = self.field(grid);
                 let chosen = self.files.chosen();
+                let lens = self
+                    .pointer
+                    .and_then(|(x, y)| nous_ui::field::lens_at(&f, area, x - grid.x, y - grid.y));
                 nous_ui::field::render(
                     c,
                     &f,
@@ -866,6 +976,7 @@ impl FilePane {
                     theme,
                     area,
                     &mut self.pictures,
+                    lens.as_ref(),
                 );
             }
             Mode::Grid => {
@@ -882,6 +993,16 @@ impl FilePane {
             Rect::new(body.x, body.bottom() - STATUS_H, body.w, STATUS_H),
             link,
         );
+        // A file open covers the folder entirely: it is a different thing to
+        // be doing, not an overlay on the same thing.
+        if self.viewing.is_some() {
+            let l = viewer::Layout::compute(body);
+            let entries = std::mem::take(&mut self.files.entries);
+            if let Some(v) = &mut self.viewing {
+                viewer::render(c, v, &entries, theme, &l);
+            }
+            self.files.entries = entries;
+        }
         self.draw_menu(c, theme, body);
     }
 
@@ -1660,6 +1781,98 @@ mod tests {
         assert_eq!(p.mode, Mode::Grid);
         p.toggle_mode();
         assert_eq!(p.mode, Mode::Field);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_picture_stays_in_the_window() {
+        // Handing off loses the window and everything you knew when you left.
+        let dir = scratch("view-open");
+        std::fs::write(dir.join("a.png"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::to_socket(NOWHERE);
+        // A preview is what makes a file viewable here.
+        p.files.entries[0].thumb = Some("/thumbs/a.png".into());
+        p.files.choose_only(0);
+        p.open_selected(&mut link);
+        assert!(p.viewing.is_some(), "opening a picture left the window");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_something_it_cannot_show_hands_it_over_instead() {
+        // A viewer that shows a spreadsheet badly is worse than the
+        // spreadsheet program.
+        let dir = scratch("view-handoff");
+        std::fs::write(dir.join("sheet.xlsx"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::to_socket(NOWHERE);
+        p.files.choose_only(0);
+        p.open_selected(&mut link);
+        assert!(p.viewing.is_none(), "tried to show a spreadsheet");
+        assert!(p.status.is_some(), "handing off failed silently");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arrows_walk_the_folder_while_a_file_is_open() {
+        // The point of staying: looking through a folder of photographs
+        // should not mean opening one, closing it, opening the next.
+        let dir = scratch("view-walk");
+        for n in ["a.png", "b.png", "c.png"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut p = pane(&dir);
+        let mut link = Link::to_socket(NOWHERE);
+        for e in p.files.entries.iter_mut() {
+            e.thumb = Some(format!("/thumbs/{}", e.name));
+        }
+        p.files.choose_only(0);
+        p.open_selected(&mut link);
+        let first = p.viewing.as_ref().unwrap().index;
+
+        p.key(key(ffi::XK_Right), BODY, &mut link);
+        let second = p.viewing.as_ref().unwrap().index;
+        assert_ne!(first, second, "the arrow key went nowhere");
+        // And the folder's own selection follows, so leaving the viewer puts
+        // you where you actually got to.
+        assert_eq!(p.files.selected, second, "the folder was left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escape_closes_the_file_before_it_closes_the_window() {
+        let dir = scratch("view-escape");
+        std::fs::write(dir.join("a.png"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::to_socket(NOWHERE);
+        p.files.entries[0].thumb = Some("/thumbs/a.png".into());
+        p.open_selected(&mut link);
+        assert!(p.wants_escape(), "escape would have closed the window");
+        p.key(key(ffi::XK_Escape), BODY, &mut link);
+        assert!(p.viewing.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_from_the_viewer_closes_it_rather_than_showing_a_stranger() {
+        // Trashing re-reads the folder, so every index after it means
+        // something different.
+        let dir = scratch("view-delete");
+        for n in ["a.png", "b.png"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut p = pane(&dir);
+        let mut link = Link::to_socket(NOWHERE);
+        for e in p.files.entries.iter_mut() {
+            e.thumb = Some(format!("/thumbs/{}", e.name));
+        }
+        p.open_selected(&mut link);
+        p.key(key(ffi::XK_Delete), BODY, &mut link);
+        assert!(
+            p.viewing.is_none(),
+            "kept showing a file after deleting one"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
