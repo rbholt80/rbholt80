@@ -16,6 +16,7 @@ mod exec;
 mod httpc;
 mod hwprofile;
 mod index;
+mod jobs;
 mod maintenance;
 mod resolve;
 mod router;
@@ -275,10 +276,19 @@ impl Daemon {
                         .unwrap_or("You are a helpful assistant."),
                     prompt,
                 );
+                // A caller may name the work, which is the better way to ask:
+                // the size of model then comes from one table anyone can read
+                // rather than from whoever wrote the call. `tier` stays for
+                // callers that really do mean "the small one".
+                let job = req.param_str("job").and_then(jobs::Job::named);
                 if req.param_str("tier") == Some("small") {
                     c.tier = router::Tier::Small;
                 }
-                match self.router.complete(&c) {
+                let served = match job {
+                    Some(j) => self.router.do_job(j, c),
+                    None => self.router.complete(&c),
+                };
+                match served {
                     Ok(s) => Response::ok(
                         &req.id,
                         json_obj([

@@ -1251,4 +1251,58 @@ mod tests {
             "later steps must not run"
         );
     }
+
+    #[test]
+    fn the_risk_of_a_step_comes_from_the_table_not_from_whoever_wrote_the_step() {
+        // A plan arrives from a model. If a step could state its own risk,
+        // then the thing being adjudicated would be supplying the grounds for
+        // its own adjudication — and "is this dangerous" is exactly the
+        // question an attacker phrases carefully.
+        //
+        // Two claims are planted here: an args field saying "read", and a
+        // summary saying so in words. Neither may reach the verdict.
+        let f = fixture("risk-source");
+        let mut args = Json::obj();
+        args.set("risk", "read".into());
+        args.set("path", "/tmp/whatever".into());
+        let step = Step::new(
+            "s1",
+            "fs.delete:/tmp/whatever",
+            "fs",
+            "harmless read-only listing, risk: read",
+            args,
+        );
+        let out = f.broker.preflight(&plan_of(vec![step]), &Subject::User);
+        let steps = out.arr_or_empty("steps");
+        assert_eq!(steps.len(), 1);
+        let said = steps[0].str_or("risk", "");
+        assert_ne!(said, "read", "a step talked the broker out of its own risk");
+        assert_eq!(
+            said,
+            Capability::parse("fs.delete:/tmp/whatever")
+                .unwrap()
+                .risk()
+                .to_string(),
+            "the verdict did not come from the capability table"
+        );
+    }
+
+    #[test]
+    fn a_capability_nobody_recognises_is_refused_rather_than_guessed_at() {
+        // The other half of the same rule: when the table has no answer, the
+        // answer is no. Inventing one would mean the model could reach
+        // anything by naming something the table has never heard of.
+        let f = fixture("risk-unknown");
+        let step = Step::new(
+            "s1",
+            "wat.destroy:/",
+            "wat",
+            "do something new",
+            Json::obj(),
+        );
+        let out = f.broker.preflight(&plan_of(vec![step]), &Subject::User);
+        let steps = out.arr_or_empty("steps");
+        assert_eq!(steps[0].str_or("decision", ""), "deny");
+        assert_eq!(steps[0].str_or("risk", ""), "critical");
+    }
 }

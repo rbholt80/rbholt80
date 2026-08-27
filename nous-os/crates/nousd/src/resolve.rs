@@ -1039,7 +1039,14 @@ impl Resolver {
         } else {
             format!("{}\n\nContext: {}", utterance, context.describe())
         };
-        let served = router.complete(&Completion::new(&system_prompt(), &prompt))?;
+        // Named rather than tiered by hand: turning a sentence into a plan of
+        // steps against real capabilities is the hardest thing this system
+        // asks for, and the only one where a wrong answer is expensive — a bad
+        // plan is shown to a person who may say yes to it.
+        let served = router.do_job(
+            crate::jobs::Job::Plan,
+            Completion::new(&system_prompt(), &prompt),
+        )?;
         let source = extract_glyph(&served.text);
         let program = glyph::parse(&source)
             .map_err(|e| format!("the model produced invalid GLYPH: {}", e))?;

@@ -413,6 +413,32 @@ impl Router {
 
     /// Try each configured backend in order. Reaching `offline` in the route
     /// stops the search: it is how an operator says "do not phone home".
+    /// Ask for a piece of named work, and let the job decide which model.
+    ///
+    /// The point of naming the work is that the choice is made in one place
+    /// from a table anyone can read, rather than at each call site by whoever
+    /// wrote it. A caller says what it wants done; it does not say how big a
+    /// model to spend on it.
+    pub fn do_job(&self, job: crate::jobs::Job, mut c: Completion) -> Result<Served, String> {
+        c.tier = job.tier();
+        // The budget belongs to the job too: a model handed a large one will
+        // use it, and a six-word description arriving as four paragraphs has
+        // cost more than the smaller model saved.
+        c.max_tokens = c.max_tokens.min(job.max_tokens());
+        match self.complete(&c) {
+            Ok(s) => Ok(s),
+            // No small model on this machine. The tier is about spending the
+            // least that will do, not about refusing to work.
+            Err(e) if c.tier == Tier::Small && job.may_escalate() => {
+                c.tier = Tier::Large;
+                self.complete(&c).map_err(|larger| {
+                    format!("{e}; and the larger model could not either: {larger}")
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn complete(&self, c: &Completion) -> Result<Served, String> {
         let mut attempts: Vec<String> = Vec::new();
         for name in self.route_for(c.tier) {
@@ -736,5 +762,121 @@ mod tests {
         )]);
         assert_eq!(extract_text(&json), "flow a { }");
         assert_eq!(extract_text(&Json::obj()), "");
+    }
+
+    #[test]
+    fn a_small_job_goes_to_the_small_route_without_the_caller_choosing() {
+        // The point of naming the work: the choice is made in one place from
+        // a table anyone can read, not at each call site by whoever wrote it.
+        use crate::jobs::Job;
+        let (small, small_calls) = fake("ollama", true, Ok("named it".into()));
+        let (large, large_calls) = fake("anthropic", true, Ok("wrote an essay".into()));
+        let r = Router::with_routes(
+            vec![small, large],
+            vec!["anthropic".to_string(), "offline".to_string()],
+            vec!["ollama".to_string(), "offline".to_string()],
+        );
+
+        let c = Completion {
+            system: String::new(),
+            prompt: "what changed?".into(),
+            max_tokens: 4096,
+            temperature: 0.1,
+            tier: Tier::Large,
+        };
+        r.do_job(Job::Describe, c.clone()).expect("described");
+        assert_eq!(
+            small_calls.load(Ordering::SeqCst),
+            1,
+            "the small model was not used"
+        );
+        assert_eq!(
+            large_calls.load(Ordering::SeqCst),
+            0,
+            "the large model was spent on a description"
+        );
+
+        r.do_job(Job::Plan, c).expect("planned");
+        assert_eq!(
+            large_calls.load(Ordering::SeqCst),
+            1,
+            "planning did not reach the large model"
+        );
+    }
+
+    #[test]
+    fn a_machine_with_no_small_model_still_gets_the_small_work_done() {
+        use crate::jobs::Job;
+        let (large, large_calls) = fake("anthropic", true, Ok("named it".into()));
+        let r = Router::with_routes(
+            vec![large],
+            vec!["anthropic".to_string()],
+            vec!["ollama".to_string(), "offline".to_string()],
+        );
+        let c = Completion {
+            system: String::new(),
+            prompt: "what changed?".into(),
+            max_tokens: 4096,
+            temperature: 0.1,
+            tier: Tier::Large,
+        };
+        let served = r
+            .do_job(Job::Describe, c)
+            .expect("fell back to the larger model");
+        assert_eq!(served.text, "named it");
+        assert_eq!(large_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_small_job_cannot_be_given_a_large_budget_by_its_caller() {
+        // A model handed a large budget will use it.
+        use crate::jobs::Job;
+        let seen = Arc::new(AtomicUsize::new(0));
+        let budget = Arc::new(AtomicUsize::new(0));
+        let b = budget.clone();
+        struct Recorder {
+            calls: Arc<AtomicUsize>,
+            budget: Arc<AtomicUsize>,
+        }
+        impl Backend for Recorder {
+            fn name(&self) -> &str {
+                "ollama"
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn complete(&self, c: &Completion) -> Result<String, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.budget.store(c.max_tokens as usize, Ordering::SeqCst);
+                Ok("ok".into())
+            }
+            fn model(&self) -> String {
+                "recorder".to_string()
+            }
+        }
+        let r = Router::with_routes(
+            vec![Box::new(Recorder {
+                calls: seen.clone(),
+                budget: b,
+            })],
+            vec!["ollama".to_string()],
+            vec!["ollama".to_string()],
+        );
+        r.do_job(
+            Job::Classify,
+            Completion {
+                system: String::new(),
+                prompt: "is this an instruction?".into(),
+                max_tokens: 4096,
+                temperature: 0.1,
+                tier: Tier::Large,
+            },
+        )
+        .expect("classified");
+        assert!(
+            budget.load(Ordering::SeqCst) <= Job::Classify.max_tokens() as usize,
+            "a classification was given {} tokens",
+            budget.load(Ordering::SeqCst)
+        );
     }
 }
