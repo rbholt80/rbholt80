@@ -244,6 +244,14 @@ impl App {
         }
     }
 
+    /// Put words in the bar and look them up, as though they had been typed.
+    /// Never reachable from the keyboard or the mouse.
+    pub fn demo_type(&mut self, text: &str) {
+        self.ask.focused = true;
+        self.ask.edit.set(text);
+        self.look();
+    }
+
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
             let inner = report
@@ -336,16 +344,28 @@ impl App {
         if k.is(ffi::XK_Escape) {
             return self.ask.dismiss();
         }
+        // Up and down walk the results and step off the end onto the request,
+        // so there is no gesture for "I meant the other reading" — you just
+        // keep going in the direction you were already going.
+        if k.is(ffi::XK_Down) {
+            return self.ask.move_choice(1);
+        }
+        if k.is(ffi::XK_Up) {
+            return self.ask.move_choice(-1);
+        }
         if k.is(ffi::XK_Return) || k.is(ffi::XK_KP_Enter) {
-            // Enter means "yes, that one" when a plan is showing, and "work
-            // out what this would take" when a question is.
             if self.ask.has_proposal() {
                 self.ask.confirm(&mut self.link);
                 self.pane.reload();
-            } else {
-                let ctx = self.context_path();
-                self.ask.submit(&mut self.link, &ctx);
+                return;
             }
+            // On a result, Enter opens it. On the request row, Enter asks.
+            if let Some(hit) = self.ask.chosen_hit().cloned() {
+                self.open_hit(&hit);
+                return;
+            }
+            let ctx = self.context_path();
+            self.ask.submit(&mut self.link, &ctx);
             return;
         }
         let step = if k.ctrl {
@@ -353,14 +373,85 @@ impl App {
         } else {
             EditStep::Char
         };
-        match k.sym {
-            s if s == ffi::XK_BackSpace => self.ask.edit.backspace(step),
-            s if s == ffi::XK_Delete => self.ask.edit.delete(step),
-            s if s == ffi::XK_Left => self.ask.edit.move_caret(-1, step, k.shift),
-            s if s == ffi::XK_Right => self.ask.edit.move_caret(1, step, k.shift),
-            s if s == 'a' as u64 && k.ctrl => self.ask.edit.select_all(),
-            _ => {}
+        let edited = match k.sym {
+            s if s == ffi::XK_BackSpace => {
+                self.ask.edit.backspace(step);
+                true
+            }
+            s if s == ffi::XK_Delete => {
+                self.ask.edit.delete(step);
+                true
+            }
+            s if s == ffi::XK_Left => {
+                self.ask.edit.move_caret(-1, step, k.shift);
+                false
+            }
+            s if s == ffi::XK_Right => {
+                self.ask.edit.move_caret(1, step, k.shift);
+                false
+            }
+            s if s == 'a' as u64 && k.ctrl => {
+                self.ask.edit.select_all();
+                false
+            }
+            _ => false,
+        };
+        if edited {
+            self.look();
         }
+    }
+
+    /// Look for whatever is in the bar now.
+    fn look(&mut self) {
+        let places = crate::places::places(&self.pane.home);
+        // The ledger is what makes past actions findable, so it is worth
+        // having even when the History view has not been opened.
+        if self.deeds.is_empty() && self.seen_changes != self.link.changes {
+            self.refresh_history();
+        }
+        let deeds = std::mem::take(&mut self.deeds);
+        self.ask.look(&mut self.link, &places, &deeds);
+        self.deeds = deeds;
+    }
+
+    /// Go to whatever was chosen from the list.
+    fn open_hit(&mut self, hit: &crate::find::Hit) {
+        use crate::find::Sort;
+        match hit.sort {
+            Sort::View => {
+                if let Some(v) = View::named(&hit.title) {
+                    self.view = v;
+                }
+            }
+            Sort::Place | Sort::Folder => {
+                if let Some(p) = &hit.path {
+                    self.view = View::Files;
+                    self.pane.go(p.clone());
+                }
+            }
+            Sort::File => {
+                if let Some(p) = &hit.path {
+                    // Show it where it lives, selected, rather than opening it
+                    // straight away: finding something and looking at it are
+                    // different, and only one of them can be undone.
+                    self.view = View::Files;
+                    if let Some(parent) = p.parent() {
+                        self.pane.go(parent.to_path_buf());
+                    }
+                    let name = crate::manage::name_of(p);
+                    self.pane.reload_selecting(&name);
+                }
+            }
+            Sort::Deed => {
+                self.view = View::History;
+                if let Some(seq) = hit.seq {
+                    if let Some(i) = self.deeds.iter().position(|d| d.seq == seq) {
+                        self.history_selected = i;
+                    }
+                }
+            }
+        }
+        self.ask.dismiss();
     }
 
     fn history_key(&mut self, k: Key, body: Rect) {
@@ -446,6 +537,7 @@ impl App {
     pub fn text(&mut self, t: &str) {
         if self.ask.focused {
             self.ask.edit.insert(t);
+            self.look();
             return;
         }
         if self.view == View::Files {
@@ -464,6 +556,17 @@ impl App {
         if bar.bar.contains(x, y) {
             self.ask.focused = true;
             return;
+        }
+        if let Some(i) = bar.steps.iter().position(|r| r.contains(x, y)) {
+            if let Some(hit) = self.ask.hits().get(i).cloned() {
+                return self.open_hit(&hit);
+            }
+            // The row past the end is the request.
+            if i == self.ask.hits().len() && !self.ask.hits().is_empty() {
+                let ctx = self.context_path();
+                self.ask.submit(&mut self.link, &ctx);
+                return;
+            }
         }
         let body = self.body(w, h);
         if !body.contains(x, y) {
@@ -1134,6 +1237,114 @@ mod tests {
         assert!(with.y > plain.y, "the plan is drawn over the view");
         assert!(with.h < plain.h);
         assert!(with.bottom() <= 720.0 + 0.001);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_finds_things_without_being_told_to_search() {
+        // No mode, no button, no second box. The words are the search and the
+        // same words are the request.
+        let dir = scratch("find-live");
+        let mut a = app_on(&dir);
+        a.key(key('/' as u64), 1180.0, 720.0);
+        a.text("Player");
+        assert!(!a.ask.hits().is_empty(), "typing found nothing at all");
+        assert_eq!(a.ask.hits()[0].title, "Player");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_found_view_goes_there() {
+        let dir = scratch("find-open-view");
+        let mut a = app_on(&dir);
+        a.key(key('/' as u64), 1180.0, 720.0);
+        a.text("History");
+        a.key(key(ffi::XK_Return), 1180.0, 720.0);
+        assert_eq!(a.view, View::History, "opening a found view went nowhere");
+        assert!(!a.ask.focused, "the bar stayed open over what it opened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_found_file_shows_it_where_it_lives_rather_than_launching_it() {
+        // Finding something and opening it are different, and only one of
+        // them can be undone.
+        let dir = scratch("find-open-file");
+        std::fs::create_dir(dir.join("deep")).unwrap();
+        std::fs::write(dir.join("deep/needle.txt"), b"x").unwrap();
+        let mut a = app_on(&dir);
+        let hit = crate::find::Hit {
+            sort: crate::find::Sort::File,
+            title: "needle.txt".into(),
+            detail: String::new(),
+            path: Some(dir.join("deep/needle.txt")),
+            seq: None,
+            score: 1.0,
+        };
+        a.open_hit(&hit);
+        assert_eq!(a.view, View::Files);
+        assert_eq!(
+            a.pane.here(),
+            dir.join("deep"),
+            "did not go to where it lives"
+        );
+        assert_eq!(
+            a.pane.files.selected_entry().map(|e| e.name.as_str()),
+            Some("needle.txt"),
+            "found it and then did not point at it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_request_reading_is_always_reachable_from_the_results() {
+        // Something matching must never take away the ability to ask. Down
+        // from the last result reaches it; it is not a separate gesture.
+        let dir = scratch("find-request");
+        let mut a = app_on(&dir);
+        a.key(key('/' as u64), 1180.0, 720.0);
+        a.text("Files");
+        assert!(!a.ask.hits().is_empty());
+        assert_eq!(
+            a.ask.chosen,
+            Some(0),
+            "a plain name should start on the match"
+        );
+        for _ in 0..a.ask.hits().len() {
+            a.key(key(ffi::XK_Down), 1180.0, 720.0);
+        }
+        assert_eq!(a.ask.chosen, None, "could not reach the request");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sentence_starts_on_the_request_even_when_something_matches() {
+        // "move budget.xlsx to Documents" matches a file, but it is plainly
+        // an instruction. Guessing wrong costs one arrow key, which is why a
+        // guess is allowed here at all.
+        let dir = scratch("find-sentence");
+        let mut a = app_on(&dir);
+        a.key(key('/' as u64), 1180.0, 720.0);
+        a.text("move Files into Player and sort them");
+        assert_eq!(
+            a.ask.chosen, None,
+            "a plain instruction was read as a lookup"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_the_bar_puts_the_results_away() {
+        let dir = scratch("find-clear");
+        let mut a = app_on(&dir);
+        a.key(key('/' as u64), 1180.0, 720.0);
+        a.text("Edit");
+        assert!(!a.ask.hits().is_empty());
+        for _ in 0..4 {
+            a.key(key(ffi::XK_BackSpace), 1180.0, 720.0);
+        }
+        assert!(a.ask.hits().is_empty(), "an empty bar still showed a list");
+        assert_eq!(a.body(1180.0, 720.0).y, TABS_H + crate::ask::BAR_H);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

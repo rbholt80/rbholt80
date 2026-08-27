@@ -13,6 +13,7 @@
 mod ask;
 mod curated;
 mod filepane;
+mod find;
 mod history;
 mod link;
 mod manage;
@@ -79,6 +80,12 @@ fn main() {
     // findings without saying they were invented would be lying.
     if let Some(i) = args.iter().position(|a| a == "--demo-marks") {
         app.demo_marks(args.get(i + 1).map(String::as_str));
+    }
+    // Type something into the bar, so what it finds can be looked at.
+    if let Some(i) = args.iter().position(|a| a == "--type") {
+        if let Some(t) = args.get(i + 1) {
+            app.demo_type(t);
+        }
     }
     if let Some(i) = args.iter().position(|a| a == "--demo-ask") {
         app.demo_ask(args.get(i + 1).map(String::as_str));

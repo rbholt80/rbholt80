@@ -241,7 +241,10 @@ impl Daemon {
             }
 
             method::FS_SEARCH => {
-                let idx = index::Index::load();
+                // Cached: the interface searches on every keystroke, and
+                // re-parsing the whole index per letter would make typing
+                // slower the more files you own.
+                let idx = index::Index::cached();
                 Response::ok(
                     &req.id,
                     idx.search_json(

@@ -12,6 +12,7 @@
 //! that produced it. Asking twice can resolve differently; agreeing to one plan
 //! and running another is how a system loses the right to be trusted.
 
+use crate::find::{self, Hit};
 use crate::link::Link;
 use nous_core::json::{json_obj, Json};
 use nous_ui::draw::{Canvas, Rect};
@@ -33,6 +34,9 @@ pub enum State {
     },
     /// Something to read: an answer, or what went wrong.
     Said { text: String, trouble: bool },
+    /// Things that match what is being typed. Not a mode: the request reading
+    /// of the same words is always still there, at the end of the list.
+    Found { hits: Vec<Hit> },
 }
 
 pub struct Ask {
@@ -41,6 +45,10 @@ pub struct Ask {
     /// Whether the bar has the keyboard. The window's other views want the
     /// arrow keys, so the bar only takes them when it is being typed into.
     pub focused: bool,
+    /// Which result the keyboard is on. `None` means the request reading —
+    /// the thing that happens when you type a sentence and press Enter
+    /// without touching an arrow key.
+    pub chosen: Option<usize>,
 }
 
 impl Default for Ask {
@@ -55,6 +63,7 @@ impl Ask {
             edit: Edit::new(),
             state: State::Idle,
             focused: false,
+            chosen: None,
         }
     }
 
@@ -69,6 +78,70 @@ impl Ask {
 
     pub fn has_proposal(&self) -> bool {
         matches!(self.state, State::Proposal { .. })
+    }
+
+    pub fn hits(&self) -> &[Hit] {
+        match &self.state {
+            State::Found { hits } => hits,
+            _ => &[],
+        }
+    }
+
+    /// The result the keyboard is on, if it is on one.
+    pub fn chosen_hit(&self) -> Option<&Hit> {
+        self.chosen.and_then(|i| self.hits().get(i))
+    }
+
+    /// Look for whatever is being typed, without doing anything about it.
+    ///
+    /// Runs on every keystroke, so it must be cheap and it must never change
+    /// anything. Finding is free; that is what makes it safe to do while
+    /// someone is still deciding what they meant.
+    pub fn look(
+        &mut self,
+        link: &mut Link,
+        places: &[crate::places::Place],
+        deeds: &[crate::history::Deed],
+    ) {
+        let q = self.edit.text().trim().to_string();
+        if q.is_empty() {
+            self.state = State::Idle;
+            self.chosen = None;
+            return;
+        }
+        // A proposal on screen is not thrown away by more typing: someone
+        // refining a question should not lose the answer to the last one until
+        // they ask again.
+        if self.has_proposal() {
+            return;
+        }
+        let files = link.search(&q, 24).unwrap_or(Json::Null);
+        let hits = find::gather(&q, &files, places, deeds, VIEW_NAMES, 8);
+        // A sentence that matches nothing is a request, and putting an empty
+        // list on screen for it would be answering a question nobody asked.
+        self.chosen = match (hits.is_empty(), find::looks_like_a_request(&q)) {
+            (true, _) => None,
+            // Something matched, but it reads as an instruction: keep the
+            // matches visible and leave the keyboard on the request, since
+            // guessing wrong here costs one arrow key rather than an outcome.
+            (false, true) => None,
+            (false, false) => Some(0),
+        };
+        self.state = State::Found { hits };
+    }
+
+    /// Move the keyboard through the results, and off the end onto the request.
+    pub fn move_choice(&mut self, delta: i64) {
+        let n = self.hits().len() as i64;
+        if n == 0 {
+            self.chosen = None;
+            return;
+        }
+        // `None` sits at the end of the list, so pressing Down from the last
+        // result reaches "ask for this" rather than stopping dead.
+        let at = self.chosen.map(|i| i as i64).unwrap_or(n);
+        let next = (at + delta).clamp(0, n);
+        self.chosen = if next >= n { None } else { Some(next as usize) };
     }
 
     /// Give up on whatever is showing. Escape, or clicking away.
@@ -195,6 +268,14 @@ fn headline_for(reply: &Json, asked: &str, n: usize) -> String {
     format!("{asked} — {n} {noun}")
 }
 
+/// What the views are called, for finding them by name.
+const VIEW_NAMES: &[(&str, &str)] = &[
+    ("Files", "your folders"),
+    ("Player", "music and video"),
+    ("Edit", "the cutting room"),
+    ("History", "what has been done"),
+];
+
 // --- layout ----------------------------------------------------------------
 
 pub const BAR_H: f64 = 46.0;
@@ -220,12 +301,26 @@ impl Layout {
                 HEADLINE_H + steps.len() as f64 * STEP_H + FOOTER_H + pad,
                 steps.len(),
             ),
+            // Results, plus one row at the end that is always there: whatever
+            // was typed, as something to ask for. That row is the reason this
+            // is not a search box — the other reading never goes away.
+            State::Found { hits } => (
+                (hits.len() + 1) as f64 * STEP_H + FOOTER_H + pad,
+                hits.len() + 1,
+            ),
             State::Said { .. } | State::Thinking => (HEADLINE_H + pad, 0),
             State::Idle => (0.0, 0),
         };
         let sheet = Rect::new(0.0, bar.bottom(), width, sheet_h);
         let mut steps = Vec::new();
-        let mut y = sheet.y + HEADLINE_H;
+        // A proposal has a headline above its steps; a result list starts at
+        // the top, because the first result should be under the cursor.
+        let mut y = sheet.y
+            + if matches!(ask.state, State::Found { .. }) {
+                4.0
+            } else {
+                HEADLINE_H
+            };
         for _ in 0..n {
             steps.push(Rect::new(pad, y, width - pad * 2.0, STEP_H - 4.0));
             y += STEP_H;
@@ -375,6 +470,81 @@ pub fn render(c: &Canvas, ask: &Ask, theme: &Theme, layout: &Layout, folder: &st
             // Always both ways out, and always said: a proposal whose only
             // documented gesture is the one that runs it is a trap.
             let note = "Enter to run it · Esc to leave it";
+            c.text(
+                note,
+                layout.footer.x,
+                layout.footer.y,
+                &small,
+                theme.text_faint,
+                None,
+            );
+        }
+        State::Found { hits } => {
+            for (i, r) in layout.steps.iter().enumerate() {
+                let on = ask.chosen == Some(i) || (ask.chosen.is_none() && i == hits.len());
+                if on {
+                    c.fill_rounded(*r, Metrics::RADIUS_SMALL / 2.0, theme.surface_active);
+                }
+                match hits.get(i) {
+                    Some(h) => {
+                        c.text(
+                            &h.title,
+                            r.x + 12.0,
+                            r.y + 2.0,
+                            &f,
+                            theme.text,
+                            Some(r.w * 0.55),
+                        );
+                        let (dw, dh) = c.measure(&h.detail, &small, Some(r.w * 0.3));
+                        c.text(
+                            &h.detail,
+                            r.right() - dw - 62.0,
+                            r.y + (r.h - dh) / 2.0,
+                            &small,
+                            theme.text_faint,
+                            Some(r.w * 0.3),
+                        );
+                        // What kind of thing it is, so one list of mixed
+                        // things still reads as a list.
+                        let (kw, kh) = c.measure(h.sort.label(), &small, None);
+                        c.text(
+                            h.sort.label(),
+                            r.right() - kw - 8.0,
+                            r.y + (r.h - kh) / 2.0,
+                            &small,
+                            theme.text_dim,
+                            None,
+                        );
+                    }
+                    // The last row: what was typed, as a request.
+                    None => {
+                        let asked = ask.edit.text().trim();
+                        c.fill_circle(r.x + 6.0, r.y + r.h / 2.0, 3.0, theme.voice);
+                        c.text(
+                            &format!("Ask for “{asked}”"),
+                            r.x + 16.0,
+                            r.y + 2.0,
+                            &f,
+                            theme.text,
+                            Some(r.w * 0.7),
+                        );
+                        let (kw, kh) = c.measure("request", &small, None);
+                        c.text(
+                            "request",
+                            r.right() - kw - 8.0,
+                            r.y + (r.h - kh) / 2.0,
+                            &small,
+                            theme.voice,
+                            None,
+                        );
+                    }
+                }
+            }
+            let note = if ask.chosen.is_some() {
+                "Enter opens it · ↓ to ask instead"
+            } else {
+                "Enter asks for it · ↑ for what matched"
+            };
             c.text(
                 note,
                 layout.footer.x,

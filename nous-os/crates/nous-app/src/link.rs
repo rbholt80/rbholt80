@@ -186,6 +186,24 @@ impl Link {
         Ok(out)
     }
 
+    /// Search the index the daemon keeps of every file it has been shown.
+    ///
+    /// Runs on every keystroke, so a failure is silent and the caller carries
+    /// on with what it can find without help. Nothing is changed by looking,
+    /// which is why this does not count as a change.
+    pub fn search(&mut self, query: &str, limit: u64) -> Option<Json> {
+        let params = json_obj([("query", query.into()), ("limit", limit.into())]);
+        let c = self.ensure().ok()?;
+        match c.call(method::FS_SEARCH, params) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.client = None;
+                self.trouble = Some(short(&e));
+                None
+            }
+        }
+    }
+
     /// The last few things that were done, for the view that lists them.
     pub fn journal(&mut self, limit: u64) -> Option<Json> {
         let c = self.ensure().ok()?;
