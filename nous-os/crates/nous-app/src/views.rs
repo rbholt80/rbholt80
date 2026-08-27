@@ -123,6 +123,24 @@ impl App {
             .click(grid.x + 120.0, grid.y + 90.0, 3, body, &mut self.link);
     }
 
+    /// Draw the curator's marks from a report given on the command line, or
+    /// from a stand-in one, so the marked-up folder can be looked at without a
+    /// daemon. Never reachable from the keyboard or the mouse.
+    pub fn demo_marks(&mut self, from_file: Option<&str>) {
+        let report = match from_file.and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(text) => match nous_core::json::parse(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("nous: {e}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        let marked = crate::curated::apply(&mut self.pane.files.entries, &report);
+        self.pane.files.proposal = crate::curated::summary(&report, marked);
+    }
+
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
             let inner = report
@@ -296,6 +314,18 @@ impl App {
     /// Where the current view gets to draw: everything under the tab bar.
     fn body(&self, w: f64, h: f64) -> Rect {
         Rect::new(0.0, TABS_H, w, (h - TABS_H).max(0.0))
+    }
+
+    /// Work that was put off until something could be done about it.
+    ///
+    /// Navigation happens in the middle of handling a key and must stay a pure
+    /// move; asking the daemon what it makes of a folder is a round trip. This
+    /// is where the two meet, once per frame.
+    pub fn settle(&mut self) {
+        if self.view == View::Files && self.pane.wants_curating {
+            self.pane.wants_curating = false;
+            self.pane.curate(&mut self.link);
+        }
     }
 
     pub fn render(&mut self, c: &Canvas, theme: &Theme, w: f64, h: f64) {

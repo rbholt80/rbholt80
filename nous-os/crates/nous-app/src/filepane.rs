@@ -10,9 +10,11 @@
 //! Nothing here writes to the disk. Every change is a capability the daemon
 //! runs, so it lands in the journal and can be taken back.
 
+use crate::curated;
 use crate::link::Link;
 use crate::manage::{self, Action, Clipboard};
 use crate::places::{crumbs, places, History};
+use nous_core::json::Json;
 use nous_ui::draw::{Canvas, Rect};
 use nous_ui::ffi;
 use nous_ui::files::{Entry, Files};
@@ -63,6 +65,10 @@ pub struct FilePane {
     pub menu_hover: Option<usize>,
     /// The last thing that went wrong, or the last thing that worked.
     pub status: Option<String>,
+    /// Set when the folder changed and nobody has asked the curator about the
+    /// new one yet. Checked once a frame, so navigation stays a pure move and
+    /// the round trip happens in one place.
+    pub wants_curating: bool,
     typed: String,
     typed_at: Option<Instant>,
     /// Rectangles from the last frame, so clicks are tested against what was
@@ -86,6 +92,7 @@ impl FilePane {
             menu: None,
             menu_hover: None,
             status: None,
+            wants_curating: true,
             typed: String::new(),
             typed_at: None,
             drawn_places: Vec::new(),
@@ -101,6 +108,44 @@ impl FilePane {
 
     pub fn here(&self) -> PathBuf {
         self.history.here().to_path_buf()
+    }
+
+    /// Re-read the folder and ask what the curator makes of it.
+    ///
+    /// The scan is the slow half and needs the daemon, so it is separate: the
+    /// files appear at once and the opinions arrive with them or not at all.
+    pub fn refresh(&mut self, link: &mut Link) {
+        self.reload();
+        self.curate(link);
+    }
+
+    /// Ask the curator about this folder and draw what it says onto the tiles.
+    ///
+    /// Silent when there is no daemon. An interface that complained every time
+    /// you opened a folder without one would be unusable without one, and
+    /// looking at your files does not need a daemon.
+    pub fn curate(&mut self, link: &mut Link) {
+        if !link.connected() {
+            return;
+        }
+        let here = self.here();
+        let args = nous_core::json::json_obj([(
+            "roots",
+            Json::Arr(vec![here.to_string_lossy().to_string().into()]),
+        )]);
+        let Some(report) = link.ask("curate.scan", args) else {
+            return;
+        };
+        // The broker wraps each step's own answer; the findings are inside.
+        let inner = report
+            .get("steps")
+            .and_then(|s| s.as_arr())
+            .and_then(|a| a.first())
+            .and_then(|s| s.get("result"))
+            .cloned()
+            .unwrap_or(report);
+        let marked = curated::apply(&mut self.files.entries, &inner);
+        self.files.proposal = curated::summary(&inner, marked);
     }
 
     /// Re-read the current folder, keeping the selection on the same file where
@@ -138,6 +183,9 @@ impl FilePane {
         self.menu = None;
         self.reload();
         self.files.selected = 0;
+        // Whoever moved us is expected to ask the curator; `go` is called from
+        // places that have no link to hand.
+        self.wants_curating = true;
     }
 
     fn back(&mut self) {
@@ -272,8 +320,13 @@ impl FilePane {
                 }
             }
             Action::Refresh => {
-                self.reload();
+                // Both halves: the folder may have changed on disk, and what
+                // the curator makes of it may have changed with it. Re-reading
+                // the files and keeping stale opinions about them drawn on top
+                // is the worse of the two possible half-refreshes.
                 self.status = None;
+                self.files.proposal = None;
+                self.refresh(link);
             }
             Action::Properties => {
                 if let Some(e) = selected {
@@ -752,10 +805,14 @@ impl FilePane {
         let small = theme.small_font();
         let cy = r.y + r.h / 2.0;
 
-        // Left: what was said last, or what is here.
-        let left = match &self.status {
-            Some(s) => s.clone(),
-            None => {
+        // Left, most pressing first: what just went wrong, then what the
+        // curator would like to do about this folder, then what is selected.
+        // The proposal outranks the selection because it is about the whole
+        // folder and the selection is already visible as a ring.
+        let left = match (&self.status, &self.files.proposal) {
+            (Some(s), _) => s.clone(),
+            (None, Some(p)) => p.clone(),
+            (None, None) => {
                 let n = self.files.entries.len();
                 let total: u64 = self.files.entries.iter().map(|e| e.size).sum();
                 match self.files.selected_entry() {
@@ -771,10 +828,10 @@ impl FilePane {
             r.x + Metrics::PAD,
             cy - lh / 2.0,
             &small,
-            if self.status.is_some() {
-                theme.warn
-            } else {
-                theme.text_dim
+            match (&self.status, &self.files.proposal) {
+                (Some(_), _) => theme.warn,
+                (None, Some(_)) => theme.voice,
+                (None, None) => theme.text_dim,
             },
             Some(r.w * 0.65),
         );
@@ -1331,6 +1388,115 @@ mod tests {
         let mut link = Link::new();
         p.click(r.x + 2.0, r.y + r.h / 2.0, 1, BODY, &mut link);
         assert_eq!(p.here(), path, "clicking the path went nowhere");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_the_curator_found_is_not_lost_with_the_grids_own_footer() {
+        // The proposal used to be drawn in the grid's footer. Taking that
+        // footer away to stop two status bars stacking would have taken the
+        // one line saying what could be done about the folder with it.
+        let dir = scratch("proposal");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let link = Link::new();
+        let status = Rect::new(0.0, BODY.bottom() - STATUS_H, BODY.w, STATUS_H);
+
+        let shot = |p: &mut FilePane| {
+            let img = Image::new(1180, 720).unwrap();
+            p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+            img
+        };
+        // Counted rather than measured by colour variety: the bar holds
+        // antialiased text either way, so a variety count saturates at the
+        // same number whatever the words are.
+        let differing = |a: &Image, b: &Image, r: Rect| {
+            let mut n = 0;
+            for y in r.y as i32..r.bottom() as i32 {
+                for x in r.x as i32..r.right() as i32 {
+                    if a.pixel(x, y) != b.pixel(x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        let plain = shot(&mut p);
+        p.files.proposal = Some("3 files worth a look here · 1.9 GB could be reclaimed".into());
+        let with = shot(&mut p);
+        assert!(
+            differing(&plain, &with, status) > 50,
+            "the curator's line is drawn nowhere"
+        );
+
+        // And a real complaint still outranks it: a rename that failed must
+        // not be hidden behind a suggestion.
+        p.status = Some("that name is taken".into());
+        let err = shot(&mut p);
+        assert!(
+            differing(&err, &with, status) > 50,
+            "an error was hidden behind the proposal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refreshing_drops_opinions_about_files_that_may_have_changed() {
+        // Re-reading the folder while keeping the old marks drawn on top would
+        // leave "same file as report-2026.pdf" under a file whose twin was
+        // deleted a moment ago.
+        let dir = scratch("refresh");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        p.files.proposal = Some("3 files worth a look here".into());
+        p.files.entries[0].mark = Some(nous_ui::files::Mark {
+            risk: nous_ui::theme::Risk::Elevated,
+            note: "a duplicate".into(),
+        });
+        p.act(Action::Refresh, &mut link);
+        assert!(p.files.proposal.is_none(), "kept a stale summary");
+        assert!(
+            p.files.entries[0].mark.is_none(),
+            "kept a stale mark on a re-read file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_folder_asks_what_the_curator_makes_of_it() {
+        // Navigation cannot make the round trip itself — it happens in the
+        // middle of handling a key — so it leaves a note to be picked up.
+        let dir = scratch("curate-flag");
+        std::fs::create_dir(dir.join("inner")).unwrap();
+        let mut p = pane(&dir);
+        p.wants_curating = false;
+        p.go(dir.join("inner"));
+        assert!(
+            p.wants_curating,
+            "walking into a folder asked nothing about it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_a_daemon_the_curator_is_not_missed() {
+        // Looking at your own files needs no daemon, and an interface that
+        // complained about it every time you opened a folder would be unusable
+        // without one.
+        let dir = scratch("curate-none");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = pane(&dir);
+        let mut link = Link::new();
+        p.curate(&mut link);
+        assert!(
+            p.status.is_none(),
+            "complained about a missing daemon: {:?}",
+            p.status
+        );
+        assert!(p.files.proposal.is_none());
+        assert!(p.files.entries.iter().all(|e| e.mark.is_none()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

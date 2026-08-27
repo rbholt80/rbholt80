@@ -10,6 +10,7 @@
 //! because it is summoned over whatever you are already doing and a view inside
 //! this window could not be.
 
+mod curated;
 mod filepane;
 mod link;
 mod manage;
@@ -60,6 +61,7 @@ fn main() {
     // Draw twice before anything is read back: the first frame can go out
     // before the server has finished mapping the window, and a blank capture
     // would look like a rendering fault when it is only a race.
+    app.settle();
     for _ in 0..2 {
         window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));
         window.sync();
@@ -69,6 +71,12 @@ fn main() {
     // opens one so the menu can be looked at like anything else.
     if args.iter().any(|a| a == "--with-menu") {
         app.demo_menu(w, h);
+    }
+    // Curator marks, without a daemon to produce them, so the drawing of them
+    // can be looked at. Says so on screen: an interface that showed invented
+    // findings without saying they were invented would be lying.
+    if let Some(i) = args.iter().position(|a| a == "--demo-marks") {
+        app.demo_marks(args.get(i + 1).map(String::as_str));
     }
 
     if let Some(path) = shot {
@@ -120,6 +128,7 @@ fn main() {
             // Nothing happened, and nothing needs redrawing for it.
             Event::Tick | Event::FocusLost => continue,
         }
+        app.settle();
         window.draw(theme.backdrop_opaque, |c| app.render(c, &theme, w, h));
     }
 }
