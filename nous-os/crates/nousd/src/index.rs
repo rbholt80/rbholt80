@@ -219,6 +219,7 @@ impl Index {
 
     /// Let go of whatever is held. Used by the sweeper, and by anything that
     /// knows the machine wants the memory back now.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn release_cache() {
         *lock(cache()) = None;
     }

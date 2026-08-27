@@ -356,6 +356,13 @@ impl Daemon {
                 maintenance::usage(&self.broker.journal, &maintenance::state_root()),
             ),
             ("journal_entries", journal_len.into()),
+            // What the search index is holding right now. Zero most of the
+            // time: it is kept only while someone is typing. Reported because
+            // a footprint nobody can read is one nobody notices growing.
+            (
+                "index_cache_bytes",
+                (index::Index::cached_bytes() as u64).into(),
+            ),
             (
                 "bus",
                 json_obj([
