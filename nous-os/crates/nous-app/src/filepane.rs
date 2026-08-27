@@ -776,7 +776,10 @@ impl FilePane {
     }
 
     fn draw_sidebar(&mut self, c: &Canvas, theme: &Theme, r: Rect) {
-        c.fill_rect(r, theme.surface.with_alpha(0.5));
+        // Softened, not re-alpha'd: `surface` is a four-per-cent tint, and
+        // setting its alpha to a half paints a grey slab down the side of the
+        // window instead of lifting it slightly.
+        c.fill_rect(r, theme.surface.softer(0.6));
         c.line(
             r.right() - 0.5,
             r.y,
@@ -944,10 +947,23 @@ impl FilePane {
         // curator would like to do about this folder, then what is selected.
         // The proposal outranks the selection because it is about the whole
         // folder and the selection is already visible as a ring.
-        let left = match (&self.status, &self.files.proposal) {
-            (Some(s), _) => s.clone(),
-            (None, Some(p)) => p.clone(),
-            (None, None) => {
+        // More than one chosen outranks everything: it is the fact that
+        // changes what the next keystroke will do, and a Delete pressed
+        // without knowing six things are selected is the mistake this line
+        // exists to prevent.
+        let chosen = self.files.chosen();
+        let left = match (chosen.len(), &self.status, &self.files.proposal) {
+            (n, _, _) if n > 1 => {
+                let bytes: u64 = chosen
+                    .iter()
+                    .filter_map(|i| self.files.entries.get(*i))
+                    .map(|e| e.size)
+                    .sum();
+                format!("{} selected · {}", n, manage::human_size(bytes))
+            }
+            (_, Some(s), _) => s.clone(),
+            (_, None, Some(p)) => p.clone(),
+            (_, None, None) => {
                 let n = self.files.entries.len();
                 let total: u64 = self.files.entries.iter().map(|e| e.size).sum();
                 match self.files.selected_entry() {
@@ -963,10 +979,11 @@ impl FilePane {
             r.x + Metrics::PAD,
             cy - lh / 2.0,
             &small,
-            match (&self.status, &self.files.proposal) {
-                (Some(_), _) => theme.warn,
-                (None, Some(_)) => theme.voice,
-                (None, None) => theme.text_dim,
+            match (chosen.len(), &self.status, &self.files.proposal) {
+                (n, _, _) if n > 1 => theme.text,
+                (_, Some(_), _) => theme.warn,
+                (_, None, Some(_)) => theme.voice,
+                (_, None, None) => theme.text_dim,
             },
             Some(r.w * 0.65),
         );
@@ -1633,6 +1650,85 @@ mod tests {
         let mut link = Link::new();
         p.click(r.x + 2.0, r.y + r.h / 2.0, 1, false, false, BODY, &mut link);
         assert_eq!(p.here(), path, "clicking the path went nowhere");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_status_bar_says_how_many_are_selected() {
+        // The fact that changes what the next keystroke does. A Delete pressed
+        // without knowing six things are chosen is the mistake this prevents,
+        // so it outranks even a warning.
+        let dir = scratch("status-count");
+        for i in 0..6 {
+            std::fs::write(dir.join(format!("f{i}.txt")), vec![b'x'; 1000]).unwrap();
+        }
+        let mut p = pane(&dir);
+        let link = Link::new();
+        let status = Rect::new(0.0, BODY.bottom() - STATUS_H, BODY.w, STATUS_H);
+        let shot = |p: &mut FilePane| {
+            let img = Image::new(1180, 720).unwrap();
+            p.render(&img.canvas(), &Theme::dark(), BODY, &link);
+            img
+        };
+        let one = shot(&mut p);
+        p.files.choose_only(0);
+        p.files.extend_to(3);
+        assert_eq!(p.files.chosen_count(), 4);
+        let many = shot(&mut p);
+
+        let differing = |a: &Image, b: &Image| {
+            let mut n = 0;
+            for y in status.y as i32..status.bottom() as i32 {
+                for x in status.x as i32..status.right() as i32 {
+                    if a.pixel(x, y) != b.pixel(x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(
+            differing(&one, &many) > 50,
+            "the bar says the same thing whether one file or four are chosen"
+        );
+
+        // Even with something to complain about, the count wins.
+        p.status = Some("that name is taken".into());
+        let with_error = shot(&mut p);
+        assert!(
+            differing(&with_error, &many) < 50,
+            "an error hid the fact that four files are selected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_sidebar_is_a_tint_rather_than_a_slab() {
+        // `surface` is white at four per cent. Setting its alpha to a half
+        // means fifty per cent white, which painted a grey slab down the side
+        // of the window.
+        let dir = scratch("sidebar-tint");
+        let mut p = pane(&dir);
+        let link = Link::new();
+        for theme in [Theme::dark(), Theme::light()] {
+            let img = Image::new(1180, 720).unwrap();
+            p.render(&img.canvas(), &theme, BODY, &link);
+            let side = p.sidebar_rect(BODY);
+            let bar = img.pixel((side.x + 4.0) as i32, (side.bottom() - 20.0) as i32);
+            let back = img.pixel(
+                (p.grid_rect(BODY).right() - 4.0) as i32,
+                (side.bottom() - 20.0) as i32,
+            );
+            // Close to the backdrop it sits on, not halfway to white or black.
+            let gap = (bar.0 as i32 - back.0 as i32).abs()
+                + (bar.1 as i32 - back.1 as i32).abs()
+                + (bar.2 as i32 - back.2 as i32).abs();
+            assert!(
+                gap < 40,
+                "the sidebar is {gap} away from the backdrop: {bar:?} vs {back:?}"
+            );
+            assert!(gap > 0, "the sidebar is invisible");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

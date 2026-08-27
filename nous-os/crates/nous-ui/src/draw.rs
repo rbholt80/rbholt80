@@ -29,6 +29,17 @@ impl Rgba {
         Rgba(self.0, self.1, self.2, a)
     }
 
+    /// Scale what alpha this colour already has.
+    ///
+    /// The distinction that matters for the theme's tints: `surface` is white
+    /// at four and a half per cent, meant to lift whatever is behind it a
+    /// little. `with_alpha(0.5)` on it does not mean "half as strong" — it
+    /// means fifty per cent white, which is a grey slab. This means half as
+    /// strong.
+    pub fn softer(self, factor: f64) -> Rgba {
+        Rgba(self.0, self.1, self.2, (self.3 * factor).clamp(0.0, 1.0))
+    }
+
     /// Blend towards another colour. `t` of 0 is self, 1 is other.
     pub fn mix(self, other: Rgba, t: f64) -> Rgba {
         let t = t.clamp(0.0, 1.0);
@@ -830,5 +841,26 @@ mod tests {
         assert!((r as i32 - 200).abs() <= 2, "red was {r}");
         assert!((g as i32 - 100).abs() <= 2, "green was {g}");
         assert!((b as i32 - 50).abs() <= 2, "blue was {b}");
+    }
+    #[test]
+    fn softening_a_tint_scales_it_rather_than_replacing_it() {
+        // `surface` is white at four and a half per cent. Asking for half of
+        // it must not produce fifty per cent white, which is what
+        // `with_alpha(0.5)` gives and what turned a sidebar into a grey slab.
+        let tint = Rgba::rgba(255, 255, 255, 0.045);
+        assert!(
+            (tint.softer(0.5).3 - 0.0225).abs() < 1e-9,
+            "{}",
+            tint.softer(0.5).3
+        );
+        assert!(tint.softer(0.5).3 < tint.3, "softening made it stronger");
+        assert_eq!(
+            tint.with_alpha(0.5).3,
+            0.5,
+            "with_alpha still replaces, as it should"
+        );
+        // And it cannot be pushed out of range.
+        assert_eq!(tint.softer(100.0).3, 1.0);
+        assert_eq!(tint.softer(-1.0).3, 0.0);
     }
 }

@@ -47,7 +47,23 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|n| View::named(n));
 
-    let theme = Theme::detect();
+    // Detected from the desktop's own setting, and overridable — detection
+    // reads a GTK preference that not every desktop sets, and being stuck in
+    // the wrong theme with no way to say so is a poor first impression.
+    let theme = match args
+        .iter()
+        .position(|a| a == "--theme")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+    {
+        Some("dark") => Theme::dark(),
+        Some("light") => Theme::light(),
+        Some(other) => {
+            eprintln!("nous: unknown theme '{other}' — use dark or light");
+            std::process::exit(2);
+        }
+        None => Theme::detect(),
+    };
     let mut window = match Window::open("Nous", WIDTH, HEIGHT, WindowKind::Normal) {
         Ok(w) => w,
         Err(e) => {
@@ -85,6 +101,13 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--type") {
         if let Some(t) = args.get(i + 1) {
             app.demo_type(t);
+        }
+    }
+    // Choose several files, so a multiple selection can be looked at without
+    // a pointer to make one with.
+    if let Some(i) = args.iter().position(|a| a == "--choose") {
+        if let Some(list) = args.get(i + 1) {
+            app.demo_choose(list);
         }
     }
     if let Some(i) = args.iter().position(|a| a == "--demo-ask") {
@@ -159,6 +182,7 @@ nous — the interface window
 
     nous                     open it
     nous --view files        open on a particular view
+    nous --theme light       force a theme (dark, light)
     nous --view player       (files, player, edit, history)
     nous --screenshot P.png  open, draw one frame, write it to P, exit
 

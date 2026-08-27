@@ -1042,28 +1042,72 @@ mod tests {
     }
 
     #[test]
-    fn the_selected_cell_is_marked() {
+    fn the_selection_is_as_clear_in_one_theme_as_the_other() {
+        // A ring that reads as bright on a dark ground can be a hairline on a
+        // pale one, and "which files am I about to delete" is not a question
+        // to answer by squinting.
+        let entries: Vec<Entry> = (0..6)
+            .map(|i| entry(&format!("f{i}.jpg"), 1_000_000))
+            .collect();
+        let f = Field::arrange(&entries, AREA, NOW);
+        let c = f.cell_of(0).unwrap().rect;
+        let mut counts: Vec<i32> = Vec::new();
+        for theme in [Theme::dark(), Theme::light()] {
+            let shot = |sel: &[usize]| {
+                let img = Image::new(900, 600).unwrap();
+                render(&img.canvas(), &f, &entries, sel, &theme, AREA);
+                img
+            };
+            let none = shot(&[]);
+            let one = shot(&[0]);
+            let mut differs = 0;
+            for y in c.y as i32..c.bottom() as i32 {
+                for x in c.x as i32..c.right() as i32 {
+                    if none.pixel(x, y) != one.pixel(x, y) {
+                        differs += 1;
+                    }
+                }
+            }
+            assert!(differs > 20, "the selection is invisible: {differs} pixels");
+            counts.push(differs);
+        }
+        let (a, b) = (counts[0] as f64, counts[1] as f64);
+        assert!(
+            a.min(b) / a.max(b) > 0.5,
+            "the selection is far weaker in one theme than the other: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn several_chosen_cells_are_all_marked() {
+        // A multiple selection is only trustworthy if you can see all of it.
         let theme = Theme::dark();
         let entries: Vec<Entry> = (0..6)
             .map(|i| entry(&format!("f{i}.jpg"), 1_000_000))
             .collect();
         let f = Field::arrange(&entries, AREA, NOW);
-        let shot = |sel: &[usize]| {
-            let img = Image::new(900, 600).unwrap();
-            render(&img.canvas(), &f, &entries, sel, &theme, AREA);
-            img
-        };
-        let none = shot(&[]);
-        let one = shot(&[0]);
-        let c = f.cell_of(0).unwrap().rect;
-        let mut differs = 0;
-        for y in c.y as i32..c.bottom() as i32 {
-            for x in c.x as i32..c.right() as i32 {
-                if none.pixel(x, y) != one.pixel(x, y) {
-                    differs += 1;
+        let img = Image::new(900, 600).unwrap();
+        render(&img.canvas(), &f, &entries, &[1, 3], &theme, AREA);
+        let plain = Image::new(900, 600).unwrap();
+        render(&plain.canvas(), &f, &entries, &[], &theme, AREA);
+
+        for i in [1usize, 3] {
+            let c = f.cell_of(i).unwrap().rect;
+            let mut differs = 0;
+            for y in c.y as i32..c.bottom() as i32 {
+                for x in c.x as i32..c.right() as i32 {
+                    if img.pixel(x, y) != plain.pixel(x, y) {
+                        differs += 1;
+                    }
                 }
             }
+            assert!(differs > 20, "cell {i} is chosen and unmarked");
         }
-        assert!(differs > 20, "the selection is invisible: {differs} pixels");
+        let c = f.cell_of(2).unwrap().rect;
+        assert_eq!(
+            img.pixel((c.x + c.w / 2.0) as i32, (c.y + 4.0) as i32),
+            plain.pixel((c.x + c.w / 2.0) as i32, (c.y + 4.0) as i32),
+            "an unchosen cell was marked"
+        );
     }
 }

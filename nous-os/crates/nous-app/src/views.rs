@@ -259,6 +259,20 @@ impl App {
         self.look();
     }
 
+    /// Choose the entries at these positions, as a run of clicks would.
+    /// Never reachable from the keyboard or the mouse.
+    pub fn demo_choose(&mut self, list: &str) {
+        let mut it = list
+            .split(',')
+            .filter_map(|n| n.trim().parse::<usize>().ok());
+        if let Some(first) = it.next() {
+            self.pane.files.choose_only(first);
+        }
+        for i in it {
+            self.pane.files.toggle(i);
+        }
+    }
+
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
             let inner = report
