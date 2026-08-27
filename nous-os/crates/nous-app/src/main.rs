@@ -146,7 +146,7 @@ nous — the interface window
 
     nous                     open it
     nous --view files        open on a particular view
-    nous --view player       (files, player, edit)
+    nous --view player       (files, player, edit, history)
     nous --screenshot P.png  open, draw one frame, write it to P, exit
 
 Inside the window:
