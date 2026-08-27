@@ -157,6 +157,35 @@ impl Link {
         Ok(out)
     }
 
+    /// Ask what it would take to do something, without doing any of it.
+    pub fn call_intent_plan(&mut self, params: Json) -> Result<Json, String> {
+        self.method(method::INTENT_PLAN, params)
+    }
+
+    /// Run the plan that was shown. Takes the plan document rather than the
+    /// words, so what runs is what was agreed to.
+    pub fn call_intent_confirm(&mut self, params: Json) -> Result<Json, String> {
+        self.method(method::INTENT_CONFIRM, params)
+    }
+
+    fn method(&mut self, name: &str, params: Json) -> Result<Json, String> {
+        let out = match self.ensure()?.call(name, params) {
+            Ok(v) => v,
+            Err(e) => {
+                self.client = None;
+                self.trouble = Some(short(&e));
+                return Err(short(&e));
+            }
+        };
+        if let Some(msg) = first_failure(&out) {
+            self.trouble = Some(msg.clone());
+            return Err(msg);
+        }
+        self.trouble = None;
+        self.changes += 1;
+        Ok(out)
+    }
+
     /// The last few things that were done, for the view that lists them.
     pub fn journal(&mut self, limit: u64) -> Option<Json> {
         let c = self.ensure().ok()?;

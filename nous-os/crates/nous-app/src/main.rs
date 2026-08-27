@@ -10,6 +10,7 @@
 //! because it is summoned over whatever you are already doing and a view inside
 //! this window could not be.
 
+mod ask;
 mod curated;
 mod filepane;
 mod history;
@@ -79,6 +80,9 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--demo-marks") {
         app.demo_marks(args.get(i + 1).map(String::as_str));
     }
+    if let Some(i) = args.iter().position(|a| a == "--demo-ask") {
+        app.demo_ask(args.get(i + 1).map(String::as_str));
+    }
     if let Some(i) = args.iter().position(|a| a == "--demo-history") {
         app.demo_history(args.get(i + 1).map(String::as_str));
     }
@@ -146,14 +150,24 @@ nous — the interface window
     nous --screenshot P.png  open, draw one frame, write it to P, exit
 
 Inside the window:
-    1 2 3        switch view
-    Tab          next view
-    arrows       move around
-    Return       open / play what is selected
+    / or Ctrl-K  ask for something, about whatever you are looking at
+    Enter        run the plan you were shown · Esc leaves it
+    Ctrl-Z       take back the last thing that was done
+    1 2 3 4      switch view · Tab for the next one
+    arrows       move around · Return opens what is selected
+
+In Files:
+    F2 rename · Delete to trash · F5 refresh · Ctrl+C/X/V
+    Ctrl+Shift+N new folder · Alt+Left/Right back and forward
+    Backspace up a folder · type letters to jump to a file
+    right-click for the rest
+
     Ctrl-Q       quit
 
-The panel you talk to is a separate overlay, summoned by its hotkey. Run
-`nousd` for the daemon that does the work.
+Nothing is changed without the daemon: every rename, move and deletion
+goes through it so that it is written down and can be taken back. Run
+`nousd` if it is not already running. The command bar you summon over
+other applications is separate, and has its own hotkey.
 ";
 
 /// The offscreen probe every layout needs for measuring text before there is

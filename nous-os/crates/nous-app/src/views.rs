@@ -10,6 +10,7 @@
 //! than showing something made up: a player with nothing playing is what a
 //! player with nothing playing looks like.
 
+use crate::ask::{self, Ask};
 use crate::filepane::FilePane;
 use crate::history::{self, Deed};
 use crate::link::Link;
@@ -85,6 +86,8 @@ pub struct App {
     seen_changes: u64,
     /// What to say about the last undo, wherever the user happens to be.
     pub said: Option<String>,
+    /// The one line at the top that knows what you are looking at.
+    pub ask: Ask,
     /// The tab rectangles from the last frame, so a click can be tested against
     /// what was actually drawn rather than against a guess at where it was.
     tabs: Vec<(View, Rect)>,
@@ -115,6 +118,7 @@ impl App {
             history_scroll: 0.0,
             seen_changes: u64::MAX,
             said: None,
+            ask: Ask::new(),
             tabs: Vec::new(),
         }
     }
@@ -224,6 +228,22 @@ impl App {
         }
     }
 
+    /// Show a plan read from a file, so the ask bar can be looked at without a
+    /// daemon to produce one. Never reachable from the keyboard or the mouse.
+    pub fn demo_ask(&mut self, from_file: Option<&str>) {
+        let Some(text) = from_file.and_then(|p| std::fs::read_to_string(p).ok()) else {
+            return;
+        };
+        match nous_core::json::parse(&text) {
+            Ok(v) => {
+                let asked = v.str_or("asked", "tidy this folder").to_string();
+                self.ask.edit.set(&asked);
+                self.ask.state = crate::ask::read_plan(&v, &asked);
+            }
+            Err(e) => eprintln!("nous: {e}"),
+        }
+    }
+
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
             let inner = report
@@ -240,7 +260,9 @@ impl App {
     /// Escape closes the window unless a view is using it for something — a
     /// menu to dismiss, or a rename to abandon.
     pub fn handles_escape(&self) -> bool {
-        self.view == View::Files && self.pane.wants_escape()
+        self.ask.focused
+            || self.ask.has_proposal()
+            || (self.view == View::Files && self.pane.wants_escape())
     }
 
     // --- input ------------------------------------------------------------
@@ -248,13 +270,36 @@ impl App {
     /// Whether the views are typing rather than commanding, in which case the
     /// keys that switch view are letters and belong to whatever is being typed.
     fn is_typing(&self) -> bool {
-        self.view == View::Files && self.pane.wants_escape()
+        self.ask.focused || (self.view == View::Files && self.pane.wants_escape())
     }
 
     pub fn key(&mut self, k: Key, w: f64, h: f64) {
         let body = self.body(w, h);
+        if self.ask.focused {
+            return self.ask_key(k);
+        }
+        // A proposal is showing but the bar does not have the keyboard —
+        // Enter and Escape still belong to it, because those are the two
+        // answers it is waiting for.
+        if self.ask.has_proposal() {
+            if k.is(ffi::XK_Return) || k.is(ffi::XK_KP_Enter) {
+                self.ask.confirm(&mut self.link);
+                self.pane.reload();
+                return;
+            }
+            if k.is(ffi::XK_Escape) {
+                self.ask.dismiss();
+                return;
+            }
+        }
         if self.is_typing() {
             return self.pane.key(k, body, &mut self.link);
+        }
+        // Ctrl-K, or a slash, to start asking: the two gestures people who use
+        // anything else already have in their fingers.
+        if (k.ctrl && k.sym == 'k' as u64) || (!k.ctrl && !k.alt && k.sym == '/' as u64) {
+            self.ask.focused = true;
+            return;
         }
         // View switching, wherever you are. Ctrl-held, so a bare "1" can still
         // be typed at a file name.
@@ -283,6 +328,38 @@ impl App {
             View::Player => self.player_key(k),
             View::Edit => self.edit_key(k),
             View::History => self.history_key(k, body),
+        }
+    }
+
+    fn ask_key(&mut self, k: Key) {
+        use nous_ui::input::Step as EditStep;
+        if k.is(ffi::XK_Escape) {
+            return self.ask.dismiss();
+        }
+        if k.is(ffi::XK_Return) || k.is(ffi::XK_KP_Enter) {
+            // Enter means "yes, that one" when a plan is showing, and "work
+            // out what this would take" when a question is.
+            if self.ask.has_proposal() {
+                self.ask.confirm(&mut self.link);
+                self.pane.reload();
+            } else {
+                let ctx = self.context_path();
+                self.ask.submit(&mut self.link, &ctx);
+            }
+            return;
+        }
+        let step = if k.ctrl {
+            EditStep::Word
+        } else {
+            EditStep::Char
+        };
+        match k.sym {
+            s if s == ffi::XK_BackSpace => self.ask.edit.backspace(step),
+            s if s == ffi::XK_Delete => self.ask.edit.delete(step),
+            s if s == ffi::XK_Left => self.ask.edit.move_caret(-1, step, k.shift),
+            s if s == ffi::XK_Right => self.ask.edit.move_caret(1, step, k.shift),
+            s if s == 'a' as u64 && k.ctrl => self.ask.edit.select_all(),
+            _ => {}
         }
     }
 
@@ -367,6 +444,10 @@ impl App {
     }
 
     pub fn text(&mut self, t: &str) {
+        if self.ask.focused {
+            self.ask.edit.insert(t);
+            return;
+        }
         if self.view == View::Files {
             self.pane.text(t);
         }
@@ -379,10 +460,19 @@ impl App {
             self.view = *v;
             return;
         }
+        let bar = ask::Layout::compute(&self.ask, w, TABS_H);
+        if bar.bar.contains(x, y) {
+            self.ask.focused = true;
+            return;
+        }
         let body = self.body(w, h);
         if !body.contains(x, y) {
             return;
         }
+        // Clicking into a view puts the keyboard back where the click landed,
+        // but leaves a proposal showing: clicking a file to check it against
+        // the plan must not throw the plan away.
+        self.ask.focused = false;
         // Views lay themselves out from the origin of their own box.
         let (lx, ly) = (x - body.x, y - body.y);
         match self.view {
@@ -455,9 +545,28 @@ impl App {
 
     // --- drawing ----------------------------------------------------------
 
-    /// Where the current view gets to draw: everything under the tab bar.
+    /// Where the current view gets to draw: everything under the tab row and
+    /// the ask bar. The bar takes more room when it has a plan to show, and
+    /// the view under it shrinks rather than being covered — a proposal that
+    /// hides the folder it is about is a proposal you cannot check.
     fn body(&self, w: f64, h: f64) -> Rect {
-        Rect::new(0.0, TABS_H, w, (h - TABS_H).max(0.0))
+        let top = TABS_H + ask::Layout::compute(&self.ask, w, TABS_H).height();
+        Rect::new(0.0, top, w, (h - top).max(0.0))
+    }
+
+    /// What the ask bar should say it is about.
+    fn context(&self) -> String {
+        match self.view {
+            View::Files => crate::manage::name_of(&self.pane.here()),
+            View::Player => "what is playing".to_string(),
+            View::Edit => self.editor.project.clone(),
+            View::History => "what has been done".to_string(),
+        }
+    }
+
+    /// The folder a request is about, as a path the daemon can use.
+    fn context_path(&self) -> String {
+        self.pane.here().to_string_lossy().to_string()
     }
 
     /// Work that was put off until something could be done about it.
@@ -482,6 +591,9 @@ impl App {
     pub fn render(&mut self, c: &Canvas, theme: &Theme, w: f64, h: f64) {
         c.fill_rect(Rect::new(0.0, 0.0, w, h), theme.backdrop_opaque);
         self.draw_tabs(c, theme, w);
+        let bar = ask::Layout::compute(&self.ask, w, TABS_H);
+        let ctx = self.context();
+        ask::render(c, &self.ask, theme, &bar, &ctx);
 
         let body = self.body(w, h);
         if body.h <= 0.0 {
@@ -744,7 +856,11 @@ mod tests {
         let tile = layout.tile_rect(i, a.pane.files.scroll);
         let (vx, vy) = (grid.x + tile.x + tile.w / 2.0, grid.y + tile.y + 4.0);
 
-        a.click(vx, vy + TABS_H, 1, w, h);
+        // Taken from the body rather than written as TABS_H: the ask bar sits
+        // between the tabs and the view, and hard-coding the offset here would
+        // make this test agree with a stale idea of the layout.
+        let top = a.body(w, h).y;
+        a.click(vx, vy + top, 1, w, h);
         assert_eq!(
             a.pane.files.selected, i,
             "the click landed on the wrong tile"
@@ -755,6 +871,10 @@ mod tests {
         assert_ne!(
             b.pane.files.selected, i,
             "the offset makes no difference, so this proves nothing"
+        );
+        assert!(
+            top > TABS_H,
+            "the ask bar takes no room, so this tests less than it should"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -894,6 +1014,126 @@ mod tests {
             a.settle();
         }
         assert_eq!(a.link.changes, before, "settling asked the daemon again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slash_or_ctrl_k_starts_asking_from_any_view() {
+        let dir = scratch("ask-start");
+        for v in View::ALL {
+            let mut a = app_on(&dir);
+            a.view = v;
+            a.key(key('/' as u64), 1180.0, 720.0);
+            assert!(a.ask.focused, "slash did not start asking in {}", v.title());
+
+            let mut b = app_on(&dir);
+            b.view = v;
+            b.key(
+                Key {
+                    sym: 'k' as u64,
+                    ctrl: true,
+                    shift: false,
+                    alt: false,
+                },
+                1180.0,
+                720.0,
+            );
+            assert!(
+                b.ask.focused,
+                "ctrl-k did not start asking in {}",
+                v.title()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_into_the_bar_does_not_reach_the_view_underneath() {
+        // "2" is a view switch and "/" starts asking. Both are also characters
+        // in "sort the 2025 files".
+        let dir = scratch("ask-typing");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut a = app_on(&dir);
+        a.key(key('/' as u64), 1180.0, 720.0);
+        a.text("sort the 2");
+        a.key(key('2' as u64), 1180.0, 720.0);
+        assert_eq!(
+            a.view,
+            View::Files,
+            "a digit typed at the bar switched view"
+        );
+        assert_eq!(a.ask.edit.text(), "sort the 2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_proposal_answers_enter_and_escape_wherever_the_keyboard_is() {
+        // The bar may have lost focus to a click in the folder while a plan is
+        // still showing. Those two keys are the answers it is waiting for.
+        let dir = scratch("ask-answer");
+        let mut a = app_on(&dir);
+        a.ask.state = crate::ask::read_plan(
+            &nous_core::json::parse(
+                r#"{"steps":[{"capability":"fs.move","summary":"move it","risk":"write"}],
+                    "plan":{"intent_id":"i1"}}"#,
+            )
+            .unwrap(),
+            "move it",
+        );
+        a.ask.focused = false;
+        assert!(
+            a.handles_escape(),
+            "escape would have closed the window on a live plan"
+        );
+        a.key(key(ffi::XK_Escape), 1180.0, 720.0);
+        assert!(!a.ask.has_proposal(), "escape left the plan showing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_a_file_to_check_it_does_not_throw_the_plan_away() {
+        // Checking the folder against the proposal is exactly what someone
+        // should do before saying yes.
+        let dir = scratch("ask-keep");
+        for i in 0..6 {
+            std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let mut a = app_on(&dir);
+        a.ask.focused = true;
+        a.ask.state = crate::ask::read_plan(
+            &nous_core::json::parse(
+                r#"{"steps":[{"capability":"fs.move","summary":"move it","risk":"write"}],
+                    "plan":{"intent_id":"i1"}}"#,
+            )
+            .unwrap(),
+            "move it",
+        );
+        let body = a.body(1180.0, 720.0);
+        a.click(body.x + 60.0, body.y + 120.0, 1, 1180.0, 720.0);
+        assert!(a.ask.has_proposal(), "clicking a file discarded the plan");
+        assert!(!a.ask.focused, "the keyboard stayed in the bar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_proposal_shrinks_the_view_rather_than_covering_it() {
+        // A plan drawn over the folder it is about is a plan you cannot check.
+        let dir = scratch("ask-room");
+        let mut a = app_on(&dir);
+        let plain = a.body(1180.0, 720.0);
+        a.ask.state = crate::ask::read_plan(
+            &nous_core::json::parse(
+                r#"{"steps":[{"capability":"fs.move","summary":"a","risk":"write"},
+                             {"capability":"fs.delete","summary":"b","risk":"elevated"}],
+                    "plan":{"intent_id":"i1"}}"#,
+            )
+            .unwrap(),
+            "x",
+        );
+        let with = a.body(1180.0, 720.0);
+        assert!(with.y > plain.y, "the plan is drawn over the view");
+        assert!(with.h < plain.h);
+        assert!(with.bottom() <= 720.0 + 0.001);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
