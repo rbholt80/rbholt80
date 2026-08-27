@@ -11,8 +11,9 @@
 //! player with nothing playing looks like.
 
 use crate::filepane::FilePane;
+use crate::history::{self, Deed};
 use crate::link::Link;
-use nous_core::json::Json;
+use nous_core::json::{json_obj, Json};
 use nous_ui::draw::{Canvas, Rect};
 use nous_ui::ffi;
 use nous_ui::player::Player;
@@ -29,16 +30,19 @@ pub enum View {
     Files,
     Player,
     Edit,
+    /// What was done, and how to take it back.
+    History,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Files, View::Player, View::Edit];
+    pub const ALL: [View; 4] = [View::Files, View::Player, View::Edit, View::History];
 
     pub fn title(self) -> &'static str {
         match self {
             View::Files => "Files",
             View::Player => "Player",
             View::Edit => "Edit",
+            View::History => "History",
         }
     }
 
@@ -47,6 +51,7 @@ impl View {
             "files" | "file" => Some(View::Files),
             "player" | "play" | "music" | "video" => Some(View::Player),
             "edit" | "editor" | "cut" => Some(View::Edit),
+            "history" | "journal" | "undo" | "log" => Some(View::History),
             _ => None,
         }
     }
@@ -55,7 +60,8 @@ impl View {
         match self {
             View::Files => View::Player,
             View::Player => View::Edit,
-            View::Edit => View::Files,
+            View::Edit => View::History,
+            View::History => View::Files,
         }
     }
 }
@@ -68,6 +74,17 @@ pub struct App {
     /// The line to the daemon. Held open across views, because what is playing
     /// and what is in a folder are asked of the same process.
     pub link: Link,
+    /// The ledger, as last read. Re-read whenever anything is done, because a
+    /// history that is stale is worse than one that is absent: it says the
+    /// thing you just did did not happen.
+    pub deeds: Vec<Deed>,
+    pub history_selected: usize,
+    pub history_scroll: f64,
+    /// What the link's change counter read when the ledger was last read. Any
+    /// difference means something has happened since.
+    seen_changes: u64,
+    /// What to say about the last undo, wherever the user happens to be.
+    pub said: Option<String>,
     /// The tab rectangles from the last frame, so a click can be tested against
     /// what was actually drawn rather than against a guess at where it was.
     tabs: Vec<(View, Rect)>,
@@ -93,6 +110,11 @@ impl App {
             queue: Queue::default(),
             editor: Player::new("untitled", Vec::new()),
             link: Link::new(),
+            deeds: Vec::new(),
+            history_selected: 0,
+            history_scroll: 0.0,
+            seen_changes: u64::MAX,
+            said: None,
             tabs: Vec::new(),
         }
     }
@@ -141,6 +163,67 @@ impl App {
         self.pane.files.proposal = crate::curated::summary(&report, marked);
     }
 
+    /// Re-read the ledger from the daemon.
+    pub fn refresh_history(&mut self) {
+        let Some(reply) = self.link.journal(60) else {
+            self.seen_changes = self.link.changes;
+            self.deeds.clear();
+            return;
+        };
+        self.seen_changes = self.link.changes;
+        self.deeds = history::read(&reply);
+        self.history_selected = self
+            .history_selected
+            .min(self.deeds.len().saturating_sub(1));
+    }
+
+    /// Take one entry back, by its sequence number.
+    ///
+    /// The undo goes through the broker like anything else, so undoing is
+    /// itself written down — which is what makes it possible to see that
+    /// something was undone, and by what.
+    pub fn undo_seq(&mut self, seq: u64) {
+        let params = json_obj([("seq", seq.into())]);
+        match self.link.call_journal_revert(params) {
+            Ok(_) => {
+                self.said = Some(format!("took back #{seq}"));
+                // The folder on screen may be what changed.
+                self.pane.reload();
+            }
+            Err(e) => self.said = Some(e),
+        }
+    }
+
+    /// Plain undo: the most recent thing that can still be taken back.
+    pub fn undo_last(&mut self) {
+        if self.deeds.is_empty() {
+            self.refresh_history();
+        }
+        match history::newest_undoable(&self.deeds).map(|d| d.seq) {
+            Some(seq) => self.undo_seq(seq),
+            None if !self.link.connected() => {
+                self.said = Some("no daemon — nothing is being recorded".to_string())
+            }
+            None => self.said = Some("nothing left to take back".to_string()),
+        }
+    }
+
+    /// Show a ledger read from a file, so the history view can be looked at
+    /// without a daemon that has done things. Never reachable from the
+    /// keyboard or the mouse.
+    pub fn demo_history(&mut self, from_file: Option<&str>) {
+        let Some(text) = from_file.and_then(|p| std::fs::read_to_string(p).ok()) else {
+            return;
+        };
+        match nous_core::json::parse(&text) {
+            Ok(v) => {
+                self.deeds = history::read(&v);
+                self.seen_changes = self.link.changes;
+            }
+            Err(e) => eprintln!("nous: {e}"),
+        }
+    }
+
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
             let inner = report
@@ -180,6 +263,7 @@ impl App {
                 s if s == '1' as u64 => return self.view = View::Files,
                 s if s == '2' as u64 => return self.view = View::Player,
                 s if s == '3' as u64 => return self.view = View::Edit,
+                s if s == '4' as u64 => return self.view = View::History,
                 _ => {}
             }
         }
@@ -187,10 +271,55 @@ impl App {
             self.view = self.view.next();
             return;
         }
+        // Undo, from wherever you are. The one shortcut everybody already
+        // knows, and the one this system most needs to honour: it is the whole
+        // reason it is safe to let it act.
+        if k.ctrl && k.sym == 'z' as u64 {
+            self.undo_last();
+            return;
+        }
         match self.view {
             View::Files => self.pane.key(k, body, &mut self.link),
             View::Player => self.player_key(k),
             View::Edit => self.edit_key(k),
+            View::History => self.history_key(k, body),
+        }
+    }
+
+    fn history_key(&mut self, k: Key, body: Rect) {
+        if self.deeds.is_empty() {
+            return;
+        }
+        let last = self.deeds.len() - 1;
+        match k.sym {
+            s if s == ffi::XK_Up => self.history_selected = self.history_selected.saturating_sub(1),
+            s if s == ffi::XK_Down => self.history_selected = (self.history_selected + 1).min(last),
+            s if s == ffi::XK_Home => self.history_selected = 0,
+            s if s == ffi::XK_End => self.history_selected = last,
+            // Return takes back the entry the keyboard is on, which is not
+            // necessarily the newest — that is the point of a list.
+            s if s == ffi::XK_Return || s == ffi::XK_KP_Enter => {
+                if let Some(d) = self.deeds.get(self.history_selected) {
+                    if d.can_undo() {
+                        let seq = d.seq;
+                        self.undo_seq(seq);
+                    } else {
+                        self.said = Some("that one cannot be taken back".to_string());
+                    }
+                }
+            }
+            0xffc2 => self.seen_changes = u64::MAX, // F5
+            _ => return,
+        }
+        // Keep the selection on screen.
+        let l = history::Layout::compute(&self.deeds, body.w, body.h, self.history_scroll);
+        if let Some(r) = l.rows.get(self.history_selected) {
+            if r.y < l.body.y {
+                self.history_scroll -= l.body.y - r.y;
+            } else if r.bottom() > l.body.bottom() {
+                self.history_scroll += r.bottom() - l.body.bottom();
+            }
+            self.history_scroll = self.history_scroll.clamp(0.0, l.max_scroll());
         }
     }
 
@@ -272,6 +401,17 @@ impl App {
                     self.queue.selected = i;
                 }
             }
+            View::History => {
+                let l = history::Layout::compute(&self.deeds, body.w, body.h, self.history_scroll);
+                if let Some(i) = l.undo_at(lx, ly) {
+                    if let Some(seq) = self.deeds.get(i).map(|d| d.seq) {
+                        self.history_selected = i;
+                        self.undo_seq(seq);
+                    }
+                } else if let Some(i) = l.row_at(lx, ly) {
+                    self.history_selected = i;
+                }
+            }
             View::Edit => {
                 let layout = nous_ui::player::Layout::compute(&self.editor, body.w, body.h);
                 if layout.scrub.contains(lx, ly) {
@@ -305,6 +445,10 @@ impl App {
                 let max = layout.max_scroll(&self.queue);
                 self.queue.scroll = (self.queue.scroll + dy * 24.0).clamp(0.0, max);
             }
+            View::History => {
+                let l = history::Layout::compute(&self.deeds, body.w, body.h, self.history_scroll);
+                self.history_scroll = (self.history_scroll + dy * 26.0).clamp(0.0, l.max_scroll());
+            }
             View::Edit => {}
         }
     }
@@ -326,6 +470,13 @@ impl App {
             self.pane.wants_curating = false;
             self.pane.curate(&mut self.link);
         }
+        // The ledger is read when it is being looked at and known to be
+        // behind. Re-reading it on every frame would be a round trip per
+        // repaint to answer a question that only changes when something is
+        // done.
+        if self.view == View::History && self.seen_changes != self.link.changes {
+            self.refresh_history();
+        }
     }
 
     pub fn render(&mut self, c: &Canvas, theme: &Theme, w: f64, h: f64) {
@@ -345,6 +496,18 @@ impl App {
             View::Player => {
                 let layout = nous_ui::queue::Layout::compute(&self.queue, body.w, body.h);
                 nous_ui::queue::render(c, &mut self.queue, theme, &layout);
+            }
+            View::History => {
+                let l = history::Layout::compute(&self.deeds, body.w, body.h, self.history_scroll);
+                history::render(
+                    c,
+                    &self.deeds,
+                    self.history_selected,
+                    theme,
+                    &l,
+                    now_secs(),
+                    self.link.connected(),
+                );
             }
             View::Edit => {
                 if self.editor.clips.is_empty() {
@@ -366,6 +529,10 @@ impl App {
     }
 
     fn draw_tabs(&mut self, c: &Canvas, theme: &Theme, w: f64) {
+        self.draw_tab_row(c, theme, w);
+    }
+
+    fn draw_tab_row(&mut self, c: &Canvas, theme: &Theme, w: f64) {
         let bar = Rect::new(0.0, 0.0, w, TABS_H);
         c.fill_rect(bar, theme.backdrop_opaque);
         c.line(0.0, TABS_H - 0.5, w, TABS_H - 0.5, 1.0, theme.hairline);
@@ -392,10 +559,30 @@ impl App {
             x = r.right() + 6.0;
         }
 
-        // The file pane says whether the daemon is there, in its own status
-        // bar. Repeating it here would be two places to keep true.
-        let _ = w;
+        // On the right: what the last undo did, wherever it was pressed from.
+        // Undo is the one action reachable from every view, so its answer has
+        // to be readable from every view too.
+        if let Some(said) = &self.said {
+            let small = theme.small_font();
+            let (sw, sh) = c.measure(said, &small, Some(w * 0.4));
+            c.text(
+                said,
+                w - sw - Metrics::PAD,
+                (TABS_H - sh) / 2.0,
+                &small,
+                theme.text_dim,
+                Some(w * 0.4),
+            );
+        }
     }
+}
+
+/// Seconds since the epoch, for saying how long ago something happened.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The body rectangle as the view sees it once the canvas has been moved under
@@ -489,12 +676,25 @@ mod tests {
         assert_eq!(a.view, View::Player);
         a.key(key('3' as u64), 1000.0, 700.0);
         assert_eq!(a.view, View::Edit);
+        a.key(key('4' as u64), 1000.0, 700.0);
+        assert_eq!(a.view, View::History);
+
+        // Tabbing visits every view and comes round, so a view added without
+        // a number key still has a way in.
         a.key(key(ffi::XK_Tab), 1000.0, 700.0);
         assert_eq!(
             a.view,
             View::Files,
             "tab should come round rather than stop"
         );
+        let mut seen = vec![a.view];
+        for _ in 1..View::ALL.len() {
+            a.key(key(ffi::XK_Tab), 1000.0, 700.0);
+            seen.push(a.view);
+        }
+        for v in View::ALL {
+            assert!(seen.contains(&v), "{} cannot be tabbed to", v.title());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -626,11 +826,85 @@ mod tests {
     }
 
     #[test]
+    fn undo_reaches_the_daemon_from_every_view() {
+        // Undo is the reason it is safe to let this system act. It cannot be
+        // somewhere you have to navigate to first.
+        let dir = scratch("undo-anywhere");
+        for v in View::ALL {
+            let mut a = app_on(&dir);
+            a.view = v;
+            a.key(
+                Key {
+                    sym: 'z' as u64,
+                    ctrl: true,
+                    shift: false,
+                    alt: false,
+                },
+                1000.0,
+                700.0,
+            );
+            assert!(a.said.is_some(), "ctrl-z did nothing in {}", v.title());
+            assert_eq!(a.view, v, "undo moved us somewhere");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_no_daemon_undo_says_why_rather_than_nothing() {
+        let dir = scratch("undo-nodaemon");
+        let mut a = app_on(&dir);
+        a.undo_last();
+        let said = a.said.as_deref().unwrap_or("");
+        assert!(said.contains("daemon"), "said {said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ledger_is_re_read_whenever_anything_has_been_done() {
+        // A history that is stale is worse than one that is missing: it says
+        // the thing you just did did not happen.
+        let dir = scratch("ledger-stale");
+        let mut a = app_on(&dir);
+        a.view = View::History;
+        a.settle();
+        let after_first = a.seen_changes;
+        assert_eq!(
+            after_first, a.link.changes,
+            "the ledger was not read at all"
+        );
+
+        // Something happened.
+        a.link.changes += 1;
+        a.settle();
+        assert_eq!(a.seen_changes, a.link.changes, "the ledger was left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ledger_is_not_re_read_on_every_frame() {
+        // It is a round trip. Asking once a repaint would be a round trip per
+        // repaint to answer a question that only changes when something is
+        // done.
+        let dir = scratch("ledger-quiet");
+        let mut a = app_on(&dir);
+        a.view = View::History;
+        a.settle();
+        let before = a.link.changes;
+        for _ in 0..5 {
+            a.settle();
+        }
+        assert_eq!(a.link.changes, before, "settling asked the daemon again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_view_names_people_would_type_all_work() {
         assert_eq!(View::named("files"), Some(View::Files));
         assert_eq!(View::named("PLAYER"), Some(View::Player));
         assert_eq!(View::named("music"), Some(View::Player));
         assert_eq!(View::named("edit"), Some(View::Edit));
+        assert_eq!(View::named("history"), Some(View::History));
+        assert_eq!(View::named("undo"), Some(View::History));
         assert_eq!(View::named("nonsense"), None);
     }
 }

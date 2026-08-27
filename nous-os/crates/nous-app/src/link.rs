@@ -30,6 +30,13 @@ pub struct Link {
     last_try: Option<Instant>,
     /// What went wrong last, for the status bar to say.
     pub trouble: Option<String>,
+    /// How many requests the daemon has carried out for this window.
+    ///
+    /// Anything watching the journal compares this against what it last saw,
+    /// rather than each caller remembering to say it changed something. A
+    /// ledger that is stale is worse than one that is missing: it says the
+    /// thing you just did did not happen.
+    pub changes: u64,
 }
 
 impl Default for Link {
@@ -44,6 +51,7 @@ impl Link {
             client: None,
             last_try: None,
             trouble: None,
+            changes: 0,
         }
     }
 
@@ -112,6 +120,7 @@ impl Link {
             return Err(msg);
         }
         self.trouble = None;
+        self.changes += 1;
         Ok(out)
     }
 
@@ -124,9 +133,31 @@ impl Link {
         self.invoke(cap, args, cap).ok()
     }
 
-    /// The last few things that were done, for the view that lists them with
-    /// a way to undo each. That view is not built yet; this is what it reads.
-    #[allow(dead_code)]
+    /// Take one journal entry back.
+    ///
+    /// Its own method rather than a capability call: reverting is a daemon
+    /// method, and it runs through the broker on the far side — so an undo is
+    /// itself written down, which is how the ledger can show that something
+    /// was undone and by what.
+    pub fn call_journal_revert(&mut self, params: Json) -> Result<Json, String> {
+        let out = match self.ensure()?.call(method::JOURNAL_REVERT, params) {
+            Ok(v) => v,
+            Err(e) => {
+                self.client = None;
+                self.trouble = Some(short(&e));
+                return Err(short(&e));
+            }
+        };
+        if let Some(msg) = first_failure(&out) {
+            self.trouble = Some(msg.clone());
+            return Err(msg);
+        }
+        self.trouble = None;
+        self.changes += 1;
+        Ok(out)
+    }
+
+    /// The last few things that were done, for the view that lists them.
     pub fn journal(&mut self, limit: u64) -> Option<Json> {
         let c = self.ensure().ok()?;
         match c.call(method::JOURNAL_TAIL, json_obj([("limit", limit.into())])) {

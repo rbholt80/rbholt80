@@ -12,6 +12,7 @@
 
 mod curated;
 mod filepane;
+mod history;
 mod link;
 mod manage;
 mod places;
@@ -77,6 +78,9 @@ fn main() {
     // findings without saying they were invented would be lying.
     if let Some(i) = args.iter().position(|a| a == "--demo-marks") {
         app.demo_marks(args.get(i + 1).map(String::as_str));
+    }
+    if let Some(i) = args.iter().position(|a| a == "--demo-history") {
+        app.demo_history(args.get(i + 1).map(String::as_str));
     }
 
     if let Some(path) = shot {
