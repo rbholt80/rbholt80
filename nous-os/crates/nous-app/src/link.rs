@@ -27,6 +27,12 @@ const RETRY_AFTER: Duration = Duration::from_secs(3);
 
 pub struct Link {
     client: Option<Client>,
+    /// Where to connect. `None` means wherever the daemon normally listens.
+    ///
+    /// Named so a test can point at a socket that certainly has nothing behind
+    /// it: a suite whose results depend on whether a daemon happens to be
+    /// running on the machine is a suite that passes for the wrong reason.
+    socket: Option<std::path::PathBuf>,
     last_try: Option<Instant>,
     /// What went wrong last, for the status bar to say.
     pub trouble: Option<String>,
@@ -46,9 +52,20 @@ impl Default for Link {
 }
 
 impl Link {
+    /// A link to a named socket, for tests and for anyone running a daemon
+    /// somewhere other than where one normally lives.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn to_socket(path: impl Into<std::path::PathBuf>) -> Link {
+        Link {
+            socket: Some(path.into()),
+            ..Link::new()
+        }
+    }
+
     pub fn new() -> Link {
         Link {
             client: None,
+            socket: None,
             last_try: None,
             trouble: None,
             changes: 0,
@@ -75,7 +92,11 @@ impl Link {
                 }
             }
             self.last_try = Some(Instant::now());
-            match Client::connect() {
+            let connected = match &self.socket {
+                Some(p) => Client::connect_to(p),
+                None => Client::connect(),
+            };
+            match connected {
                 Ok(c) => {
                     let _ = c.set_timeout(Some(TIMEOUT));
                     self.client = Some(c);
@@ -186,6 +207,25 @@ impl Link {
         Ok(out)
     }
 
+    /// Is anyone there?
+    ///
+    /// A method rather than a capability, deliberately: capabilities go
+    /// through policy, and asking "are you alive" in a way policy can refuse
+    /// means a perfectly healthy daemon reports itself unreachable. Which it
+    /// did — the first liveness check here asked for `sys.status` as a
+    /// capability and got "no rule permits sys.status for user".
+    pub fn ping(&mut self) -> bool {
+        let Ok(c) = self.ensure() else { return false };
+        match c.call(method::PING, Json::obj()) {
+            Ok(_) => true,
+            Err(e) => {
+                self.client = None;
+                self.trouble = Some(short(&e));
+                false
+            }
+        }
+    }
+
     /// Search the index the daemon keeps of every file it has been shown.
     ///
     /// Runs on every keystroke, so a failure is silent and the caller carries
@@ -218,33 +258,84 @@ impl Link {
     }
 }
 
-/// Pull the reason out of a broker run report, if a step failed.
+/// What the broker actually answers with.
 ///
-/// The report nests: a run holds steps, each with its own ok flag and message.
-/// Reading only the top level reports success for a run whose every step failed.
-pub fn first_failure(report: &Json) -> Option<String> {
-    if report.bool_or("ok", true) {
-        // Some replies carry no top-level flag at all, so the steps are still
-        // worth walking.
-    } else if let Some(e) = report.get("error").and_then(|v| v.as_str()) {
-        return Some(e.to_string());
+/// A run report holds `results`, one per step, each carrying `state` — "ok",
+/// or a word saying what went wrong — and `value`, the step's own answer.
+///
+/// This is written down once, in one place, because guessing it is exactly
+/// what went wrong: three callers each invented a slightly different shape
+/// (`steps[0].result`, a top-level `ok` flag) and every one of them silently
+/// read nothing. Nothing failed, nothing was drawn, and no error said so.
+pub mod report {
+    use nous_core::json::Json;
+
+    /// The answer the first step gave, or `Json::Null`.
+    ///
+    /// Falls back to the report itself, so a caller handed an already-unwrapped
+    /// value still works.
+    pub fn value(report: &Json) -> Json {
+        report
+            .arr_or_empty("results")
+            .first()
+            .and_then(|s| s.get("value"))
+            .cloned()
+            .unwrap_or_else(|| report.clone())
     }
-    for s in report.arr_or_empty("steps") {
-        if !s.bool_or("ok", true) {
+
+    /// Whether every step succeeded.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ok(report: &Json) -> bool {
+        first_failure(report).is_none()
+    }
+
+    /// Why it did not, in the daemon's own words.
+    ///
+    /// A refused step comes back inside a perfectly good reply, so reading
+    /// only the envelope calls a rename that did not happen a success.
+    pub fn first_failure(report: &Json) -> Option<String> {
+        if let Some(e) = report.get("error").and_then(|v| v.as_str()) {
+            if !e.is_empty() {
+                return Some(e.to_string());
+            }
+        }
+        for s in report.arr_or_empty("results") {
+            let state = s.str_or("state", "ok");
+            if state == "ok" {
+                continue;
+            }
+            // "detail" is the sentence a person should read; the state word is
+            // the fallback when there is no sentence.
             let msg = s
-                .get("error")
-                .or_else(|| s.get("detail"))
-                .or_else(|| s.get("summary"))
+                .get("detail")
                 .and_then(|v| v.as_str())
-                .unwrap_or("the daemon refused it");
+                .filter(|d| !d.is_empty())
+                .unwrap_or(state);
             return Some(msg.to_string());
         }
+        // A run that was stopped before any step ran says so at the top.
+        //
+        // The words are the daemon's, not a guess at them: "completed" is what
+        // a finished run says, and reading it as a failure — which the first
+        // version of this did, having assumed "ok" — makes every successful
+        // request look refused.
+        let status = report.str_or("status", "");
+        match status {
+            "" | "completed" => None,
+            "needs_approval" => Some("it needs approving first".to_string()),
+            other => {
+                let msg = report.str_or("message", "");
+                Some(if msg.is_empty() {
+                    format!("the daemon {other} the request")
+                } else {
+                    msg.to_string()
+                })
+            }
+        }
     }
-    if !report.bool_or("ok", true) {
-        return Some("the daemon refused it".to_string());
-    }
-    None
 }
+
+pub use report::first_failure;
 
 /// One line, for a status bar that has one line.
 ///
@@ -269,35 +360,93 @@ mod tests {
     use super::*;
     use nous_core::json::parse;
 
+    /// A real reply, copied off a running daemon rather than imagined.
+    ///
+    /// The tests that stood here passed against a shape I had made up —
+    /// `steps[0].result`, a top-level `ok` flag — which the daemon has never
+    /// sent. They passed, and the interface read nothing, and nothing said so.
+    const REAL: &str = r#"{
+        "dry_run": false, "intent_id": "i4", "message": "", "status": "completed",
+        "plan": {"steps": [{"capability": "curate.scan", "id": "s1"}]},
+        "results": [{
+            "capability": "curate.scan", "id": "s1", "seq": 20, "state": "ok",
+            "detail": "found 4 things to tidy (732.4 KB reclaimable)",
+            "summary": "curate.scan",
+            "value": {"count": 4, "reclaimable": "732.4 KB", "findings": [
+                {"kind": "duplicate", "severity": 4, "paths": ["/d/a.zip", "/d/b.zip"]}
+            ]}
+        }]
+    }"#;
+
+    #[test]
+    fn a_steps_answer_is_read_out_of_the_shape_the_daemon_actually_sends() {
+        let r = parse(REAL).unwrap();
+        let v = report::value(&r);
+        assert_eq!(
+            v.f64_or("count", -1.0),
+            4.0,
+            "read nothing out of a real reply: {v}"
+        );
+        assert_eq!(v.arr_or_empty("findings").len(), 1);
+        assert!(report::ok(&r));
+        assert_eq!(first_failure(&r), None);
+    }
+
     #[test]
     fn a_run_whose_step_failed_is_a_failure_however_the_call_went() {
         // The broker answers a refused operation with a perfectly good reply
         // describing the refusal. Reading only the outer envelope reports
         // success for a rename that did not happen.
-        let r =
-            parse(r#"{"ok":true,"steps":[{"ok":false,"error":"/home/j/b.txt already exists"}]}"#)
-                .unwrap();
+        let r = parse(
+            r#"{"status":"ok","results":[{"state":"failed","detail":"/home/j/b.txt already exists"}]}"#,
+        )
+        .unwrap();
         assert_eq!(
             first_failure(&r).as_deref(),
             Some("/home/j/b.txt already exists")
         );
+        assert!(!report::ok(&r));
     }
 
     #[test]
-    fn a_run_that_worked_reports_nothing_wrong() {
-        let r = parse(r#"{"ok":true,"steps":[{"ok":true,"summary":"moved a to b"}]}"#).unwrap();
-        assert_eq!(first_failure(&r), None);
+    fn a_step_that_failed_without_a_sentence_still_says_something() {
+        let r = parse(r#"{"results":[{"state":"refused"}]}"#).unwrap();
+        assert_eq!(first_failure(&r).as_deref(), Some("refused"));
     }
 
     #[test]
-    fn a_refusal_with_no_steps_still_says_something() {
-        let r = parse(r#"{"ok":false}"#).unwrap();
-        assert!(first_failure(&r).is_some(), "a refusal read as success");
-        let r = parse(r#"{"ok":false,"error":"policy forbids fs.delete here"}"#).unwrap();
+    fn a_finished_run_is_not_read_as_a_refusal() {
+        // The daemon says "completed". Reading anything that is not "ok" as a
+        // failure made every successful request look refused — including the
+        // curator, whose findings then never reached the folder.
+        let r = parse(r#"{"status":"completed","results":[{"state":"ok","value":{"count":4}}]}"#)
+            .unwrap();
+        assert_eq!(first_failure(&r), None, "a completed run read as a refusal");
+        assert_eq!(report::value(&r).f64_or("count", -1.0), 4.0);
+    }
+
+    #[test]
+    fn a_run_refused_before_any_step_ran_says_so() {
+        let r =
+            parse(r#"{"status":"blocked","message":"policy forbids fs.delete here","results":[]}"#)
+                .unwrap();
         assert_eq!(
             first_failure(&r).as_deref(),
             Some("policy forbids fs.delete here")
         );
+        let r = parse(r#"{"status":"blocked","results":[]}"#).unwrap();
+        assert!(first_failure(&r).unwrap().contains("blocked"));
+        // And a plan waiting on a person is not a failure of the daemon's.
+        let r = parse(r#"{"status":"needs_approval","results":[]}"#).unwrap();
+        assert!(first_failure(&r).unwrap().contains("approv"));
+    }
+
+    #[test]
+    fn an_already_unwrapped_value_is_left_alone() {
+        // Callers holding a step's own answer should not have to know whether
+        // it arrived wrapped.
+        let v = parse(r#"{"count":2,"findings":[]}"#).unwrap();
+        assert_eq!(report::value(&v).f64_or("count", -1.0), 2.0);
     }
 
     #[test]

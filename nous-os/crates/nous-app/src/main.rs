@@ -11,6 +11,7 @@
 //! this window could not be.
 
 mod ask;
+mod check;
 mod curated;
 mod filepane;
 mod find;
@@ -34,6 +35,12 @@ fn main() {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{}", HELP);
         return;
+    }
+    // Say what the window can and cannot reach, and why. Needs no display, so
+    // it works from a terminal over ssh and on a machine where the window
+    // itself will not open.
+    if args.iter().any(|a| a == "--check") {
+        std::process::exit(check::run());
     }
     // A screenshot of the real window, for checking the thing that opens rather
     // than an offscreen copy of it. Used by the self-test.
@@ -183,6 +190,7 @@ nous — the interface window
     nous                     open it
     nous --view files        open on a particular view
     nous --theme light       force a theme (dark, light)
+    nous --check             say what is reachable and what is not
     nous --view player       (files, player, edit, history)
     nous --screenshot P.png  open, draw one frame, write it to P, exit
 

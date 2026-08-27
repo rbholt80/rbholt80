@@ -159,14 +159,7 @@ impl FilePane {
         let Some(report) = link.ask("curate.scan", args) else {
             return;
         };
-        // The broker wraps each step's own answer; the findings are inside.
-        let inner = report
-            .get("steps")
-            .and_then(|s| s.as_arr())
-            .and_then(|a| a.first())
-            .and_then(|s| s.get("result"))
-            .cloned()
-            .unwrap_or(report);
+        let inner = crate::link::report::value(&report);
         let marked = curated::apply(&mut self.files.entries, &inner);
         self.files.proposal = curated::summary(&inner, marked);
     }
@@ -1137,6 +1130,10 @@ pub fn read_folder(dir: &Path) -> Vec<Entry> {
 
 #[cfg(test)]
 mod tests {
+    /// A socket nothing listens on, so "no daemon" means it rather than
+    /// meaning "no daemon happened to be running when the suite ran".
+    const NOWHERE: &str = "/nonexistent/nous-test-no-daemon.sock";
+
     use super::*;
     use nous_ui::draw::Image;
 
@@ -1216,7 +1213,7 @@ mod tests {
             .iter()
             .position(|e| e.name == "target")
             .unwrap();
-        p.open_selected(&mut Link::new());
+        p.open_selected(&mut Link::to_socket(NOWHERE));
         assert_eq!(p.here(), dir.join("target"));
 
         p.up();
@@ -1271,7 +1268,7 @@ mod tests {
         let dir = scratch("rename-type");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        p.act(Action::Rename, &mut Link::new());
+        p.act(Action::Rename, &mut Link::to_socket(NOWHERE));
         p.text("hello");
         match &p.editing {
             Editing::Rename { edit, .. } => assert_eq!(edit.text(), "hello"),
@@ -1284,7 +1281,7 @@ mod tests {
         let dir = scratch("rename-escape");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.act(Action::Rename, &mut link);
         p.text("something-else");
         p.key(key(ffi::XK_Escape), BODY, &mut link);
@@ -1298,7 +1295,7 @@ mod tests {
         let dir = scratch("menu");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         // Right-click in the far bottom-right corner: the menu must flip
         // rather than draw off the edge where nothing can reach it.
         p.click(
@@ -1349,7 +1346,7 @@ mod tests {
                 std::fs::write(dir.join(format!("a-longish-file-name-{i}.txt")), b"x").unwrap();
             }
             let mut p = pane(&dir);
-            let mut link = Link::new();
+            let mut link = Link::to_socket(NOWHERE);
             let grid = p.grid_rect(BODY);
             let t =
                 nous_ui::files::Layout::compute_bare(&p.files, grid.w, grid.h).tile_rect(0, 0.0);
@@ -1398,7 +1395,7 @@ mod tests {
         let dir = scratch("menu-width");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.click(300.0, 200.0, 3, false, false, BODY, &mut link);
         let img = Image::new(1180, 720).unwrap();
         let c = img.canvas();
@@ -1428,7 +1425,7 @@ mod tests {
         let dir = scratch("menu-dismiss");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.click(300.0, 300.0, 3, false, false, BODY, &mut link);
         let img = Image::new(1180, 720).unwrap();
         p.render(&img.canvas(), &Theme::dark(), BODY, &link);
@@ -1454,7 +1451,7 @@ mod tests {
         for mode in [Mode::Field, Mode::Grid] {
             let mut p = pane(&dir);
             p.mode = mode;
-            let mut link = Link::new();
+            let mut link = Link::to_socket(NOWHERE);
             let grid = p.grid_rect(BODY);
 
             // Pick a target from whichever arrangement is in force.
@@ -1493,7 +1490,7 @@ mod tests {
             )
             .unwrap();
         }
-        let link = Link::new();
+        let link = Link::to_socket(NOWHERE);
         let shot = |mode: Mode| {
             let mut p = pane(&dir);
             p.mode = mode;
@@ -1543,7 +1540,7 @@ mod tests {
         let dir = scratch("single-click");
         std::fs::create_dir(dir.join("inner")).unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         let grid = p.grid_rect(BODY);
         let layout = nous_ui::files::Layout::compute(&p.files, grid.w, grid.h);
         let t = layout.tile_rect(0, 0.0);
@@ -1596,7 +1593,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), b"hello").unwrap();
         for theme in [Theme::dark(), Theme::light()] {
             let mut p = pane(&dir);
-            let link = Link::new();
+            let link = Link::to_socket(NOWHERE);
             let img = Image::new(1180, 720).unwrap();
             p.render(&img.canvas(), &theme, BODY, &link);
             assert!(
@@ -1617,7 +1614,7 @@ mod tests {
         let dir = scratch("places-click");
         std::fs::create_dir(dir.join("Music")).unwrap();
         let mut p = pane(&dir);
-        let link = Link::new();
+        let link = Link::to_socket(NOWHERE);
         let img = Image::new(1180, 720).unwrap();
         p.render(&img.canvas(), &Theme::dark(), BODY, &link);
         let (path, r) = p
@@ -1626,7 +1623,7 @@ mod tests {
             .find(|(path, _)| path.ends_with("Music"))
             .cloned()
             .expect("a Music shortcut was drawn");
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.click(r.x + 4.0, r.y + 4.0, 1, false, false, BODY, &mut link);
         assert_eq!(p.here(), path);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1638,7 +1635,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("a/b")).unwrap();
         let mut p = pane(&dir);
         p.go(dir.join("a/b"));
-        let link = Link::new();
+        let link = Link::to_socket(NOWHERE);
         let img = Image::new(1180, 720).unwrap();
         p.render(&img.canvas(), &Theme::dark(), BODY, &link);
         let (path, r) = p
@@ -1647,7 +1644,7 @@ mod tests {
             .find(|(path, _)| path.ends_with("a"))
             .cloned()
             .expect("an 'a' crumb was drawn");
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.click(r.x + 2.0, r.y + r.h / 2.0, 1, false, false, BODY, &mut link);
         assert_eq!(p.here(), path, "clicking the path went nowhere");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1663,7 +1660,7 @@ mod tests {
             std::fs::write(dir.join(format!("f{i}.txt")), vec![b'x'; 1000]).unwrap();
         }
         let mut p = pane(&dir);
-        let link = Link::new();
+        let link = Link::to_socket(NOWHERE);
         let status = Rect::new(0.0, BODY.bottom() - STATUS_H, BODY.w, STATUS_H);
         let shot = |p: &mut FilePane| {
             let img = Image::new(1180, 720).unwrap();
@@ -1709,7 +1706,7 @@ mod tests {
         // of the window.
         let dir = scratch("sidebar-tint");
         let mut p = pane(&dir);
-        let link = Link::new();
+        let link = Link::to_socket(NOWHERE);
         for theme in [Theme::dark(), Theme::light()] {
             let img = Image::new(1180, 720).unwrap();
             p.render(&img.canvas(), &theme, BODY, &link);
@@ -1740,7 +1737,7 @@ mod tests {
         let dir = scratch("proposal");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let link = Link::new();
+        let link = Link::to_socket(NOWHERE);
         let status = Rect::new(0.0, BODY.bottom() - STATUS_H, BODY.w, STATUS_H);
 
         let shot = |p: &mut FilePane| {
@@ -1790,7 +1787,7 @@ mod tests {
         let dir = scratch("refresh");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.files.proposal = Some("3 files worth a look here".into());
         p.files.entries[0].mark = Some(nous_ui::files::Mark {
             risk: nous_ui::theme::Risk::Elevated,
@@ -1829,7 +1826,7 @@ mod tests {
         let dir = scratch("curate-none");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.curate(&mut link);
         assert!(
             p.status.is_none(),
@@ -1848,7 +1845,7 @@ mod tests {
         let dir = scratch("no-daemon");
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut p = pane(&dir);
-        let mut link = Link::new();
+        let mut link = Link::to_socket(NOWHERE);
         p.act(Action::Trash, &mut link);
         assert!(
             dir.join("a.txt").exists(),

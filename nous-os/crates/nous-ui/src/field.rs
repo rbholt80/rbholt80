@@ -33,6 +33,12 @@ use crate::theme::{Metrics, Risk, Theme};
 /// what you did this morning.
 const RECENCY_SPAN: f64 = 90.0 * 86400.0;
 
+/// The shortest run of a name that is still worth showing.
+///
+/// Twelve characters of the widest sort. A cell narrower than this shows a
+/// stub — "old-re…" — which reads as a name until you try to use it.
+const LEGIBLE_STUB: &str = "mmmmmmmmmmmm";
+
 /// The smallest a cell may be before it is not worth drawing separately.
 /// Below this it is sediment, and sediment is drawn as texture.
 pub const SEDIMENT: f64 = 26.0;
@@ -438,14 +444,19 @@ pub fn render(
             };
             c.fill_rounded(r, Metrics::RADIUS_SMALL / 2.0, ground);
 
-            // Whether the name is worth drawing is decided by measuring it,
-            // not by guessing at a width. A cell that can show "old-…" has
-            // drawn something that looks like a name and is not one, and
-            // fourteen of those side by side are worse than fourteen blocks:
-            // the blocks at least do not invite you to read them.
+            // Whether a name is worth drawing is measured, not guessed — but
+            // measured against how much of it survives, not against a fraction
+            // of its length. A fraction lets a long name through at "old-re…",
+            // which looks like a name and is not one; six of those side by
+            // side are worse than six blocks, since blocks do not invite you
+            // to read them.
+            //
+            // The yardstick is a run of characters wide enough to tell two
+            // files apart. Below that, nothing is written.
             let room = r.w - 16.0;
             let (full, _) = c.measure(&e.name, &body, None);
-            let worth_naming = cell.readable() && room >= (full * 0.45).min(full);
+            let (least, _) = c.measure(LEGIBLE_STUB, &body, None);
+            let worth_naming = cell.readable() && room >= full.min(least);
             if worth_naming {
                 c.clip_rect(r);
                 c.text(&e.name, r.x + 8.0, r.y + 6.0, &body, theme.text, Some(room));
@@ -952,7 +963,10 @@ mod tests {
             .filter_map(|i| f.cell_of(i).map(|c| (i, c)))
             .find(|(i, c)| {
                 let (full, _) = probe.canvas().measure(&entries[*i].name, &body, None);
-                c.rect.w > 8.0 && c.rect.h > 8.0 && (c.rect.w - 16.0) < full * 0.45
+                c.rect.w > 8.0
+                    && c.rect.h > 8.0
+                    && (c.rect.w - 16.0)
+                        < full.min(probe.canvas().measure(LEGIBLE_STUB, &body, None).0)
             })
             .map(|(_, c)| c)
             .expect("sixty long-named stale files should leave one with no room");

@@ -160,6 +160,9 @@ allow    *              model.infer
 allow    *              media.probe
 allow    *              media.search
 allow    *              media.thumbnail
+# Asking what is playing changes nothing and is asked often, so it sits with
+# the other read-only media capabilities rather than with playback control.
+allow    *              media.state
 allow    *              curate.scan
 allow    *              curate.propose
 allow    *              desk.apps

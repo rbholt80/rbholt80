@@ -275,13 +275,7 @@ impl App {
 
     pub fn refresh_playback(&mut self) {
         if let Some(report) = self.link.ask("media.state", Json::obj()) {
-            let inner = report
-                .get("steps")
-                .and_then(|s| s.as_arr())
-                .and_then(|a| a.first())
-                .and_then(|s| s.get("result"))
-                .cloned()
-                .unwrap_or(report);
+            let inner = crate::link::report::value(&report);
             self.queue.apply(&inner, |_| None);
         }
     }
@@ -880,6 +874,10 @@ pub fn newest_project() -> Option<(String, Json)> {
 
 #[cfg(test)]
 mod tests {
+    /// A socket nothing listens on, so "no daemon" in these tests means it
+    /// rather than meaning "no daemon happened to be running when they ran".
+    const NOWHERE: &str = "/nonexistent/nous-test-no-daemon.sock";
+
     use super::*;
     use nous_ui::draw::Image;
     use std::path::Path;
@@ -903,6 +901,10 @@ mod tests {
     fn app_on(dir: &Path) -> App {
         let mut a = App::new(View::Files);
         a.pane = FilePane::new(dir.to_path_buf(), dir.to_path_buf());
+        // Pointed at nothing on purpose: these tests are about the window, and
+        // a daemon that happens to be running on the machine must not change
+        // what they prove.
+        a.link = Link::to_socket(NOWHERE);
         a
     }
 
