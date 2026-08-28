@@ -1,0 +1,10 @@
+# decision  subject   capability              # reason
+never       *         fs.read:/**/.ssh/**     # private keys stay on the disk
+never       *         fs.read:/**/.gnupg/**
+never       *         fs.write:/boot/**       # do not touch the boot path
+
+deny        agent:*   pkg.install             # a person installs software
+confirm     agent:*   fs.delete:~/**          # say it out loud first
+allow       agent:*   fs.read:~/**
+allow       agent:*   fs.write:~/**
+allow       user      fs.*:~/**

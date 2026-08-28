@@ -1,0 +1,24 @@
+[package]
+name = "warrant"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+description = "Adjudicate what an agent is allowed to do, record how to undo it before it happens, and keep an audit log a person can read."
+keywords = ["agent", "authorization", "policy", "audit", "llm"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "warrant"
+path = "src/lib.rs"
+
+[[bin]]
+name = "warrant"
+path = "src/bin/warrant.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
