@@ -1,0 +1,16 @@
+# Move stray media out of Downloads, and show me the copies I did not know about.
+#
+#   nousctl glyph check examples/tidy-downloads.glyph
+#   nousctl glyph run   examples/tidy-downloads.glyph
+
+flow tidy-downloads {
+  meta description "Move stray media out of Downloads"
+
+  found = curate.scan    roots: [~/Downloads]
+  plan  = curate.propose kinds: [misfiled_media, duplicate, screenshots]
+
+  gate plan.count > 0
+  ask  "Move ${plan.count} items? Nothing is deleted, and the ledger can undo it."
+
+  curate.apply steps: plan.steps
+}

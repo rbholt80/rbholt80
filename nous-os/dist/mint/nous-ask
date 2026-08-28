@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# Summon NOUS over whatever you are doing.
+#
+# Bound to a global hotkey, or invoked by the file manager with a selection.
+#
+# This used to launch a browser in app mode pointed at a local web server, which
+# meant a browser process had to be running for a text box to appear. It now
+# launches the native panel directly. The one subtlety worth keeping is that the
+# focused window is captured *before* the panel is launched, because a moment
+# later the focused window is the panel itself, and "what am I looking at?"
+# would always answer "NOUS".
+
+set -euo pipefail
+
+SHELL_BIN=""
+for candidate in \
+  "${NOUS_SHELL:-}" \
+  "$(dirname "$(readlink -f "$0")")/nous-shell" \
+  "$HOME/.local/bin/nous-shell" \
+  /usr/local/bin/nous-shell \
+  /usr/bin/nous-shell
+do
+  if [[ -n "$candidate" && -x "$candidate" ]]; then SHELL_BIN="$candidate"; break; fi
+done
+
+if [[ -z "$SHELL_BIN" ]]; then
+  echo "nous-ask: nous-shell is not installed" >&2
+  echo "  run dist/mint/install.sh, or set NOUS_SHELL to the binary" >&2
+  exit 1
+fi
+
+PATHS=()
+CWD=""
+ASK=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --paths) shift; while [[ $# -gt 0 && "$1" != --* ]]; do PATHS+=("$1"); shift; done ;;
+    --cwd)   CWD="${2:-}"; shift 2 ;;
+    --ask)   ASK="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'USAGE'
+nous-ask — summon the NOUS panel
+
+  nous-ask                      just the prompt
+  nous-ask --ask "tidy this"    open with something already typed
+  nous-ask --paths FILE...      attach a selection (used by the file manager)
+  nous-ask --cwd DIR            attach the folder being looked at
+USAGE
+      exit 0 ;;
+    *) PATHS+=("$1"); shift ;;
+  esac
+done
+
+# If the daemon is not listening, start it here rather than opening a panel
+# whose only content is an instruction to go and type a command somewhere else.
+# The installer has just finished telling the user to type into the panel and
+# not into a terminal, so a panel saying "run systemctl ..." invites exactly the
+# wrong thing -- and typing it into the panel does nothing but repeat itself.
+SOCK="${NOUS_SOCKET:-${XDG_RUNTIME_DIR:-/run/nous}/nous.sock}"
+if [[ ! -S "$SOCK" ]]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user start nousd.service >/dev/null 2>&1 || true
+    # Give it a moment to bind; the panel opens either way, and if this did
+    # not work the panel says so itself.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -S "$SOCK" ]]; then break; fi
+      sleep 0.2
+    done
+  fi
+fi
+
+# Capture the focus before we take it.
+FOCUS=""
+if command -v xdotool >/dev/null 2>&1; then
+  FOCUS="$(xdotool getactivewindow getwindowname 2>/dev/null || true)"
+fi
+
+# If the file manager gave us a selection but no folder, infer one.
+if [[ -z "$CWD" && ${#PATHS[@]} -gt 0 ]]; then
+  if [[ -d "${PATHS[0]}" ]]; then CWD="${PATHS[0]}"; else CWD="$(dirname "${PATHS[0]}")"; fi
+fi
+
+# Written as if-blocks, not `[[ ... ]] && ...`: under `set -e` a false test at
+# the end of a script is a non-zero exit, and a plain hotkey summon has none of
+# these -- which would abort before the panel ever opened.
+ARGS=()
+if [[ -n "$FOCUS" ]]; then ARGS+=(--focus "$FOCUS"); fi
+if [[ -n "$CWD"   ]]; then ARGS+=(--cwd "$CWD"); fi
+if [[ -n "$ASK"   ]]; then ARGS+=(--ask "$ASK"); fi
+# --paths takes the rest of its arguments, so it goes last.
+if [[ ${#PATHS[@]} -gt 0 ]]; then ARGS+=(--paths "${PATHS[@]}"); fi
+
+exec "$SHELL_BIN" "${ARGS[@]}"

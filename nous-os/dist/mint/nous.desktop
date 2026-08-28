@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NOUS
+GenericName=Files, player, editor
+Comment=Your files, your music and video, and the tools to cut them
+Exec=@BIN@/nous
+Icon=nous
+Terminal=false
+Categories=System;Utility;
+Keywords=ai;assistant;shell;tidy;search;
+StartupNotify=true

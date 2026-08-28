@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Start the NOUS graphical shell.
+#
+# The desktop is Chromium in kiosk mode pointed at the daemon's loopback port.
+# That is not a shortcut: GNOME Shell is JavaScript on a compositor and Windows
+# draws its shell with the same engine as its browser. Using a browser engine as
+# the compositor buys hardware-accelerated compositing, a real layout engine and
+# a text stack, for none of the maintenance of writing those three things.
+
+set -euo pipefail
+
+PORT="${NOUS_UI_PORT:-7666}"
+URL="http://127.0.0.1:${PORT}/"
+
+# Wait for the daemon rather than racing it: systemd ordering gets us close,
+# but the socket is ready slightly before the HTTP listener is.
+for _ in $(seq 50); do
+  if curl -sf -o /dev/null "$URL"; then break; fi
+  sleep 0.2
+done
+
+for candidate in \
+  /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome \
+  /usr/bin/brave-browser /usr/bin/microsoft-edge; do
+  if [[ -x "$candidate" ]]; then BROWSER="$candidate"; break; fi
+done
+
+if [[ -z "${BROWSER:-}" ]]; then
+  echo "nous-session: no browser engine found; falling back to the command shell" >&2
+  exec /usr/bin/nsh
+fi
+
+exec "$BROWSER" \
+  --app="$URL" \
+  --kiosk \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-features=TranslateUI,AutofillServerCommunication \
+  --disable-background-networking \
+  --disable-sync \
+  --password-store=basic \
+  --user-data-dir="${XDG_DATA_HOME:-$HOME/.local/share}/nous/shell"

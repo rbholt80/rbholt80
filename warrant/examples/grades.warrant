@@ -1,0 +1,4 @@
+read      fs.read fs.list fs.stat
+write     fs.write fs.move fs.mkdir
+elevated  fs.delete fs.chmod pkg.install net.connect
+critical  sys.firmware sys.mount

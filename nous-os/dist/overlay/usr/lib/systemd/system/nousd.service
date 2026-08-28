@@ -1,0 +1,44 @@
+[Unit]
+Description=NOUS system daemon
+Documentation=man:nousd(8)
+After=network.target local-fs.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nousd
+Restart=on-failure
+RestartSec=2
+
+# The daemon holds the policy engine and the journal. It is given the access it
+# needs and nothing beyond it: it may reach the user's files and the system it
+# reports on, but it cannot load kernel modules, change the clock, or write
+# anywhere outside its own state.
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+StateDirectory=nous
+RuntimeDirectory=nous
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=nous
+
+# /boot and the ESP are on the capability system's protected list already; this
+# makes the kernel enforce it too, so a bug in the broker is not enough.
+ReadOnlyPaths=-/boot -/efi -/boot/efi
+InaccessiblePaths=-/etc/shadow -/etc/gshadow
+
+[Install]
+WantedBy=multi-user.target

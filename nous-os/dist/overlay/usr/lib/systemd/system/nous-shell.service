@@ -1,0 +1,19 @@
+[Unit]
+Description=NOUS graphical shell
+After=nousd.service graphical.target
+Requires=nousd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nous-session
+Restart=on-failure
+RestartSec=3
+
+# The shell runs as the human, with no elevated access whatsoever. Everything it
+# can do, it does by asking the daemon -- and the daemon refuses it exactly as
+# often as it refuses anyone else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,16 @@
+[package]
+name = "nous-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "nous-shell"
+path = "src/main.rs"
+
+[dependencies]
+nous-core = { path = "../nous-core" }
+nous-ui = { path = "../nous-ui" }
