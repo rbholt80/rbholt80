@@ -1,6 +1,7 @@
 package com.autocut.engine.plan
 
 import com.autocut.engine.analysis.Analysis
+import com.autocut.engine.analysis.BlankKind
 import com.autocut.engine.model.AudioAdjust
 import com.autocut.engine.model.Clip
 import com.autocut.engine.model.EditPlan
@@ -95,6 +96,14 @@ object EditPlanner {
     private const val FOCUS_AUTO_LIMIT = 0.25f
     private const val FOCUS_SOFT_CEILING = 0.45f
 
+    /**
+     * Share of the clip a freeze may cover before removing it stops being a
+     * fix. A one-off stalled capture is a few seconds; a deliberate long static
+     * shot — a fixed dashboard demo, a whiteboard talk filmed from one angle —
+     * can legitimately be most of the clip.
+     */
+    private const val STATIC_AUTO_LIMIT = 0.5f
+
     // ---- resolution ------------------------------------------------------
     private const val SHARE_SHORT_SIDE = 1080
 
@@ -104,6 +113,8 @@ object EditPlanner {
     const val ID_REMOVE_SILENCE = "remove_silence"
     const val ID_SPEED_DEAD_TIME = "speed_dead_time"
     const val ID_REMOVE_SOFT_FOCUS = "remove_soft_focus"
+    const val ID_REMOVE_STATIC_SCENE = "remove_static_scene"
+    const val ID_REMOVE_BLANK_FOOTAGE = "remove_blank_footage"
     const val ID_NORMALIZE_LOUDNESS = "normalize_loudness"
     const val ID_LIMIT_PEAKS = "limit_peaks"
     const val ID_FIX_EXPOSURE = "fix_exposure"
@@ -175,6 +186,8 @@ object EditPlanner {
             planSilenceCuts(draft, edges.interior)
         }
         planFocusCuts(draft)
+        planStaticCuts(draft)
+        planBlankCuts(draft)
     }
 
     private class EdgeSplit(
@@ -329,7 +342,7 @@ object EditPlanner {
 
     private fun planFocusCuts(draft: Draft) {
         val style = draft.prefs.style
-        if (!style.allowFocusCuts) return
+        if (!style.allowVisualCuts) return
         val spans = draft.analysis.video.focusSpans
             .filter { it.relativeSharpness < FOCUS_SOFT_CEILING }
         if (spans.isEmpty()) return
@@ -368,6 +381,91 @@ object EditPlanner {
             severity = if (defaultEnabled) Severity.SUGGESTED else Severity.INFO,
             defaultEnabled = defaultEnabled,
             candidates = spans.map { it.range }.sortedByDescending { it.durationUs },
+        )
+    }
+
+    private fun planStaticCuts(draft: Draft) {
+        val style = draft.prefs.style
+        if (!style.allowVisualCuts) return
+        val spans = draft.analysis.video.staticSpans
+        if (spans.isEmpty()) return
+
+        val totalUs = TimeRange.totalDurationUs(spans.map { it.range })
+        val share = totalUs.toFloat() / draft.probe.durationUs
+
+        // Most of the clip frozen usually means one long static shot taken on
+        // purpose, not a run of failed takes — the same judgement call as a
+        // clip that is soft throughout. Offer it, switched off, and say why.
+        val defaultEnabled = share <= STATIC_AUTO_LIMIT
+        if (!defaultEnabled) {
+            draft.note(
+                "mostly_static",
+                String.format(
+                    Locale.ROOT,
+                    "%.0f%% of this clip never changes — most likely one long static shot rather than " +
+                        "a stalled capture. Removing it is offered but switched off.",
+                    share * 100f,
+                ),
+                Severity.SUGGESTED,
+            )
+        }
+
+        draft.addCutFix(
+            id = ID_REMOVE_STATIC_SCENE,
+            kind = FixKind.REMOVE_STATIC_SCENE,
+            title = "Drop the frozen stretches",
+            detail = String.format(
+                Locale.ROOT,
+                "%d stretch%s (%.1fs) where the picture stopped changing — a paused screen recording, " +
+                    "a slide left up, or a capture that stalled.",
+                spans.size,
+                if (spans.size == 1) "" else "es",
+                totalUs / 1e6,
+            ),
+            severity = if (defaultEnabled) Severity.SUGGESTED else Severity.INFO,
+            defaultEnabled = defaultEnabled,
+            candidates = spans.map { it.range }.sortedByDescending { it.durationUs },
+        )
+    }
+
+    private fun planBlankCuts(draft: Draft) {
+        val style = draft.prefs.style
+        if (!style.allowVisualCuts) return
+        val spans = draft.analysis.video.blankSpans
+        if (spans.isEmpty()) return
+
+        val totalUs = TimeRange.totalDurationUs(spans.map { it.range })
+        val darkUs = TimeRange.totalDurationUs(spans.filter { it.kind == BlankKind.DARK }.map { it.range })
+        val brightUs = TimeRange.totalDurationUs(spans.filter { it.kind == BlankKind.BRIGHT }.map { it.range })
+
+        // Unlike a freeze or a soft shot, a blank stretch is never a look
+        // someone chose on purpose, so there is no "mostly blank, leave it"
+        // guard here — the removal budget and output floor already stop this
+        // from cutting a clip down to nothing.
+        draft.addCutFix(
+            id = ID_REMOVE_BLANK_FOOTAGE,
+            kind = FixKind.REMOVE_BLANK_FOOTAGE,
+            title = "Drop the blank stretches",
+            detail = blankFootageDetail(spans.size, totalUs, darkUs, brightUs),
+            severity = Severity.IMPORTANT,
+            defaultEnabled = true,
+            candidates = spans.map { it.range }.sortedByDescending { it.durationUs },
+        )
+    }
+
+    private fun blankFootageDetail(count: Int, totalUs: Long, darkUs: Long, brightUs: Long): String {
+        val cause = when {
+            darkUs > 0 && brightUs > 0 -> "the lens covered or the camera put away, and a blown-out white frame"
+            darkUs > 0 -> "the lens covered, the camera put away, or pointed somewhere dark"
+            else -> "a blown-out white frame — a lens flare, an overexposed slide, or a stuck capture"
+        }
+        return String.format(
+            Locale.ROOT,
+            "%d stretch%s (%.1fs) with nothing on screen: %s.",
+            count,
+            if (count == 1) "" else "es",
+            totalUs / 1e6,
+            cause,
         )
     }
 
@@ -902,17 +1000,19 @@ object EditPlanner {
 
         private fun presentationOrder(kind: FixKind): Int = when (kind) {
             FixKind.TRIM_EDGES -> 0
-            FixKind.REMOVE_SILENCE -> 1
-            FixKind.SPEED_UP_DEAD_TIME -> 2
-            FixKind.REMOVE_SOFT_FOCUS -> 3
-            FixKind.NORMALIZE_LOUDNESS -> 4
-            FixKind.LIMIT_PEAKS -> 5
-            FixKind.FIX_EXPOSURE -> 6
-            FixKind.FIX_WHITE_BALANCE -> 7
-            FixKind.FIX_CONTRAST -> 8
-            FixKind.BOOST_SATURATION -> 9
-            FixKind.STABILIZE -> 10
-            FixKind.DOWNSCALE_OUTPUT -> 11
+            FixKind.REMOVE_BLANK_FOOTAGE -> 1
+            FixKind.REMOVE_SILENCE -> 2
+            FixKind.SPEED_UP_DEAD_TIME -> 3
+            FixKind.REMOVE_STATIC_SCENE -> 4
+            FixKind.REMOVE_SOFT_FOCUS -> 5
+            FixKind.NORMALIZE_LOUDNESS -> 6
+            FixKind.LIMIT_PEAKS -> 7
+            FixKind.FIX_EXPOSURE -> 8
+            FixKind.FIX_WHITE_BALANCE -> 9
+            FixKind.FIX_CONTRAST -> 10
+            FixKind.BOOST_SATURATION -> 11
+            FixKind.STABILIZE -> 12
+            FixKind.DOWNSCALE_OUTPUT -> 13
         }
     }
 }

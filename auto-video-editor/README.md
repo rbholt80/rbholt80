@@ -34,6 +34,12 @@ Each of these is one decision, with one switch, and one sentence of evidence.
   on screen is played faster instead of being cut, so you do not lose the picture.
 - **Drop the out-of-focus bits** — stretches that are soft *while nothing is
   moving*, which is a camera hunting for focus rather than a pan.
+- **Drop the frozen stretches** — the picture stopped changing at all: a paused
+  screen recording, a slide left up, a capture that stalled. Not a still camera —
+  a still camera still carries a talking subject's own movement and sensor noise.
+- **Drop the blank stretches** — nothing usable on screen: the lens covered, the
+  camera put away, or a blown-out white frame. Neither depends on audio, so a
+  silent screen recording or a phone left running in a pocket still gets caught.
 
 **Sound**
 - **Even out the level** — brings the programme level to a target loudness.
@@ -66,6 +72,12 @@ enforced in code, not left to a threshold:
   recording; the level is held back and the damage is reported, not hidden.
 - **It will not cut a shot that is soft all the way through.** That is the
   footage, not a run of bad takes — so it is offered switched off.
+- **It will not cut a clip that is frozen all the way through.** That reads as a
+  deliberate static shot rather than a stalled capture, so it is offered
+  switched off rather than applied.
+- **It will not let a covered lens skew how bright it thinks the rest of the
+  clip is.** Blank stretches are excluded from the exposure judgement before
+  anything is graded, not averaged in with the footage that actually matters.
 - **It will not desaturate on its own.** Strong colour is usually a look.
 - **It will not invent camera movement.** Where the picture has too little
   structure to measure a shift, the answer is zero, not a confident guess.

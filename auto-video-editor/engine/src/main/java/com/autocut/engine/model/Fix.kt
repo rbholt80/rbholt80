@@ -20,6 +20,12 @@ enum class FixKind {
     /** Drop stretches that are out of focus while nothing is moving. */
     REMOVE_SOFT_FOCUS,
 
+    /** Drop stretches where the picture stopped changing at all. */
+    REMOVE_STATIC_SCENE,
+
+    /** Drop stretches with nothing usable on screen: covered, blown out, dead. */
+    REMOVE_BLANK_FOOTAGE,
+
     /** Bring the overall level to the target loudness. */
     NORMALIZE_LOUDNESS,
 
@@ -76,7 +82,8 @@ data class Fix(
 ) {
     val cuts: Boolean
         get() = kind == FixKind.TRIM_EDGES || kind == FixKind.REMOVE_SILENCE ||
-            kind == FixKind.REMOVE_SOFT_FOCUS
+            kind == FixKind.REMOVE_SOFT_FOCUS || kind == FixKind.REMOVE_STATIC_SCENE ||
+            kind == FixKind.REMOVE_BLANK_FOOTAGE
 }
 
 /**

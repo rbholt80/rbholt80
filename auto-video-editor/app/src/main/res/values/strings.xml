@@ -13,7 +13,7 @@
     <string name="auto_mode_needs_permission">Access to your videos is needed to notice new recordings.</string>
     <string name="auto_mode_permission_denied">Automatic mode stays off without access to your videos.</string>
     <string name="home_how_title">What it changes</string>
-    <string name="home_how_body">• Dead air at the start and end, and the long pauses in between\n• The recording level, brought to a consistent loudness\n• Exposure, colour cast, contrast and washed-out colour\n• Handheld shake, cancelled frame by frame\n• Out-of-focus takes, dropped\n\nEverything happens on your phone. Nothing is uploaded, and the original file is never modified.</string>
+    <string name="home_how_body">• Dead air at the start and end, and the long pauses in between\n• The recording level, brought to a consistent loudness\n• Exposure, colour cast, contrast and washed-out colour\n• Handheld shake, cancelled frame by frame\n• Out-of-focus, frozen, or blank stretches, dropped — lens caps and stalled screen recordings included\n\nEverything happens on your phone. Nothing is uploaded, and the original file is never modified.</string>
 
     <!-- Edit -->
     <string name="edit_analyzing">Watching the whole video…</string>

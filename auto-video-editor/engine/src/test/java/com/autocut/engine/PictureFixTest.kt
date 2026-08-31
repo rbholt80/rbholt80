@@ -169,4 +169,94 @@ class PictureFixTest {
         // 1080x1920 is a 1080p phone video, not something that needs shrinking.
         assertNull(plan.fix(EditPlanner.ID_DOWNSCALE))
     }
+
+    // ---- cuts that come from the picture, not the soundtrack ---------------
+
+    @Test
+    fun `a frozen stretch is cut even with no soundtrack`() {
+        val frozen = Fixtures.steadyVideo(seconds(30.0)).map {
+            if (it.timeUs >= seconds(10.0) && it.timeUs < seconds(15.0)) {
+                it.copy(motion = 0f)
+            } else {
+                it
+            }
+        }
+        val plan = planFor(frozen)
+
+        val fix = plan.fix(EditPlanner.ID_REMOVE_STATIC_SCENE)
+        assertNotNull(fix)
+        assertTrue(fix!!.enabled)
+        assertEquals(seconds(5.0), plan.removedDurationUs)
+        assertEquals(2, plan.clips.size)
+    }
+
+    @Test
+    fun `a clip frozen throughout is not cut to almost nothing`() {
+        val frozen = Fixtures.steadyVideo(seconds(30.0)).map { it.copy(motion = 0f) }
+        val plan = planFor(frozen)
+
+        val fix = plan.fix(EditPlanner.ID_REMOVE_STATIC_SCENE)
+        assertNotNull(fix)
+        assertFalse("a whole clip frozen is probably a deliberate static shot", fix!!.enabled)
+        assertEquals(1, plan.clips.size)
+        assertTrue(plan.notes.any { it.id == "mostly_static" })
+    }
+
+    @Test
+    fun `a lens-covered stretch is dropped`() {
+        val covered = Fixtures.steadyVideo(seconds(30.0)).map {
+            if (it.timeUs >= seconds(3.0) && it.timeUs < seconds(8.0)) {
+                it.copy(shadowRatio = 0.99f, meanLuma = 2f)
+            } else {
+                it
+            }
+        }
+        val plan = planFor(covered)
+
+        val fix = plan.fix(EditPlanner.ID_REMOVE_BLANK_FOOTAGE)
+        assertNotNull(fix)
+        assertTrue(fix!!.enabled)
+        assertEquals(seconds(5.0), plan.removedDurationUs)
+        assertEquals(2, plan.clips.size)
+    }
+
+    @Test
+    fun `a blown-out white stretch is dropped`() {
+        val blown = Fixtures.steadyVideo(seconds(30.0)).map {
+            if (it.timeUs >= seconds(20.0) && it.timeUs < seconds(24.0)) {
+                it.copy(highlightRatio = 0.99f, meanLuma = 253f)
+            } else {
+                it
+            }
+        }
+        val plan = planFor(blown)
+
+        val fix = plan.fix(EditPlanner.ID_REMOVE_BLANK_FOOTAGE)
+        assertNotNull(fix)
+        assertTrue(fix!!.enabled)
+        assertEquals(seconds(4.0), plan.removedDurationUs)
+    }
+
+    @Test
+    fun `a lens-covered stretch does not drag the exposure judgement down`() {
+        // Two thirds of this clip is a covered lens; one third is correctly
+        // exposed at the target brightness. Averaging every frame together
+        // would read as a very dark clip and brighten it hard — exactly the
+        // kind of correction that looks like guessing when a third of the
+        // "video" the exposure fix graded against was never a photograph.
+        val duration = seconds(30.0)
+        val video = Fixtures.steadyVideo(duration).map {
+            if (it.timeUs < seconds(20.0)) {
+                it.copy(shadowRatio = 0.99f, meanLuma = 2f, lumaStdDev = 1f)
+            } else {
+                it
+            }
+        }
+        val plan = planFor(video)
+
+        assertNull("exposure should be judged from the real footage only", plan.fix(EditPlanner.ID_FIX_EXPOSURE))
+        assertTrue(plan.notes.none { it.id == "very_dark" })
+        // The covered stretch is still found and offered for removal on its own terms.
+        assertNotNull(plan.fix(EditPlanner.ID_REMOVE_BLANK_FOOTAGE))
+    }
 }

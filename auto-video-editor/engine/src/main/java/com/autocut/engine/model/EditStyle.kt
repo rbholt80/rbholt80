@@ -23,7 +23,10 @@ enum class EditStyle(
     /** How much of the source the cutting fixes may remove in total. */
     val maxRemovedFraction: Float,
     val allowSpeedRamps: Boolean,
-    val allowFocusCuts: Boolean,
+    /** Cuts that come from the picture rather than the soundtrack: out-of-focus,
+     *  frozen, or blank stretches. Independent of [allowSpeedRamps], which is
+     *  audio-timeline behaviour. */
+    val allowVisualCuts: Boolean,
     /** Target programme level in dBFS RMS. */
     val targetLoudnessDb: Float,
 ) {
@@ -38,7 +41,7 @@ enum class EditStyle(
         minCutUs = Long.MAX_VALUE,
         maxRemovedFraction = 0f,
         allowSpeedRamps = false,
-        allowFocusCuts = false,
+        allowVisualCuts = false,
         targetLoudnessDb = -16f,
     ),
 
@@ -53,7 +56,7 @@ enum class EditStyle(
         minCutUs = 250_000L,
         maxRemovedFraction = 0.35f,
         allowSpeedRamps = false,
-        allowFocusCuts = false,
+        allowVisualCuts = false,
         targetLoudnessDb = -17f,
     ),
 
@@ -68,7 +71,7 @@ enum class EditStyle(
         minCutUs = 150_000L,
         maxRemovedFraction = 0.6f,
         allowSpeedRamps = true,
-        allowFocusCuts = true,
+        allowVisualCuts = true,
         targetLoudnessDb = -16f,
     ),
 
@@ -83,7 +86,7 @@ enum class EditStyle(
         minCutUs = 100_000L,
         maxRemovedFraction = 0.8f,
         allowSpeedRamps = true,
-        allowFocusCuts = true,
+        allowVisualCuts = true,
         targetLoudnessDb = -15f,
     ),
     ;
