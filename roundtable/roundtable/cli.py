@@ -19,6 +19,7 @@ HOST_COLOR = "\033[1;37m"
 HELP = """\
   Enter            let the next model speak
   <text>           join in; @Name hands the floor to that seat
+  /round           every seat speaks once, in order
   /auto [n]        models keep talking (n turns, or until Ctrl+C)
   /next <Name>     put a specific model up next
   /who             who is at the table
@@ -171,6 +172,9 @@ def cmd_talk(args: argparse.Namespace) -> int:
                     if not table.force_next(who.strip()):
                         print(f"{DIM}no seat called {who.strip()!r}{RESET}")
                         continue
+                elif line == "/round":
+                    auto_remaining = len(table.queue_round())
+                    print(f"{DIM}(one turn each — Ctrl+C to stop){RESET}")
                 elif line.startswith("/auto"):
                     _, _, count = line.partition(" ")
                     auto_remaining = int(count) if count.strip().isdigit() else -1

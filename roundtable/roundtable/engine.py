@@ -27,6 +27,7 @@ class Turn:
     text: str
     ts: float = field(default_factory=time.time)
     error: bool = False
+    seq: int = -1        # position in the transcript; identity for the UI
 
     def as_event(self) -> dict:
         return {"type": "turn", **asdict(self)}
@@ -105,6 +106,7 @@ class Roundtable:
         self.history: list[Turn] = []
         self._index = 0
         self._forced: str | None = None
+        self._pending: list[str] = []
         self.started = time.time()
 
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.started))
@@ -166,10 +168,26 @@ class Roundtable:
         """Everyone in the normal rotation. A moderator is not a debater."""
         return [p for p in self.participants if p.role != "moderator"] or self.participants
 
+    def queue_round(self) -> list[str]:
+        """Everyone speaks once, in rotation order, before anyone speaks twice.
+
+        A round is a fairness guarantee, so it queues named seats rather than
+        crediting N turns to the ordinary selector -- a weighted selector
+        given eight credits produces eight weighted picks, not a round.
+        """
+        pool = self.regulars
+        start = self._index % len(pool)
+        self._pending = [p.name for p in pool[start:] + pool[:start]]
+        return list(self._pending)
+
     def next_speaker(self) -> Participant:
         if self._forced and (p := self.by_name(self._forced)):
             self._forced = None
+            # A host interruption jumps the queue but does not cancel it.
             return p
+        while self._pending:
+            if (p := self.by_name(self._pending.pop(0))) is not None:
+                return p
 
         # A moderator earns the floor on a cadence, not every turn: asking a
         # model who should speak next before every single reply doubles the
@@ -219,7 +237,7 @@ class Roundtable:
     # --- driving ------------------------------------------------------------
 
     def add_host_message(self, text: str) -> Turn:
-        turn = Turn(speaker=HOST, text=text)
+        turn = Turn(speaker=HOST, text=text, seq=len(self.history))
         self.history.append(turn)
         self._append(turn.as_event())
         if (target := self._mentioned(text)):
@@ -233,7 +251,8 @@ class Roundtable:
         system = _system_prompt(p, others, self.topic)
         prompt = self._context() + f"\n\n{p.name}:"
 
-        yield {"type": "start", "speaker": p.name, "hex": p.hex}
+        yield {"type": "start", "speaker": p.name, "hex": p.hex,
+               "seq": len(self.history)}
         parts: list[str] = []
         errored = False
         try:
@@ -253,7 +272,8 @@ class Roundtable:
         if not text:
             text = f"[{p.name} returned nothing]"
             errored = True
-        turn = Turn(speaker=p.name, text=text, error=errored)
+        turn = Turn(speaker=p.name, text=text, error=errored,
+                    seq=len(self.history))
         # Resume round-robin from whoever actually spoke, so a forced turn or
         # an @mention reorders the table instead of double-seating someone.
         pool = self.regulars
@@ -264,4 +284,5 @@ class Roundtable:
             self._since_moderation += 1
         self.history.append(turn)
         self._append(turn.as_event())
-        yield {"type": "end", "speaker": p.name, "text": text, "error": errored}
+        yield {"type": "end", "speaker": p.name, "text": text,
+               "error": errored, "seq": turn.seq, "hex": p.hex}

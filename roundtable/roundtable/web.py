@@ -32,9 +32,11 @@ class Hub:
         self.subscribers: list[queue.Queue] = []
         self.lock = threading.Lock()          # guards subscriber list
         self.turn_lock = threading.Lock()     # only one speaker at a time
-        self.auto = threading.Event()
         self.stopping = threading.Event()
+        self.wake = threading.Event()
         self.pause = 1.2
+        self._remaining = 0          # 0 idle, -1 run until paused, N run N turns
+        self._count_lock = threading.Lock()
         threading.Thread(target=self._driver, daemon=True).start()
 
     # --- pub/sub ------------------------------------------------------------
@@ -66,10 +68,10 @@ class Hub:
             ],
             "history": [
                 {"speaker": t.speaker, "text": t.text, "error": t.error,
-                 "hex": self._hex(t.speaker)}
+                 "seq": t.seq, "hex": self._hex(t.speaker)}
                 for t in self.table.history
             ],
-            "auto": self.auto.is_set(),
+            "running": self.running,
         }
 
     def _hex(self, speaker: str) -> str:
@@ -77,6 +79,33 @@ class Hub:
         return p.hex if p else "#8a8a8a"
 
     # --- driving ------------------------------------------------------------
+
+    @property
+    def running(self) -> bool:
+        with self._count_lock:
+            return self._remaining != 0
+
+    def _take_turn_credit(self) -> bool:
+        """Claim one owed turn, if any are owed."""
+        with self._count_lock:
+            if self._remaining == 0:
+                return False
+            if self._remaining > 0:
+                self._remaining -= 1
+            return True
+
+    def _owe(self, turns: int) -> None:
+        with self._count_lock:
+            self._remaining = turns
+        self.wake.set()
+        self.broadcast({"type": "running", "on": turns != 0})
+
+    def set_auto(self, on: bool) -> None:
+        self._owe(-1 if on else 0)
+
+    def run_round(self) -> None:
+        """One turn each, so every seat is heard before anyone speaks twice."""
+        self._owe(len(self.table.queue_round()))
 
     def run_one(self, speaker_name: str | None = None) -> bool:
         """Run a single turn if nobody is mid-sentence. False if busy."""
@@ -94,22 +123,24 @@ class Hub:
         return True
 
     def _driver(self) -> None:
-        """Background loop: keeps the table talking while auto is on."""
+        """Background loop: works off whatever turns are owed."""
         while not self.stopping.is_set():
-            if not self.auto.wait(timeout=0.25):
+            if not self._take_turn_credit():
+                self.wake.wait(timeout=0.25)
+                self.wake.clear()
                 continue
             self.run_one()
-            # A readable beat, but bail out immediately if auto is switched off.
+            if not self.running:
+                self.broadcast({"type": "running", "on": False})
+                continue
+            # A readable beat, cut short the moment Pause is pressed.
             self.stopping.wait(self.pause)
 
     def say(self, text: str) -> None:
         turn = self.table.add_host_message(text)
         self.broadcast({"type": "turn", "speaker": turn.speaker,
-                        "text": turn.text, "hex": "#e6e6e6", "error": False})
-
-    def set_auto(self, on: bool) -> None:
-        self.auto.set() if on else self.auto.clear()
-        self.broadcast({"type": "auto", "on": on})
+                        "text": turn.text, "hex": "#e6e6e6",
+                        "error": False, "seq": turn.seq})
 
 
 def _handler_factory(hub: Hub):
@@ -190,7 +221,10 @@ def _handler_factory(hub: Hub):
                 self._json({"ok": True})
             elif url.path == "/auto":
                 hub.set_auto(bool(body.get("on")))
-                self._json({"ok": True, "auto": hub.auto.is_set()})
+                self._json({"ok": True, "running": hub.running})
+            elif url.path == "/round":
+                hub.run_round()
+                self._json({"ok": True, "running": hub.running})
             elif url.path == "/save":
                 path = hub.table.export_markdown()
                 self._json({"ok": True, "path": str(path)})
@@ -251,7 +285,8 @@ def serve(table: Roundtable, host: str = "127.0.0.1", port: int = 8765,
         print("\nstopping…")
     finally:
         hub.stopping.set()
-        hub.auto.clear()
+        hub._owe(0)
+        hub.wake.set()
         httpd.shutdown()
         if table.history:
             print(f"Transcript: {table.export_markdown()}")
