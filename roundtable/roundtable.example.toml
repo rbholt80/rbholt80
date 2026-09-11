@@ -4,7 +4,8 @@
 
 [roundtable]
 topic = "Is it worth learning to code in 2026?"
-policy = "round_robin"     # or "random"
+policy = "auto"            # auto | round_robin | random | weighted
+moderate_every = 0         # let a moderator seat sum up every N turns (0 = never)
 context_turns = 40         # transcript turns each model sees; bounds cost
 transcripts = "."
 
@@ -40,12 +41,25 @@ kind = "gemini"
 model = "gemini-2.5-pro"
 api_key_env = "GEMINI_API_KEY"
 
-# A local model. No key, no cost. Start it with `ollama serve` first.
+# Local models are discovered and seated automatically — one seat per
+# chat-capable model, with small ones put on the panel. Write them out only to
+# override that.
 [[participant]]
 name = "Llama"
 kind = "openai"
-model = "llama3.2"
+model = "llama3.2:1b"
 base_url = "http://localhost:11434/v1"
+role = "panel"             # one concrete point per turn, not a speech
+weight = 0.35              # and less of the floor than a principal
+enabled = false
+
+# A seat that keeps the others honest without taking a side.
+[[participant]]
+name = "Chair"
+kind = "anthropic"
+model = "claude-opus-5"
+api_key_env = "ANTHROPIC_API_KEY"
+role = "moderator"
 enabled = false
 
 # An installed CLI rather than an API. Note this runs a real agent on your

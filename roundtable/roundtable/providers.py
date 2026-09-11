@@ -183,11 +183,11 @@ def _stream_cli(p: Participant, system: str, prompt: str) -> Iterator[str]:
         proc.wait()
 
     if timed_out.is_set():
-        yield f"\n[{p.name} timed out after {p.timeout:.0f}s]"
-    elif proc.returncode not in (0, None):
+        raise ProviderError(f"timed out after {p.timeout:.0f}s")
+    if proc.returncode not in (0, None):
         err = (proc.stderr.read().decode(errors="replace").strip()
                if proc.stderr else "")
-        yield f"\n[{p.name} exited {proc.returncode}: {err[:300]}]"
+        raise ProviderError(f"exited {proc.returncode}: {err[:300]}")
 
 
 # --- mock -------------------------------------------------------------------
@@ -222,16 +222,25 @@ _ADAPTERS = {
 
 
 def stream(p: Participant, system: str, prompt: str) -> Iterator[str]:
-    """Stream one reply. Remote failures arrive as an in-band `[...]` note."""
+    """Stream one reply.
+
+    Any failure is raised as ProviderError, including one that arrives
+    mid-stream. Whatever was yielded before the failure has already reached
+    the caller and is kept: a reply that got three sentences out before the
+    connection died is still worth three sentences. The engine turns the
+    exception into a visible note and marks the turn errored -- which is why
+    failure is raised rather than returned as bracketed text that the engine
+    would then have to recognise by its punctuation.
+    """
     adapter = _ADAPTERS.get(p.kind)
     if adapter is None:
-        raise ProviderError(f"{p.name}: unknown kind {p.kind!r}")
+        raise ProviderError(f"unknown participant kind {p.kind!r}")
     try:
         yield from adapter(p, system, prompt)
     except ProviderError:
         raise
     except Exception as exc:  # noqa: BLE001 - one seat failing must not end the table
-        yield f"[{p.name} unavailable: {type(exc).__name__}: {exc}]"
+        raise ProviderError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def probe(p: Participant, timeout: float = 60.0) -> tuple[bool, str]:
@@ -249,6 +258,4 @@ def probe(p: Participant, timeout: float = 60.0) -> tuple[bool, str]:
         return False, str(exc)
     if not text:
         return False, "no output"
-    if text.startswith("[") and text.endswith("]"):
-        return False, text.strip("[]")
     return True, text.replace("\n", " ")[:60]

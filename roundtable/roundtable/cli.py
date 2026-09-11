@@ -22,6 +22,7 @@ HELP = """\
   /auto [n]        models keep talking (n turns, or until Ctrl+C)
   /next <Name>     put a specific model up next
   /who             who is at the table
+  /moderate        ask the moderator seat to sum up where things stand
   /save            write a markdown transcript now
   /quit            exit
 """
@@ -32,8 +33,10 @@ def _print_roster(seats: list[Participant]) -> None:
         detail = p.model or p.kind
         if p.kind == "cli":
             detail += " (CLI)"
+        if p.role != "principal":
+            detail += f" · {p.role}"
         note = f"  {DIM}{p.note}{RESET}" if p.note else ""
-        print(f"  {p.color}●{RESET} {p.name:<12} {DIM}{detail}{RESET}{note}")
+        print(f"  {p.color}●{RESET} {p.name:<14} {DIM}{detail}{RESET}{note}")
 
 
 def _render(table: Roundtable, events, color: str) -> None:
@@ -119,8 +122,11 @@ def _build(args: argparse.Namespace) -> tuple[Roundtable, dict]:
         topic=topic,
         participants=seats,
         transcript_dir=args.transcripts or settings.get("transcripts", "."),
-        policy=args.policy or settings.get("policy", "round_robin"),
+        policy=args.policy or settings.get("policy", "auto"),
         context_turns=args.context_turns or settings.get("context_turns", 40),
+        moderate_every=(args.moderate_every
+                        if args.moderate_every is not None
+                        else settings.get("moderate_every", 0)),
     )
     return table, settings
 
@@ -150,7 +156,14 @@ def cmd_talk(args: argparse.Namespace) -> int:
                 if line == "/help":
                     print(HELP)
                     continue
-                if line == "/save":
+                if line == "/moderate":
+                    mods = table.moderators
+                    if not mods:
+                        print(f"{DIM}no moderator seat; set role = \"moderator\" "
+                              f"on one in roundtable.toml{RESET}")
+                        continue
+                    table.force_next(mods[0].name)
+                elif line == "/save":
                     print(f"{DIM}wrote {table.export_markdown()}{RESET}")
                     continue
                 if line.startswith("/next"):
@@ -213,8 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--only", help="comma-separated seats, e.g. Claude,Grok")
         sp.add_argument("--no-cli", action="store_true",
                         help="skip locally installed CLIs, APIs only")
-        sp.add_argument("--policy", choices=["round_robin", "random"],
-                        help="who speaks next (default round_robin)")
+        sp.add_argument("--policy",
+                        choices=["auto", "round_robin", "random", "weighted"],
+                        help="who speaks next (default auto: weighted when "
+                             "seats have different weights)")
+        sp.add_argument("--moderate-every", type=int, default=None,
+                        metavar="N",
+                        help="let a moderator seat sum up every N turns")
         sp.add_argument("--context-turns", type=int,
                         help="transcript turns each model sees (default 40)")
         sp.add_argument("--transcripts", help="directory for transcripts")

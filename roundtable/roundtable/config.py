@@ -52,6 +52,8 @@ class Participant:
     base_url: str | None = None
     argv: list[str] = field(default_factory=list)   # kind == "cli"
     persona: str = ""              # extra system-prompt line, optional
+    role: str = "principal"        # principal | panel | moderator
+    weight: float = 1.0            # relative floor time under the weighted policy
     max_tokens: int = 1024
     effort: str | None = None      # Claude only: low|medium|high|xhigh|max
     temperature: float | None = None
@@ -131,7 +133,28 @@ def _ollama_capabilities(root: str, model: str) -> list[str] | None:
         return None
 
 
-def _ollama_chat_models(base_url: str) -> list[str]:
+def _parameter_billions(raw: str | None) -> float | None:
+    """'3.8B' -> 3.8, '596.05M' -> 0.596. None if Ollama didn't say."""
+    if not raw:
+        return None
+    text = raw.strip().upper()
+    try:
+        if text.endswith("B"):
+            return float(text[:-1])
+        if text.endswith("M"):
+            return float(text[:-1]) / 1000
+        return float(text) / 1e9
+    except ValueError:
+        return None
+
+
+# Below this, a model reliably restates the topic and hedges rather than
+# holding a position. It is still useful for breadth -- just not as a
+# full-weight voice. See Participant.role.
+PANEL_THRESHOLD_B = 4.0
+
+
+def _ollama_chat_models(base_url: str) -> list[tuple[str, float | None]]:
     """Every pulled model that can hold a conversation.
 
     An embedding model has no business at a roundtable -- it cannot produce a
@@ -147,17 +170,18 @@ def _ollama_chat_models(base_url: str) -> list[str]:
     except (urllib.error.URLError, OSError, ValueError):
         return []
 
-    chat: list[str] = []
+    chat: list[tuple[str, float | None]] = []
     for entry in entries:
         name = entry.get("name")
         if not name:
             continue
+        size = _parameter_billions((entry.get("details") or {}).get("parameter_size"))
         caps = _ollama_capabilities(root, name)
         if caps is None:
             if not any(h in name.lower() for h in _EMBED_HINTS):
-                chat.append(name)
+                chat.append((name, size))
         elif "completion" in caps:
-            chat.append(name)
+            chat.append((name, size))
     return chat
 
 
@@ -233,15 +257,19 @@ def discover(include_cli: bool = True, include_local: bool = True,
             if not _port_open(port):
                 continue
             if name == "Ollama":
-                models = _ollama_chat_models(base_url)
                 taken = {p.name for p in found}
-                for model in models:
+                for model, size in _ollama_chat_models(base_url):
                     seat = _seat_name(model, taken)
                     taken.add(seat)
+                    small = size is not None and size < PANEL_THRESHOLD_B
                     found.append(Participant(
                         name=seat, kind="openai", model=model,
                         base_url=base_url, api_key_env=None, source="local",
-                        note=f"local via Ollama, no API key needed",
+                        role="panel" if small else "principal",
+                        weight=0.35 if small else 1.0,
+                        max_tokens=160 if small else 1024,
+                        note=("local via Ollama"
+                              + (f", {size:g}B — panel seat" if small else "")),
                     ))
                 continue
             found.append(Participant(
@@ -348,6 +376,7 @@ def load_config(path: Path) -> dict[str, Any]:
 _PARTICIPANT_FIELDS = {
     "kind", "model", "api_key_env", "base_url", "argv", "persona",
     "max_tokens", "effort", "temperature", "timeout", "enabled",
+    "role", "weight",
 }
 
 

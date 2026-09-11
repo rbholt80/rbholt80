@@ -42,6 +42,11 @@ export GEMINI_API_KEY=...         # Gemini
 `roundtable doctor` tells you exactly what it found, what it *nearly* found
 (key set but SDK missing, and the one-line fix), and what it skipped.
 
+Being on `PATH` is not the same as being signed in, and an exported key is not
+the same as a working one. `roundtable doctor --probe` calls every seat once
+with a trivial prompt and reports what actually came back — a signed-out CLI
+shows up as a failure with its own error text, not as a ready seat.
+
 ---
 
 ## How the table fills itself
@@ -52,7 +57,7 @@ machine it is on:
 | Source | What it looks for |
 |---|---|
 | **Hosted APIs** | the key env vars above, plus the matching SDK |
-| **Local servers** | Ollama on `:11434`, LM Studio on `:1234` — no key needed |
+| **Local servers** | Ollama on `:11434` (every chat-capable model gets its own seat), LM Studio on `:1234` — no key needed |
 | **Installed CLIs** | `claude`, `codex`, `gemini`, `llm` on your `PATH` |
 
 If a vendor offers both an API seat and a CLI seat, the API seat wins by
@@ -128,6 +133,28 @@ persona = "the contrarian; find the strongest objection nobody has made yet"
 Three assistants with no personas tend to violently agree. Give them different
 jobs and you get an actual discussion.
 
+### Roles: not every seat should carry equal weight
+
+A 1B local model given the same brief as a frontier model produces four hedged
+sentences that restate the topic. That is not a bug in the model — it is the
+wrong job for it. Each seat has a `role`:
+
+| Role | Brief | Floor time |
+|---|---|---|
+| `principal` | argue, disagree, concede, ask real questions | full |
+| `panel` | exactly one concrete objection or piece of evidence, 1–2 sentences, no summarising and no praise — and an explicit licence to say only what it would need to know instead of padding | reduced (`weight`) |
+| `moderator` | does not argue; names the disagreement, what is settled, and what would resolve it | on a cadence, not in rotation |
+
+Local models are assigned a role automatically from their parameter count
+(under 4B → `panel`), which Ollama reports. Override any of it in the config.
+
+Turn policy defaults to `auto`: plain round-robin when every seat has the same
+weight, weighted rotation once they don't. `--policy` forces a specific one.
+
+A moderator speaks every `moderate_every` turns (0 = never), or on `/moderate`.
+Deliberately *not* per-turn: asking a model who should speak next before every
+reply doubles your calls to buy an ordering the transcript already implies.
+
 ### Cost
 
 Every turn resends the transcript, so an unattended `/auto` session is a
@@ -182,3 +209,9 @@ out, or isn't configured gets an in-line `[Name unavailable: ...]` note, is
 marked as an errored turn in the transcript, and the table moves on. That is
 deliberate: a roundtable that dies because one API had a bad minute is useless
 for the long unattended sessions this is built for.
+
+Failure is raised, never returned as text. Adapters raise `ProviderError`;
+whatever streamed before the failure is kept, and the engine appends the note
+and sets the errored flag. A reply that got three sentences out before the
+connection dropped is still worth three sentences — and the flag comes from the
+exception rather than from pattern-matching the reply's punctuation.
