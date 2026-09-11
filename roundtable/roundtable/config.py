@@ -8,11 +8,13 @@ seat whoever shows up.
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
 import os
 import shutil
 import socket
+import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -110,15 +112,91 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> boo
         return s.connect_ex((host, port)) == 0
 
 
-def _ollama_first_model(base_url: str) -> str | None:
-    """Ask a running Ollama which models it actually has pulled."""
-    url = base_url.rsplit("/v1", 1)[0] + "/api/tags"
+# Substrings that mark an embedding model. Only consulted when the Ollama
+# build is too old to report capabilities.
+_EMBED_HINTS = ("embed", "bge-", "gte-", "e5-", "minilm", "nomic-", "arctic-")
+
+
+def _ollama_capabilities(root: str, model: str) -> list[str] | None:
+    """What a pulled model can do. None if this Ollama build won't say."""
+    req = urllib.request.Request(
+        root + "/api/show",
+        data=json.dumps({"model": model}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as resp:
-            models = json.load(resp).get("models") or []
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return json.load(resp).get("capabilities")
     except (urllib.error.URLError, OSError, ValueError):
         return None
-    return models[0].get("name") if models else None
+
+
+def _ollama_chat_models(base_url: str) -> list[str]:
+    """Every pulled model that can hold a conversation.
+
+    An embedding model has no business at a roundtable -- it cannot produce a
+    reply at all -- so ask Ollama what each model is actually capable of and
+    seat only the ones that can complete text. Older Ollama builds don't
+    report capabilities; fall back to the name, which is a weaker signal but
+    beats seating `nomic-embed-text` and waiting for it to say something.
+    """
+    root = base_url.rsplit("/v1", 1)[0]
+    try:
+        with urllib.request.urlopen(root + "/api/tags", timeout=2.0) as resp:
+            entries = json.load(resp).get("models") or []
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+
+    chat: list[str] = []
+    for entry in entries:
+        name = entry.get("name")
+        if not name:
+            continue
+        caps = _ollama_capabilities(root, name)
+        if caps is None:
+            if not any(h in name.lower() for h in _EMBED_HINTS):
+                chat.append(name)
+        elif "completion" in caps:
+            chat.append(name)
+    return chat
+
+
+def _seat_name(model: str, taken: set[str]) -> str:
+    """A short, @mentionable name for a local model tag."""
+    base, _, tag = model.partition(":")
+    pretty = base.replace("-", " ").replace("_", " ").title().replace(" ", "")
+    if pretty not in taken:
+        return pretty
+    # Two variants of the same family -- keep the tag to tell them apart.
+    candidate = f"{pretty}-{tag}" if tag else pretty
+    suffix = 2
+    while candidate in taken:
+        candidate, suffix = f"{pretty}-{suffix}", suffix + 1
+    return candidate
+
+
+@functools.lru_cache(maxsize=32)
+def _cli_help(exe_path: str) -> str:
+    """A CLI's own --help, so we can check a flag exists before passing it."""
+    try:
+        done = subprocess.run(
+            [exe_path, "--help"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (done.stdout or "") + (done.stderr or "")
+
+
+def _cli_supports(exe_path: str, flag: str, subcommand: str | None = None) -> bool:
+    if _cli_help(exe_path) and flag in _cli_help(exe_path):
+        return True
+    if subcommand:
+        try:
+            done = subprocess.run([exe_path, subcommand, "--help"],
+                                  capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return flag in (done.stdout or "") + (done.stderr or "")
+    return False
 
 
 def discover(include_cli: bool = True, include_local: bool = True,
@@ -154,23 +232,43 @@ def discover(include_cli: bool = True, include_local: bool = True,
         for name, base_url, port, default_model in LOCAL_SERVERS:
             if not _port_open(port):
                 continue
-            model = default_model
             if name == "Ollama":
-                model = _ollama_first_model(base_url) or default_model
+                models = _ollama_chat_models(base_url)
+                taken = {p.name for p in found}
+                for model in models:
+                    seat = _seat_name(model, taken)
+                    taken.add(seat)
+                    found.append(Participant(
+                        name=seat, kind="openai", model=model,
+                        base_url=base_url, api_key_env=None, source="local",
+                        note=f"local via Ollama, no API key needed",
+                    ))
+                continue
             found.append(Participant(
-                name=name, kind="openai", model=model, base_url=base_url,
-                api_key_env=None, source="local",
+                name=name, kind="openai", model=default_model,
+                base_url=base_url, api_key_env=None, source="local",
                 note=f"local server on :{port}, no API key needed",
             ))
 
     if include_cli:
         for name, exe, args, note in CLI_CANDIDATES:
             path = shutil.which(exe)
-            if path:
-                found.append(Participant(
-                    name=name, kind="cli", model=exe, argv=[path, *args],
-                    source="cli", note=note,
-                ))
+            if not path:
+                continue
+            argv = [path, *args]
+            # Being on PATH says nothing about being signed in, and a CLI
+            # agent inherits whatever tool access its config grants. Pin the
+            # sandbox where the binary offers one -- checked against its own
+            # --help rather than assumed, so an unknown build degrades to the
+            # user's default instead of dying on a bad flag.
+            if exe == "codex" and _cli_supports(path, "--sandbox", "exec"):
+                argv = [path, "exec", "--sandbox", "read-only", "-"]
+                note = "Codex CLI, pinned to a read-only sandbox."
+            found.append(Participant(
+                name=name, kind="cli", model=exe, argv=argv,
+                source="cli",
+                note=note + " Sign-in not verified — `doctor --probe`.",
+            ))
 
     return _dedupe(found) if dedupe else found
 

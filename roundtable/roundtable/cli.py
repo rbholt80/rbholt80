@@ -83,8 +83,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  {DIM}○{RESET} {name:<12} {DIM}{remedy}{RESET}")
         print()
 
-    print(f"{len(seats)} seat(s) ready.")
-    return 0
+    if not getattr(args, "probe", False):
+        print(f"{len(seats)} seat(s) found. `doctor --probe` checks they answer.")
+        return 0
+
+    from .providers import probe
+    print(f"{BOLD}Live check{RESET}")
+    working = 0
+    for seat in seats:
+        print(f"  {seat.color}●{RESET} {seat.name:<12} ", end="", flush=True)
+        ok, detail = probe(seat)
+        working += ok
+        print(("✓ " if ok else "✗ ") + f"{DIM}{detail}{RESET}")
+    print(f"\n{working}/{len(seats)} seat(s) answered.")
+    return 0 if working else 1
 
 
 def _build(args: argparse.Namespace) -> tuple[Roundtable, dict]:
@@ -224,6 +236,8 @@ def build_parser() -> argparse.ArgumentParser:
     web.set_defaults(func=cmd_web)
 
     doctor = sub.add_parser("doctor", help="list the models this machine can seat")
+    doctor.add_argument("--probe", action="store_true",
+                        help="actually call each seat once to confirm it answers")
     doctor.set_defaults(func=cmd_doctor)
 
     return parser

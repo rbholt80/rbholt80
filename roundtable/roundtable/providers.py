@@ -12,6 +12,8 @@ import subprocess
 import threading
 from typing import Iterator
 
+from dataclasses import replace
+
 from .config import Participant
 
 
@@ -230,3 +232,23 @@ def stream(p: Participant, system: str, prompt: str) -> Iterator[str]:
         raise
     except Exception as exc:  # noqa: BLE001 - one seat failing must not end the table
         yield f"[{p.name} unavailable: {type(exc).__name__}: {exc}]"
+
+
+def probe(p: Participant, timeout: float = 60.0) -> tuple[bool, str]:
+    """Actually invoke a seat once, cheaply, and see whether it answers.
+
+    Discovery can only see that a binary exists or a key is exported --
+    neither of which means the seat will talk. A signed-out CLI looks
+    identical to a signed-in one until you ask it something.
+    """
+    trial = replace(p, timeout=timeout, max_tokens=32, effort=None)
+    try:
+        text = "".join(stream(trial, "Reply with one word: ok",
+                              "Say ok and nothing else.")).strip()
+    except ProviderError as exc:
+        return False, str(exc)
+    if not text:
+        return False, "no output"
+    if text.startswith("[") and text.endswith("]"):
+        return False, text.strip("[]")
+    return True, text.replace("\n", " ")[:60]
