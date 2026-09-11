@@ -270,7 +270,7 @@ def _handler_factory(hub: Hub):
                 cookie = SimpleCookie()
                 try:
                     cookie.load(self.headers.get("Cookie", ""))
-                    supplied = cookie.get("roundtable_session")
+                    supplied = cookie.get(f"roundtable_session_{self.server.server_port}")
                     supplied = supplied.value if supplied else None
                 except Exception:
                     return False
@@ -284,7 +284,7 @@ def _handler_factory(hub: Hub):
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Content-Type-Options", "nosniff")
             if self.command == "POST" and urlparse(self.path).path == "/session" and code == 200:
-                self.send_header("Set-Cookie", f"roundtable_session={hub.token}; Path=/; HttpOnly; SameSite=Strict")
+                self.send_header("Set-Cookie", f"roundtable_session_{self.server.server_port}={hub.token}; Path=/; HttpOnly; SameSite=Strict")
             self.end_headers()
             self.wfile.write(body)
 

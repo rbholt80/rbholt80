@@ -80,6 +80,9 @@ will answer successfully.
 - **Ollama:** discovers completion-capable installed models and uses native
   streaming without an SDK. Embedding models are excluded. Models below 4B
   parameters default to brief panel roles; configuration can override that.
+  Native context defaults to 2,048 tokens to limit memory on small machines.
+  Set `context_tokens` on a seat for longer local inputs if memory permits;
+  the provider's context limit still applies even when `context_turns` is larger.
 - **Claude CLI / Codex CLI:** reuse their existing logins. Automatic invocations
   restrict tools and inherited configuration, and run in temporary directories.
   Custom CLI commands in TOML are trusted operator configuration; review them
@@ -128,7 +131,9 @@ discussion because it contains an injection phrase. CLI restrictions are applied
 separately; regex filtering is not treated as a sandbox.
 
 The localhost browser uses a per-session token, kept in the URL fragment and
-sessionStorage so reload can reconnect. Treat the token like a local session
+sessionStorage, with an HttpOnly session-cookie fallback for browsers that clear
+storage on reload. Cookie-only writes also require a custom request header.
+Treat the token like a local session
 credential. A new topic creates a separate transcript and refreshes discovery.
 
 ## Development and collaboration
