@@ -40,6 +40,8 @@ PALETTE: list[tuple[str, str]] = [
     ("\033[38;5;108m", "#8aab86"),  # sage
 ]
 
+LOCAL_CONTEXT_TOKENS = 2048
+
 
 @dataclass
 class Participant:
@@ -57,7 +59,7 @@ class Participant:
     price_out: float | None = None # $ per million output tokens
     weight: float = 1.0            # relative floor time under the weighted policy
     max_tokens: int = 1024
-    context_tokens: int = 2048     # native Ollama context; increase on larger machines
+    context_tokens: int | None = None  # total input/output budget; local default is 2048
     effort: str | None = None      # Claude only: low|medium|high|xhigh|max
     temperature: float | None = None
     timeout: float = 180.0
@@ -66,6 +68,10 @@ class Participant:
     hex: str = PALETTE[0][1]
     source: str = "config"         # where this seat came from, for `doctor`
     note: str = ""                 # human-readable caveat, for `doctor`
+
+    def __post_init__(self) -> None:
+        if self.context_tokens is not None and (type(self.context_tokens) is not int or self.context_tokens < 1):
+            raise ValueError("context_tokens must be a positive integer")
 
     @property
     def api_key(self) -> str | None:
@@ -209,7 +215,7 @@ def _seat_name(model: str, taken: set[str]) -> str:
 
 
 def discover(include_cli: bool = True, include_local: bool = True,
-             dedupe: bool = True) -> list[Participant]:
+             dedupe: bool = True, local_context: int = LOCAL_CONTEXT_TOKENS) -> list[Participant]:
     """Everything this machine can currently seat, best candidates first."""
     found: list[Participant] = []
 
@@ -251,7 +257,7 @@ def discover(include_cli: bool = True, include_local: bool = True,
                 small = size is not None and size < PANEL_THRESHOLD_B
                 found.append(Participant(
                     name=seat, kind="ollama", model=model,
-                    base_url=base_url, source="local",
+                    base_url=base_url, source="local", context_tokens=local_context,
                     role="panel" if small else "principal",
                     weight=0.35 if small else 1.0,
                     max_tokens=160 if small else 1024,
@@ -262,7 +268,7 @@ def discover(include_cli: bool = True, include_local: bool = True,
         if _has_module("openai") and _port_open(1234):
             found.append(Participant(
                 name="LMStudio", kind="openai", model="local-model",
-                base_url="http://127.0.0.1:1234/v1", source="local",
+                base_url="http://127.0.0.1:1234/v1", source="local", context_tokens=local_context,
                 note="Local server on :1234; no API key needed",
             ))
 
@@ -388,18 +394,26 @@ def resolve(
     config_path: str | None = None,
     only: list[str] | None = None,
     include_cli: bool = True,
+    local_context: int | None = None,
 ) -> tuple[list[Participant], dict[str, Any]]:
     """Config file if there is one, otherwise whatever the machine offers."""
     settings: dict[str, Any] = {}
     path = find_config(config_path)
+    ctx = LOCAL_CONTEXT_TOKENS if local_context is None else local_context
     if path:
         data = load_config(path)
         settings = data.get("roundtable", {})
+        ctx = settings.get("local_context", LOCAL_CONTEXT_TOKENS) if local_context is None else local_context
         seats = participants_from_config(data)
         if not seats:  # a config with no participants still means "discover"
-            seats = discover(include_cli=include_cli, dedupe=not bool(only))
+            seats = discover(include_cli=include_cli, dedupe=not bool(only), local_context=ctx)
     else:
-        seats = discover(include_cli=include_cli, dedupe=not bool(only))
+        seats = discover(include_cli=include_cli, dedupe=not bool(only), local_context=ctx)
+
+    if type(ctx) is not int or ctx < 1:
+        raise ValueError("local_context must be a positive integer")
+    seats = [replace(p, context_tokens=ctx) if (p.kind == "ollama" or p.source == "local")
+             and (local_context is not None or p.context_tokens is None) else p for p in seats]
 
     if only:
         wanted = {n.casefold() for n in only}

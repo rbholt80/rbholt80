@@ -35,7 +35,8 @@ does not install system menu entries. CLI installation users can also run
 ## Have a useful discussion
 
 **Independent round** freezes the starting transcript. Each model gives its
-assessment without seeing other answers produced in that round. New Host
+assessment from that shared baseline, within its own context budget, without
+seeing other answers produced in that round. New Host
 messages still reach subsequent speakers. This reduces first-speaker anchoring;
 it does not guarantee that model judgments are independent or correct.
 
@@ -45,7 +46,12 @@ assumptions, or a test that would resolve it. The model can agree with the claim
 it is not instructed to manufacture disagreement. A transcript reference proves
 where a statement was made, not whether it is true.
 
-The default context window is 40 turns. Models see a notice when older turns
+The default context window is 40 turns. Seats with `context_tokens` also trim
+old whole turns to an estimated token budget, reserving the actual system prompt,
+reply allowance, and framing space. Estimates use UTF-8 bytes and are not exact
+model token counts. If the newest message or topic alone cannot fit, that seat
+records a visible error before making a provider call; shorten it or use a
+larger-context seat. Models see a notice when older turns
 are omitted. Replies keep stable IDs and record which context they received,
 including when the Host interjects during a reply. Transcripts are written to
 JSONL after each completed turn and refreshed in Markdown after Host/model turns.
@@ -81,8 +87,9 @@ will answer successfully.
   streaming without an SDK. Embedding models are excluded. Models below 4B
   parameters default to brief panel roles; configuration can override that.
   Native context defaults to 2,048 tokens to limit memory on small machines.
-  Set `context_tokens` on a seat for longer local inputs if memory permits;
-  the provider's context limit still applies even when `context_turns` is larger.
+  Set `context_tokens` on a seat, `local_context` in `[roundtable]`, or use
+  `--local-context N` for longer local inputs if memory permits. Hosted seats
+  default to the turn window unless their own context budget is configured.
 - **Claude CLI / Codex CLI:** reuse their existing logins. Automatic invocations
   restrict tools and inherited configuration, and run in temporary directories.
   Custom CLI commands in TOML are trusted operator configuration; review them

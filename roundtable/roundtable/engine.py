@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from .config import Participant
+from .config import Participant, LOCAL_CONTEXT_TOKENS
 from .providers import ProviderError, stream
 
 HOST = "Host"
@@ -117,7 +117,7 @@ class Roundtable:
         self._index = 0
         self._forced: str | None = None
         self._pending: list[str] = []
-        self._independent: dict[str, tuple[str, int]] = {}
+        self._independent: dict[str, tuple[list[Turn], int]] = {}
         self._next_seq = 0
         self._sequence_lock = threading.Lock()
         self.started = time.time()
@@ -195,7 +195,7 @@ class Roundtable:
         self._pending = [p.name for p in pool[start:] + pool[:start]]
         self._independent.clear()
         if independent:
-            baseline = self._context()
+            baseline = list(self.history)
             boundary = max((t.seq for t in self.history), default=-1)
             self._independent = {
                 name: (baseline, boundary) for name in self._pending
@@ -285,25 +285,46 @@ class Roundtable:
 
     # --- context ------------------------------------------------------------
 
-    def _context(self, turns: list[Turn] | None = None) -> str:
-        """The transcript each model sees, trimmed to bound cost.
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """A conservative heuristic, not a model tokenizer or billing count.
 
-        Resending everything every turn makes cost grow quadratically with
-        conversation length, so keep a window and tell the model what it
-        missed rather than pretending the conversation started there.
+        UTF-8 bytes rather than characters avoid undercounting non-ASCII text
+        as badly. Three bytes per token and an extra framing reserve are still
+        estimates; provider tokenization may differ.
         """
-        turns = list(self.history) if turns is None else turns
-        preamble = ""
-        if self.context_turns and len(turns) > self.context_turns:
-            dropped = len(turns) - self.context_turns
-            turns = turns[-self.context_turns:]
-            preamble = (
-                f"[{dropped} earlier turn(s) omitted for length; "
-                "the conversation is already in progress]\n\n"
-            )
-        if not turns:
-            return "(no one has spoken yet — you open the discussion)"
-        return preamble + "\n\n".join(f"[#{t.seq}] {t.speaker}: {t.text}" for t in turns)
+        return max(1, (len(text.encode("utf-8")) + 2) // 3)
+
+    def _context(self, speaker: Participant | None = None,
+                 turns: list[Turn] | None = None, system: str | None = None) -> str:
+        """Keep recent whole turns within the seat's estimated input budget."""
+        all_turns = list(self.history) if turns is None else turns
+        kept = list(all_turns[-self.context_turns:])
+        budget = speaker.context_tokens if speaker else None
+        if speaker and speaker.kind == "ollama" and budget is None:
+            budget = LOCAL_CONTEXT_TOKENS
+
+        def render() -> str:
+            dropped = len(all_turns) - len(kept)
+            preamble = (f"[{dropped} earlier turn(s) omitted for length; "
+                        "the conversation is already in progress]\n\n") if dropped else ""
+            if not kept:
+                return preamble + "(no one has spoken yet — you open the discussion)"
+            return preamble + "\n\n".join(f"[#{t.seq}] {t.speaker}: {t.text}" for t in kept)
+
+        if budget is not None:
+            if system is None:
+                system = _system_prompt(speaker, [n for n in self.names if n != speaker.name], self.topic)
+            suffix = f"\n\n{speaker.name}:"
+            available = budget - speaker.max_tokens - 256
+            while self._estimate_tokens(system + render() + suffix) > available:
+                if len(kept) <= 1:
+                    raise ProviderError(
+                        f"The topic/instructions and newest message exceed {speaker.name}'s "
+                        f"estimated {budget}-token context budget. Shorten the topic/message "
+                        "or choose a seat with a larger context_tokens setting.")
+                kept.pop(0)
+        return render()
 
     # --- driving ------------------------------------------------------------
 
@@ -357,19 +378,15 @@ class Roundtable:
         system = _system_prompt(p, others, self.topic)
         visible_history = list(self.history)
         context_seq = max((t.seq for t in visible_history), default=-1)
-        context = self._context(visible_history)
         if (frozen := self._independent.pop(p.name, None)) is not None:
-            context, boundary = frozen
+            baseline, boundary = frozen
             updates = [t for t in visible_history if t.speaker == HOST and t.seq > boundary]
-            if updates:
-                context += "\n\nHost updates since the independent round began:\n" + "\n\n".join(
-                    f"[#{t.seq}] {t.speaker}: {t.text}" for t in updates)
+            visible_history = baseline + updates
             system += ("\nThis is an independent round. You share the same starting "
                        "transcript as the other seats, without their new answers. "
                        "Give your own assessment, one uncertainty, and a way to test it. "
                        "Do not invent what another seat said.")
             context_seq = max([boundary] + [t.seq for t in updates])
-        prompt = context + f"\n\n{p.name}:"
         seq = self._allocate_seq()
 
         yield {"type": "start", "speaker": p.name, "hex": p.hex,
@@ -378,6 +395,8 @@ class Roundtable:
         errored = False
         metrics: dict = {}
         try:
+            prompt = self._context(p, turns=visible_history, system=system) + f"\n\n{p.name}:"
+            metrics["estimated_input_tokens"] = self._estimate_tokens(system + prompt)
             for chunk in stream(p, system, prompt, metrics):
                 parts.append(chunk)
                 yield {"type": "chunk", "speaker": p.name, "text": chunk, "seq": seq}

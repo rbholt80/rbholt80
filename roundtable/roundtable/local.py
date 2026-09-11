@@ -55,7 +55,8 @@ def ollama_models(base_url: str) -> list[str]:
 
 def stream_ollama(p: Participant, system: str, prompt: str,
                   metrics: dict | None = None) -> Iterator[str]:
-    options = {"num_predict": p.max_tokens, "num_ctx": p.context_tokens}
+    from .config import LOCAL_CONTEXT_TOKENS
+    options = {"num_predict": p.max_tokens, "num_ctx": p.context_tokens or LOCAL_CONTEXT_TOKENS}
     if p.temperature is not None:
         options["temperature"] = p.temperature
     request = urllib.request.Request((p.base_url or "http://127.0.0.1:11434").rstrip("/") + "/api/chat",

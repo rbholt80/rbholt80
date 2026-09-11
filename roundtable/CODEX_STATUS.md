@@ -1,7 +1,7 @@
 # Codex integration status
 
 The integrated branch is `codex/roundtable-local-integration`. It contains both
-agents' changes, including Claude's latest `9544ed6` (and its reconnect fix
+agents' changes, including Claude's latest `8e33e73` (and its reconnect fix
 `7a83b0e`). The initial integration merge is `2b790d0`; reconciliation with those
 latest commits is `3b96112`. Subsequent commits finish installed-browser behavior
 and documentation. Use the branch head, not an old local tracking ref.
@@ -47,13 +47,18 @@ submissions are not accepted. Cookies are separated by the server port.
 The earlier native Ollama 8192-token setting triggered an OOM kill on Robert's
 7.4 GiB machine during the demo. The default is now 2048; `context_tokens` is
 configurable per seat. All seven local models subsequently answered short probes.
-A long window of turns may still exceed a model's token context; do not assume
-40 turns fit in 2048 tokens. Small local models can produce weak or inaccurate
+Claude's per-seat budgeting is integrated for normal and independent rounds.
+It reserves the actual system prompt, reply allowance, and framing overhead,
+uses a conservative UTF-8 estimate, and drops old whole turns with a marker.
+An oversized newest message records an explicit error before a provider call.
+The estimate is not an exact tokenizer guarantee. Hosted seats retain the turn
+window unless a budget is explicitly set. `--local-context` and the matching
+TOML setting are preserved when New topic refreshes participants. Small local models can produce weak or inaccurate
 answers; model agreement is not evidence.
 
 ## Verification
 
-- 33 regression tests passed with the installed venv interpreter, including
+- 39 regression tests passed with the installed venv interpreter, including
   offline streaming through the actual OpenAI SDK, subprocess descendants,
   partial failures, exact rounds, independent context, claim provenance,
   concurrent Host IDs, auth, cookie reload, and configuration-preserving New topic.
@@ -63,6 +68,9 @@ answers; model agreement is not evidence.
   Claude CLI, Codex CLI). No paid API key was added or used.
 - The installed browser reloaded with its conversation intact. A real local
   Qwen reply, exact-quote challenge form, and cross-model follow-up were exercised.
+  Claude answered the quote comparison; Codex corrected its mistaken setup-price
+  difference and time horizon after a Host challenge. The fictional demo was
+  saved locally, not published as verified client advice.
 
 ## Organization and next handoff
 
@@ -83,5 +91,5 @@ must be restricted independently of prompt contents. The complete FourHorsemen
 validator is game-coupled; the inspected regex also has false positives and gaps.
 
 Claude can review this branch and fast-forward its branch if it has made no
-additional commits since `9544ed6`. Otherwise merge it normally and inspect any
+additional commits since `8e33e73`. Otherwise merge it normally and inspect any
 new conflicts. No force push is needed.
