@@ -195,15 +195,43 @@
     action.title = 'Ask for evidence about a specific claim in this reply';
     action.onclick = () => {
       const selected = window.getSelection()?.toString().trim();
-      const quote = window.prompt('Quote the exact claim to challenge:',
-        selected && text.includes(selected) ? selected : text);
-      if (!quote || !quote.trim()) return;
-      const question = window.prompt('What should the table examine?',
-        'What evidence supports or weakens this claim?');
-      if (question === null) return;
-      post('/challenge', {seq, quote: quote.trim(), question: question.trim()});
+      openEditor('Challenge turn #' + seq, [
+        {name: 'quote', label: 'Exact quote', value: selected && text.includes(selected) ? selected : text},
+        {name: 'question', label: 'Your question', value: 'What evidence supports or weakens this claim?'}
+      ], values => post('/challenge', {seq, ...values}));
     };
     who.append(action);
+  }
+
+  function openEditor(title, fields, save) {
+    const dialog = document.createElement('dialog');
+    dialog.style.cssText = 'width:min(540px,85vw);border:1px solid #ccc;border-radius:12px;padding:24px;color:inherit;background:var(--bg,#fff)';
+    const form = document.createElement('form');
+    const heading = document.createElement('h3'); heading.textContent = title; form.append(heading);
+    const editors = {};
+    for (const field of fields) {
+      const label = document.createElement('label'); label.textContent = field.label;
+      label.style.cssText = 'display:block;margin:14px 0';
+      const editor = document.createElement('textarea');
+      editor.value = field.value || ''; editor.required = true; editor.rows = 3;
+      editor.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:10px';
+      label.append(editor); form.append(label); editors[field.name] = editor;
+    }
+    const error = document.createElement('p'); error.setAttribute('role', 'alert'); form.append(error);
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel';
+    cancel.onclick = () => { dialog.close(); dialog.remove(); };
+    const submit = document.createElement('button'); submit.type = 'submit'; submit.textContent = 'Submit';
+    form.append(cancel, submit);
+    form.onsubmit = async event => {
+      event.preventDefault(); submit.disabled = true;
+      const values = Object.fromEntries(Object.entries(editors).map(([name, editor]) => [name, editor.value.trim()]));
+      const result = await save(values);
+      if (result.ok) { dialog.close(); dialog.remove(); }
+      else { error.textContent = result.error || 'Could not save. Try again.'; submit.disabled = false; }
+    };
+    dialog.append(form); document.body.append(dialog); dialog.showModal();
+    Object.values(editors)[0].focus();
+    dialog.addEventListener('close', () => dialog.remove(), {once:true});
   }
 
   function addTurn(speaker, text, hex, isError, seq, completed = true) {
@@ -337,8 +365,8 @@
     if (result.ok && input.value.trim() === text) { input.value = ''; input.style.height = 'auto'; }
   };
   $('new').onclick = () => {
-    const topic = window.prompt('What should your AIs discuss?');
-    if (topic && topic.trim()) post('/new', {topic: topic.trim()});
+    openEditor('New topic', [{name: 'topic', label: 'What should your AIs discuss?'}],
+      values => post('/new', values));
   };
   $('send').onclick = send;
   $('next').onclick = () => post('/next');
