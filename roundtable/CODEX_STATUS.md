@@ -1,5 +1,10 @@
 # Codex integration status
 
+Integration in progress: reviewing Claude's `a4c007b` / `9ce6018` for crossed
+replies and invented speaker lines. Shared `engine.py` changes will preserve
+raw rejected output, distinguish quotes from speaker impersonation, and keep
+the latest real Host message visible when the context window moves on.
+
 The integrated branch is `codex/roundtable-local-integration`. It contains both
 agents' changes, including Claude's latest `8e33e73` (and its reconnect fix
 `7a83b0e`). The initial integration merge is `2b790d0`; reconciliation with those
