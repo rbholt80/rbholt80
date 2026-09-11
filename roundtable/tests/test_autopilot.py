@@ -178,6 +178,22 @@ class AutoTests(unittest.TestCase):
         self.assertIn('Proposed answer', out.getvalue())
         self.assertNotIn(REVIEW_PREFIX, out.getvalue())
 
+    def test_review_output_instructions_follow_the_transcript_and_fit_budget(self):
+        seat = Participant('Small', 'mock', context_tokens=2048, max_tokens=160)
+        table = Roundtable('Calculate 2 + 2', [seat], self.directory.name)
+        for i in range(10):
+            table.add_host_message('Old discussion ' + ('detail ' * 100))
+        seen = []
+        def reply(seat, system, prompt, metrics):
+            seen.append(prompt)
+            self.assertLessEqual(table._estimate_tokens(system + prompt) + 160 + 256, 2048)
+            yield 'Checked.\n' + REVIEW_PREFIX + json.dumps(self.review())
+        with patch('roundtable.engine.stream', side_effect=reply):
+            end = list(table.run_turn(seat, instruction='Review the arithmetic.', review=True))[-1]
+        self.assertTrue(seen)
+        self.assertTrue(seen[0].endswith('Return no text after that JSON line.'))
+        self.assertEqual(end['control']['verdict'], 'accept')
+
 
 if __name__ == '__main__':
     unittest.main()

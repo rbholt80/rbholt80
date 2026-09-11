@@ -71,11 +71,12 @@ _ROLE_BRIEF: dict[str, list[str]] = {
 
 def check_reply(text: str, speaker: str, roster: list[str],
                 history: list[Turn]) -> tuple[str, bool]:
-    """Flag apparent speaker impersonation; preserve quoted data and audit text.
+    """Flag forged numbered speaker records; preserve quoted data and audit text.
 
     Adapted from Claude's strip_fabrications. This is a format check, not a
     hallucination detector. Blockquotes, code examples, and exact source quotes
-    remain allowed; unmarked role lines should not become conversation history.
+    remain allowed. Plain 'Host:' or 'Seat:' can be a form of address, so these
+    remain model text; JSON framing prevents them becoming transcript records.
     """
     names = sorted(set(roster + [HOST, speaker]), key=len, reverse=True)
     attribution = re.compile(
@@ -97,6 +98,9 @@ def check_reply(text: str, speaker: str, roster: list[str],
             body = line[match.end():]
             if name.casefold() == speaker.casefold() and not any(s.strip() for s in kept):
                 kept.append(body)
+                continue
+            if seq is None:
+                kept.append(line)
                 continue
             exact_quote = any(
                 not turn.error and turn.speaker.casefold() == name.casefold()
@@ -354,7 +358,8 @@ class Roundtable:
         return max(1, (len(text.encode("utf-8")) + 2) // 3)
 
     def _context(self, speaker: Participant | None = None,
-                 turns: list[Turn] | None = None, system: str | None = None) -> str:
+                 turns: list[Turn] | None = None, system: str | None = None,
+                 suffix: str | None = None) -> str:
         """Keep recent whole turns within the seat's estimated input budget."""
         all_turns = list(self.history) if turns is None else turns
         kept = list(all_turns[-self.context_turns:])
@@ -385,7 +390,8 @@ class Roundtable:
         if budget is not None:
             if system is None:
                 system = _system_prompt(speaker, [n for n in self.names if n != speaker.name], self.topic)
-            suffix = f"\n\n{speaker.name}:"
+            if suffix is None:
+                suffix = f"\n\n{speaker.name}:"
             available = budget - speaker.max_tokens - 256
             while self._estimate_tokens(system + render() + suffix) > available:
                 if len(kept) <= 1:
@@ -471,7 +477,20 @@ class Roundtable:
         metrics: dict = {}
         failure_note = ""
         try:
-            prompt = self._context(p, turns=visible_history, system=system) + f"\n\n{p.name}:"
+            suffix = f"\n\n{p.name}:"
+            if instruction:
+                suffix = ('\n\nRoundtable controller: now complete the Auto stage specified '
+                          'above for the actual Host task. Write a self-contained answer '
+                          'addressed to the Host. End with a concrete next step.')
+            if review:
+                suffix = ('\n\nRoundtable controller: this is the independent review stage. '
+                          'Give your assessment of the specified candidate against the '
+                          'actual Host task. Then end with one line starting '
+                          'ROUNDTABLE_REVIEW: followed by a JSON object with candidate_seq '
+                          '(the candidate ID above), verdict (accept, revise, or needs_input), '
+                          'reason (your check), and unresolved (a list of blocking issues). '
+                          'Return no text after that JSON line.')
+            prompt = self._context(p, turns=visible_history, system=system, suffix=suffix) + suffix
             metrics["estimated_input_tokens"] = self._estimate_tokens(system + prompt)
             for chunk in stream(p, system, prompt, metrics):
                 parts.append(chunk)

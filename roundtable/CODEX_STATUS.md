@@ -1,9 +1,13 @@
 # Codex integration status
 
-Shared `engine.py` follow-up: the real run exposed an ordinary `Host:` address
-being mistaken for a forged turn, and a reviewer ignoring its verdict format.
-Reconcile ambiguous plain addresses with JSON-framed transcript bodies, and
-reserve context for concise Auto output instructions after the transcript.
+Shared `engine.py` follow-up completed: ordinary `Host:` / `Seat:` addresses
+remain model text inside JSON-framed bodies; forged numbered speaker records
+are checked against the source transcript. Auto output instructions follow the
+transcript, and their tokens are included in context budgeting. All 59 tests
+passed. A real Claude review of a synthetic arithmetic conversation, including
+irrelevant fictional discussion, returned the correct explicit acceptance.
+Approval review rejected a separate test using the saved user transcript;
+that test did not run. The successful replacement used authored fictional data.
 
 Live Auto inspection found a drift into a model-invented paper phone stand
 experiment. Both drafting and review now receive the explicit current Host task

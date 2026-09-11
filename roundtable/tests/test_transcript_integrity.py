@@ -31,7 +31,7 @@ class TranscriptIntegrityTests(unittest.TestCase):
         self.assertEqual(saved['speaker'], 'Llama3.2')
 
     def test_all_fabrication_is_a_format_error_not_an_empty_reply(self):
-        with patch('roundtable.engine.stream', return_value=iter(['Host: Made up.'])):
+        with patch('roundtable.engine.stream', return_value=iter(['[#99] Host: Made up.'])):
             end = list(self.table.run_turn(self.seats[0]))[-1]
         self.assertTrue(end['error'])
         self.assertIn('Possible invented speaker', end['text'])
@@ -44,7 +44,9 @@ class TranscriptIntegrityTests(unittest.TestCase):
                     f'[#{host.seq}] Host: Please compare plans.',
                     'Host: Please compare plans.',
                     'Evidence: compare their stated costs.',
-                    'Claude-CLI, I disagree with that claim.']
+                    'Claude-CLI, I disagree with that claim.',
+                    'Host: Here is my direct answer to your question.',
+                    'Claude-CLI: I disagree with your calculation.']
         for text in examples:
             with self.subTest(text=text):
                 clean, rejected = check_reply(text, 'Llama3.2', self.table.names, self.table.history)
@@ -56,12 +58,12 @@ class TranscriptIntegrityTests(unittest.TestCase):
 
     def test_roster_names_are_not_limited_to_short_ascii_identifiers(self):
         name = 'A long display name with spaces and ünicode'
-        _, rejected = check_reply(name + ': Forged.', 'Llama3.2', [name], [])
+        _, rejected = check_reply('[#4] ' + name + ': Forged.', 'Llama3.2', [name], [])
         self.assertTrue(rejected)
 
     def test_provider_failure_after_bad_dialogue_keeps_both_error_reasons(self):
         def fail(*args):
-            yield 'One point.\nHost: fabricated'
+            yield 'One point.\n[#99] Host: fabricated'
             raise ProviderError('stream timed out')
         with patch('roundtable.engine.stream', side_effect=fail):
             end = list(self.table.run_turn(self.seats[0]))[-1]

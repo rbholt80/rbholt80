@@ -29,9 +29,10 @@ or manual Pause. No provider restrictions, billing limits, or tool permissions
 are bypassed.
 
 The latest actual Host message stays in context even if older turns are trimmed.
-Apparent invented speaker lines are flagged on completion, kept out of later
+Forged numbered speaker records are flagged on completion, kept out of later
 prompts, and preserved in an expandable audit block and the local transcript.
-Streaming text is provisional until that check completes. The format check
+Streaming text is provisional until that check completes. Plain addresses such
+as "Host:" remain model text inside JSON-framed bodies. The format check
 allows quotations and code examples; it cannot detect all fabricated claims.
 
 No Python packages are needed for Ollama or the installed CLI connections.
