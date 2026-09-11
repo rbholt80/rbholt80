@@ -1,184 +1,98 @@
-# Roundtable
+# Roundtable — your AIs in one conversation
 
-Put every AI you have in one room and let them argue.
+This local app lets connected assistants take turns reading and responding to a shared discussion. You can watch, choose the next speaker, and join in from the browser or terminal.
 
-Claude, ChatGPT, Grok, Gemini, DeepSeek, a local Llama, even the CLIs already
-installed on your machine — each one sees the full labelled transcript, knows
-who else is at the table, and replies to what was actually just said. You watch
-it stream, and you can cut in whenever you want.
+## Start
 
-Two front ends over one engine: a terminal and a local web page.
-
-```
-roundtable doctor                              # what can this machine seat?
-roundtable "Is it worth learning to code in 2026?"
-roundtable web "Should we ship on Friday?"     # same thing, in a browser
-```
-
----
-
-## Install
+Start the browser interface with:
 
 ```bash
-cd roundtable
-pip install -e ".[all]"        # or: .[anthropic] / .[openai] / .[gemini]
+./roundtable.sh
 ```
 
-`openai` is the workhorse dependency — it covers OpenAI, xAI, Groq, DeepSeek,
-Mistral, Together, OpenRouter, Perplexity, Ollama and LM Studio, because they
-all speak the same dialect. Install only the extras you want.
+Click **New topic**, enter what you want to discuss, then **Run one round**. Every connected participant gets one turn. Click **Pause** to stop after the current response. Click a participant’s name for a specific speaker, or **Next** for the next participant. Type a message and press Enter to join in. The launcher reopens an existing running table.
 
-Then export whichever keys you have. Roundtable seats whoever shows up:
+For the terminal, run:
 
 ```bash
-export ANTHROPIC_API_KEY=...      # Claude
-export OPENAI_API_KEY=...         # ChatGPT
-export XAI_API_KEY=...            # Grok
-export GEMINI_API_KEY=...         # Gemini
-# ...and DEEPSEEK_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY,
-#    OPENROUTER_API_KEY, PERPLEXITY_API_KEY
+./roundtable.sh --terminal "What should we discuss?"
 ```
 
-`roundtable doctor` tells you exactly what it found, what it *nearly* found
-(key set but SDK missing, and the one-line fix), and what it skipped.
+Terminal controls: Enter advances; text joins the discussion; `/auto` runs one round; `/auto 3` runs three turns; `/next NAME` chooses a speaker; `/save` exports; `/quit` exits. Ctrl+C during a reply pauses the terminal discussion. To stop the browser server:
 
----
-
-## How the table fills itself
-
-There is no hardcoded list of models. On every run Roundtable looks at the
-machine it is on:
-
-| Source | What it looks for |
-|---|---|
-| **Hosted APIs** | the key env vars above, plus the matching SDK |
-| **Local servers** | Ollama on `:11434`, LM Studio on `:1234` — no key needed |
-| **Installed CLIs** | `claude`, `codex`, `gemini`, `llm` on your `PATH` |
-
-If a vendor offers both an API seat and a CLI seat, the API seat wins by
-default: it is faster, cheaper, and it doesn't run an agent with filesystem
-access just to have an opinion. `doctor` still lists the CLI, and `--only` or
-the config file will seat it anyway.
-
-### About the CLI seats
-
-`Claude-CLI` and `Codex-CLI` are not chat endpoints. They are coding agents,
-and they run **in your current working directory with whatever tool access you
-have granted them** — they can read files, and depending on your settings,
-write them. That is occasionally what you want (a participant that can actually
-go look at the repo you are arguing about) and usually not. They are off by
-default when the API seat exists. Enable them deliberately, and mind the
-directory you start from.
-
----
-
-## Driving it
-
-**Terminal**
-
-```
-Enter            let the next model speak
-<text>           join in; @Grok hands the floor to that seat
-/auto [n]        models keep talking (n turns, or until Ctrl+C)
-/next <Name>     put a specific model up next
-/who             who is at the table
-/save            write the markdown transcript now
-/quit            exit
+```bash
+./roundtable.sh --stop
 ```
 
-**Browser** — `roundtable web "topic"` prints a localhost URL with a one-run
-token in the fragment. Click a name in the header to hand that model the floor,
-**Next** to advance, **Auto** to let them run, type to cut in. Cmd/Ctrl+Enter
-advances without sending. The page is theme-aware and works at phone width, so
-you can leave it open on a second screen.
+For optional Linux desktop shortcuts, run `python3 create_shortcuts.py` in this folder. It creates **Launch Roundtable.desktop** and **Roundtable Terminal.desktop** for this checkout. Generated shortcuts are ignored by Git.
 
-Both front ends drive the same engine over the same events, so they behave
-identically — and you can point a browser at a session you started from the
-terminal's `web` subcommand and watch the same conversation.
+Python 3.11 or newer is required. The local and subscription CLI connections need no pip packages or new API key.
 
----
+## Connections verified on this computer
 
-## Transcripts
+- **Codex-CLI** — uses your existing ChatGPT login through Codex.
+- **Claude-CLI** — uses the Claude Code login, separate from signing into the desktop chat app.
+- **Seven Ollama chat models** — Gemma 2, Gemma 3, Granite 3.3, Llama 3.2, Phi 3.5, and two Qwen 2.5 sizes.
+- **Grok** — no automatic connection configured yet.
 
-Every turn is appended to `roundtable-<timestamp>.jsonl` **the moment it
-finishes**, so a crash or a Ctrl+C costs you nothing. On exit (or `/save`) you
-also get a readable `.md` alongside it. Filenames are timestamped, so runs never
-overwrite each other.
+Every new topic refreshes discovery. Only Ollama models advertising completion support join the discussion; the installed embedding model is excluded. Signed-out Claude or Codex is reported as needing login, rather than appearing ready.
 
----
+To check connections:
 
-## Configuration
-
-Optional. Drop a `roundtable.toml` in the working directory or
-`~/.config/roundtable/` to pin the table, change models, or give each model an
-angle. See `roundtable.example.toml` — copy it and delete what you don't have.
-
-The one setting worth knowing about is `persona`:
-
-```toml
-[[participant]]
-name = "Grok"
-kind = "openai"
-model = "grok-4"
-base_url = "https://api.x.ai/v1"
-api_key_env = "XAI_API_KEY"
-persona = "the contrarian; find the strongest objection nobody has made yet"
+```bash
+python3 -m roundtable doctor
 ```
 
-Three assistants with no personas tend to violently agree. Give them different
-jobs and you get an actual discussion.
+The app connects through installed CLIs and local model servers. Desktop apps and browser chat histories are not automatically imported. Messages at the table are sent to the selected speaker’s service; Ollama runs locally, while Claude and Codex use their hosted services and account usage allowances.
 
-### Cost
+For an individual CLI login, use its normal terminal login flow, then choose **New topic** to discover it again:
 
-Every turn resends the transcript, so an unattended `/auto` session is a
-spending loop. Two things bound it:
-
-- `context_turns` (default 40) caps how much transcript each model sees. Models
-  are told plainly that earlier turns were omitted rather than being left to
-  assume the conversation started mid-argument.
-- `max_tokens` (default 1024) caps each reply, and the system prompt asks for a
-  few sentences.
-
-For Claude seats, `effort = "low"` keeps conversational turns quick and cheap;
-raise it if you want the table thinking harder. `temperature` is not sent to
-Claude — current models removed sampling parameters — but it works on
-OpenAI-compatible and Gemini seats.
-
-### Testing without spending anything
-
-```toml
-[[participant]]
-name = "Mock"
-kind = "mock"
+```bash
+claude auth login
+codex login
 ```
 
-A `mock` seat streams a canned reply instantly and costs nothing. Useful for
-checking the UI, the transcript and your config before pointing it at anything
-billable.
+## Include Grok or another chat app manually
 
----
+Until an automatic connection is configured, a chat app can contribute through the host input:
 
-## Layout
+1. Click **Save** and open the Markdown transcript from `transcripts/`.
+2. Copy the discussion into Grok (or another AI app) with: “Join this roundtable as yourself. Respond to the latest speaker in 2–4 sentences.”
+3. Paste the response into Roundtable’s message box, prefixed with `Grok (pasted reply):`, and click **Send**.
+4. Click **Next** or **Run one round** so the connected participants can respond to it.
 
+These contributions are host-supplied quotes, clearly separate from the automatically connected speakers. Nothing is read from or sent to those other apps automatically.
+
+## Transcripts and limits
+
+Each completed reply is appended to a uniquely named JSONL transcript and exported to Markdown in `transcripts/`. A browser refresh restores the current table, including a response already streaming. Restarting the server creates a fresh conversation; saved transcripts remain readable but are not automatically resumed. A process crash may lose the unfinished reply.
+
+The browser’s automatic mode is limited to one round and pauses when a participant errors. Terminal auto mode is also finite by default. Recent transcript turns are sent to each speaker; long discussions eventually omit older turns with a notice. Replies are requested in 2–4 sentences. Small local models may still repeat themselves or reach the output limit.
+
+CLI speakers run from temporary working directories. Claude runs with tools/customizations disabled. Codex uses a read-only sandbox with the main execution, browser, plugin, and delegation features disabled and does not inherit user configuration. These are discussion seats, not tools for changing your projects. The default Codex model is selected by the installed CLI; no model ID is pinned by this app.
+
+The server listens on loopback only by default. Its generated link contains a session token. Runtime connection information stays under `.runtime/`; keep that directory private and exclude it when sharing source.
+
+## Configuration and extension
+
+`roundtable.toml` can define explicit participants and personas. `--only` can select a smaller table, for example:
+
+```bash
+python3 -m roundtable talk "Compare these ideas" --only "Codex-CLI,Claude-CLI,Ollama-gemma3:1b" --transcripts transcripts
 ```
-roundtable/
-  config.py      participants, discovery, TOML
-  providers.py   streaming adapters: anthropic | openai | gemini | cli | mock
-  engine.py      conversation state, turn taking, transcripts
-  cli.py         terminal front end
-  web.py         localhost server (SSE)
-  static/        the web page
+
+The inherited example config and hosted-provider adapters are retained for future connections, including Grok. Those hosted API adapters and their example model IDs were not validated in this local setup. Do not assume the examples identify current or account-accessible models. Adding a paid API connection is separate from using an installed chat app.
+
+The browser’s **New topic** starts a fresh automatically discovered roster; launch a terminal table with an explicit config to retain a custom roster.
+
+## Verification and source
+
+Live checks exercised Codex and all seven Ollama models against their actual connections. Claude’s live check is recorded in `transcripts/`. The regression suite covers process timeouts and descendants, large input/error streams, partial failures, unique transcripts, model discovery, mentions, HTTP authentication and request validation, bounded auto mode, new topics, and reconnect state:
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
-Adding a provider means one function in `providers.py` and one line in
-`_ADAPTERS`.
+Recovered from [rbholt80/rbholt80, branch claude/new-session-xif2fv](https://github.com/rbholt80/rbholt80/tree/claude/new-session-xif2fv/roundtable), then adapted locally. This branch publishes the local integration separately so it can be reconciled with the newer Claude branch. See `MERGE_NOTES.md` before merging.
 
----
-
-## Failure behaviour
-
-One seat going down never ends the conversation. A model that errors, times
-out, or isn't configured gets an in-line `[Name unavailable: ...]` note, is
-marked as an errored turn in the transcript, and the table moves on. That is
-deliberate: a roundtable that dies because one API had a bad minute is useless
-for the long unattended sessions this is built for.
+Connection references: [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode), [Ollama chat API](https://docs.ollama.com/api/chat), and the installed CLIs’ help and login-status commands.

@@ -13,6 +13,8 @@ import json
 import os
 import shutil
 import socket
+
+from .local import cli_ready, ollama_models
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -89,10 +91,13 @@ LOCAL_SERVERS: list[tuple[str, str, int, str]] = [
 # argv -- argv has length limits and quoting hazards a transcript will hit.
 CLI_CANDIDATES: list[tuple[str, str, list[str], str]] = [
     # (display name, executable, args, note)
-    ("Claude-CLI", "claude", ["-p"],
-     "Claude Code CLI: runs with its own tool access in the working directory."),
-    ("Codex-CLI",  "codex",  ["exec", "-"],
-     "OpenAI Codex CLI: agentic, may touch the filesystem."),
+    ("Claude-CLI", "claude", ["-p", "--safe-mode", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence", "--output-format", "text"],
+     "Claude subscription CLI; tools and customizations disabled."),
+    ("Codex-CLI", "codex", ["-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
+        "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+        *[item for feature in ("shell_tool", "unified_exec", "code_mode", "code_mode_host", "apps", "plugins", "hooks", "multi_agent", "multi_agent_v2", "browser_use", "computer_use", "in_app_browser", "image_generation", "view_image", "skill_search") for item in ("--disable", feature)],
+        "-c", 'web_search="disabled"', "-"],
+     "ChatGPT login via Codex; isolated read-only discussion."),
     ("Gemini-CLI", "gemini", ["-p"],
      "Gemini CLI."),
     ("LLM-CLI",    "llm",    [],
@@ -101,7 +106,10 @@ CLI_CANDIDATES: list[tuple[str, str, list[str], str]] = [
 
 
 def _has_module(name: str) -> bool:
-    return importlib.util.find_spec(name) is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> bool:
@@ -150,23 +158,26 @@ def discover(include_cli: bool = True, include_local: bool = True,
                 note="check the model id against current Gemini releases",
             ))
 
-    if include_local and _has_module("openai"):
-        for name, base_url, port, default_model in LOCAL_SERVERS:
-            if not _port_open(port):
-                continue
-            model = default_model
-            if name == "Ollama":
-                model = _ollama_first_model(base_url) or default_model
-            found.append(Participant(
-                name=name, kind="openai", model=model, base_url=base_url,
-                api_key_env=None, source="local",
-                note=f"local server on :{port}, no API key needed",
-            ))
+    if include_local:
+        if _port_open(11434):
+            try:
+                models = ollama_models("http://127.0.0.1:11434")
+            except (OSError, ValueError):
+                models = []
+            angles = ["offer practical examples", "question assumptions", "suggest alternatives",
+                      "identify uncertainties", "connect others' ideas", "look for tradeoffs", "summarize disagreements"]
+            for i, model in enumerate(models):
+                found.append(Participant(name="Ollama-" + model, kind="ollama", model=model,
+                    base_url="http://127.0.0.1:11434", source="local", max_tokens=384,
+                    persona=angles[i % len(angles)], note="Local chat model; no API key needed"))
+        if _has_module("openai") and _port_open(1234):
+            found.append(Participant(name="LMStudio", kind="openai", model="local-model",
+                base_url="http://127.0.0.1:1234/v1", source="local"))
 
     if include_cli:
         for name, exe, args, note in CLI_CANDIDATES:
             path = shutil.which(exe)
-            if path:
+            if path and cli_ready(exe, path)[0]:
                 found.append(Participant(
                     name=name, kind="cli", model=exe, argv=[path, *args],
                     source="cli", note=note,
@@ -194,6 +205,13 @@ def _dedupe(found: list[Participant]) -> list[Participant]:
 def blocked() -> list[tuple[str, str]]:
     """Seats that would exist if something small were fixed. (name, remedy)"""
     out: list[tuple[str, str]] = []
+    for name, exe, _args, _note in CLI_CANDIDATES:
+        if path := shutil.which(exe):
+            ready, remedy = cli_ready(exe, path)
+            if not ready:
+                out.append((name, remedy))
+    if not os.environ.get("XAI_API_KEY"):
+        out.append(("Grok", "No automatic connection configured on this computer."))
 
     if os.environ.get("ANTHROPIC_API_KEY") and not _has_module("anthropic"):
         out.append(("Claude", "ANTHROPIC_API_KEY is set — pip install anthropic"))
@@ -264,7 +282,11 @@ def participants_from_config(data: dict[str, Any]) -> list[Participant]:
             raise ValueError(f"{entry['name']}: unknown keys {sorted(unknown)}")
         kwargs = {k: v for k, v in entry.items() if k in _PARTICIPANT_FIELDS}
         out.append(Participant(name=entry["name"], source="config", **kwargs))
-    return [p for p in out if p.enabled]
+    active = [p for p in out if p.enabled]
+    names = [p.name.casefold() for p in active]
+    if len(names) != len(set(names)) or "host" in names:
+        raise ValueError("Participant names must be unique and cannot be Host")
+    return active
 
 
 def resolve(
@@ -280,9 +302,9 @@ def resolve(
         settings = data.get("roundtable", {})
         seats = participants_from_config(data)
         if not seats:  # a config with no participants still means "discover"
-            seats = discover(include_cli=include_cli)
+            seats = discover(include_cli=include_cli, dedupe=not bool(only))
     else:
-        seats = discover(include_cli=include_cli)
+        seats = discover(include_cli=include_cli, dedupe=not bool(only))
 
     if only:
         wanted = {n.casefold() for n in only}

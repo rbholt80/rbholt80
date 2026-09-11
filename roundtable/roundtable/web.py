@@ -8,6 +8,7 @@ identically.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import secrets
 import threading
@@ -18,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .engine import Roundtable
+from .config import blocked, paint, discover
 
 STATIC = Path(__file__).parent / "static"
 MAX_BODY = 64 * 1024
@@ -35,6 +37,9 @@ class Hub:
         self.auto = threading.Event()
         self.stopping = threading.Event()
         self.pause = 1.2
+        self.remaining = 0
+        self.active: dict | None = None
+        self.connection_notes = blocked()
         threading.Thread(target=self._driver, daemon=True).start()
 
     # --- pub/sub ------------------------------------------------------------
@@ -52,6 +57,12 @@ class Hub:
 
     def broadcast(self, event: dict) -> None:
         with self.lock:
+            if event["type"] == "start":
+                self.active = {**event, "text": ""}
+            elif event["type"] == "chunk" and self.active:
+                self.active["text"] += event["text"]
+            elif event["type"] == "end":
+                self.active = None
             targets = list(self.subscribers)
         for q in targets:
             q.put(event)
@@ -70,6 +81,9 @@ class Hub:
                 for t in self.table.history
             ],
             "auto": self.auto.is_set(),
+            "remaining": self.remaining,
+            "active": dict(self.active) if self.active else None,
+            "connections": self.connection_notes,
         }
 
     def _hex(self, speaker: str) -> str:
@@ -89,6 +103,8 @@ class Hub:
                 return False
             for event in self.table.run_turn(speaker):
                 self.broadcast(event)
+                if event["type"] == "end" and event.get("error"):
+                    self.set_auto(False)
         finally:
             self.turn_lock.release()
         return True
@@ -98,7 +114,10 @@ class Hub:
         while not self.stopping.is_set():
             if not self.auto.wait(timeout=0.25):
                 continue
-            self.run_one()
+            if self.auto.is_set() and self.run_one():
+                self.remaining = max(0, self.remaining - 1)
+                if not self.remaining:
+                    self.set_auto(False)
             # A readable beat, but bail out immediately if auto is switched off.
             self.stopping.wait(self.pause)
 
@@ -108,8 +127,30 @@ class Hub:
                         "text": turn.text, "hex": "#e6e6e6", "error": False})
 
     def set_auto(self, on: bool) -> None:
+        if on:
+            self.remaining = len(self.table.participants)
+        else:
+            self.remaining = 0
         self.auto.set() if on else self.auto.clear()
         self.broadcast({"type": "auto", "on": on})
+
+    def new_topic(self, topic: str) -> bool:
+        if not self.turn_lock.acquire(blocking=False):
+            return False
+        try:
+            self.set_auto(False)
+            self.table.export_markdown()
+            seats = paint(discover())
+            if not seats:
+                raise ValueError("No connected participants found")
+            self.table = Roundtable(topic, seats,
+                transcript_dir=self.table.transcript_path.parent,
+                context_turns=self.table.context_turns)
+            self.connection_notes = blocked()
+            self.broadcast(self.snapshot())
+            return True
+        finally:
+            self.turn_lock.release()
 
 
 def _handler_factory(hub: Hub):
@@ -131,6 +172,9 @@ def _handler_factory(hub: Hub):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
 
@@ -138,13 +182,20 @@ def _handler_factory(hub: Hub):
             self._send(code, json.dumps(payload).encode(), "application/json")
 
         def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > MAX_BODY:
-                return {}
             try:
-                return json.loads(self.rfile.read(length) or b"{}")
+                length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
-                return {}
+                raise ValueError("Invalid request length")
+            if length <= 0 or length > MAX_BODY:
+                self.close_connection = True
+                raise ValueError("Request must contain a JSON object smaller than 64 KB")
+            try:
+                body = json.loads(self.rfile.read(length))
+            except ValueError:
+                raise ValueError("Invalid JSON")
+            if not isinstance(body, dict):
+                raise ValueError("Expected a JSON object")
+            return body
 
         # --- routes ---------------------------------------------------------
 
@@ -176,21 +227,47 @@ def _handler_factory(hub: Hub):
             if not self._authed(parse_qs(url.query)):
                 self._json({"error": "bad token"}, HTTPStatus.FORBIDDEN)
                 return
-            body = self._body()
+            try:
+                body = self._body()
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
 
             if url.path == "/say":
-                text = (body.get("text") or "").strip()
+                text = body.get("text", "")
+                if not isinstance(text, str):
+                    self._json({"error": "Message must be text"}, 400)
+                    return
+                text = text.strip()
                 if text:
                     hub.say(text)
                 self._json({"ok": bool(text)})
             elif url.path == "/next":
+                name = body.get("speaker")
+                if name is not None and (not isinstance(name, str) or not hub.table.by_name(name)):
+                    self._json({"error": "Unknown participant"}, 400)
+                    return
+                if hub.turn_lock.locked():
+                    self._json({"error": "A participant is still speaking"}, 409)
+                    return
                 started = threading.Thread(
                     target=hub.run_one, args=(body.get("speaker"),), daemon=True)
                 started.start()
                 self._json({"ok": True})
             elif url.path == "/auto":
+                if not isinstance(body.get("on"), bool):
+                    self._json({"error": "on must be true or false"}, 400)
+                    return
                 hub.set_auto(bool(body.get("on")))
                 self._json({"ok": True, "auto": hub.auto.is_set()})
+            elif url.path == "/new":
+                topic = body.get("topic")
+                if not isinstance(topic, str) or not topic.strip() or len(topic) > 2000:
+                    self._json({"error": "Enter a topic between 1 and 2000 characters"}, 400)
+                elif hub.new_topic(topic.strip()):
+                    self._json({"ok": True})
+                else:
+                    self._json({"error": "Pause and let the current speaker finish first"}, 409)
             elif url.path == "/save":
                 path = hub.table.export_markdown()
                 self._json({"ok": True, "path": str(path)})
@@ -237,7 +314,11 @@ def serve(table: Roundtable, host: str = "127.0.0.1", port: int = 8765,
     httpd = ThreadingHTTPServer((host, port), _handler_factory(hub))
     httpd.daemon_threads = True
 
-    url = f"http://{host}:{port}/#{token}"
+    url = f"http://{host}:{httpd.server_port}/#{token}"
+    if state_path := os.environ.get("ROUNDTABLE_STATE_PATH"):
+        path = Path(state_path)
+        with open(path, "w", opener=lambda name, flags: os.open(name, flags, 0o600)) as fh:
+            json.dump({"pid": os.getpid(), "url": url}, fh)
     print(f"\nRoundtable: {table.topic}")
     print("  " + ", ".join(p.name for p in table.participants))
     print(f"\n  {url}\n")
@@ -253,6 +334,7 @@ def serve(table: Roundtable, host: str = "127.0.0.1", port: int = 8765,
         hub.stopping.set()
         hub.auto.clear()
         httpd.shutdown()
+        httpd.server_close()
         if table.history:
             print(f"Transcript: {table.export_markdown()}")
             print(f"Raw log:    {table.transcript_path}")

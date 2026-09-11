@@ -13,6 +13,7 @@ import threading
 from typing import Iterator
 
 from .config import Participant
+from .local import stream_cli, stream_ollama
 
 
 class ProviderError(RuntimeError):
@@ -214,7 +215,8 @@ _ADAPTERS = {
     "anthropic": _stream_anthropic,
     "openai": _stream_openai,
     "gemini": _stream_gemini,
-    "cli": _stream_cli,
+    "cli": stream_cli,
+    "ollama": stream_ollama,
     "mock": _stream_mock,
 }
 
@@ -229,4 +231,4 @@ def stream(p: Participant, system: str, prompt: str) -> Iterator[str]:
     except ProviderError:
         raise
     except Exception as exc:  # noqa: BLE001 - one seat failing must not end the table
-        yield f"[{p.name} unavailable: {type(exc).__name__}: {exc}]"
+        raise ProviderError(f"{type(exc).__name__}: {exc}") from exc

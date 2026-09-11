@@ -107,16 +107,18 @@
 <body>
 <header>
   <h1><span>Roundtable —</span> <b id="topic">connecting…</b></h1>
+  <button id="new">New topic</button>
   <div class="roster" id="roster"></div>
 </header>
 
+<p class="hints" id="connections" style="padding: 0 20px"></p>
 <main id="log"><div class="wrap" id="wrap">
   <p class="empty" id="empty">Press <b>Next</b> to open the discussion.</p>
 </div></main>
 
 <footer>
   <div class="bar">
-    <textarea id="input" rows="1" placeholder="Say something to the table…  (@Name to hand them the floor)"></textarea>
+    <textarea aria-label="Message to the table" id="input" rows="1" placeholder="Join the discussion… (@Name chooses the next speaker)"></textarea>
     <button id="send">Send</button>
     <button id="next" class="primary">Next ⏎</button>
     <button id="auto">Auto</button>
@@ -127,7 +129,8 @@
 
 <script>
 (() => {
-  const token = location.hash.slice(1);
+  const token = location.hash.slice(1) || sessionStorage.getItem('roundtable-token');
+  if (token) sessionStorage.setItem('roundtable-token', token);
   if (!token) { document.getElementById('topic').textContent = 'missing token in URL'; return; }
   // Keep the token out of the address bar, browser history and any Referer.
   history.replaceState(null, '', location.pathname);
@@ -143,7 +146,10 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
-    }).then(r => r.json()).catch(() => ({}));
+    }).then(r => r.json()).then(data => {
+      if (data.error) $('hints').textContent = data.error;
+      return data;
+    }).catch(() => { $('hints').textContent = 'Could not reach Roundtable. Try again.'; return {}; });
 
   const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   const scroll = stick => { if (stick) log.scrollTop = log.scrollHeight; };
@@ -169,7 +175,7 @@
   function setAuto(on) {
     auto = on;
     $('auto').classList.toggle('on', on);
-    $('auto').textContent = on ? 'Auto ⏸' : 'Auto';
+    $('auto').textContent = on ? 'Pause' : 'Run one round';
   }
 
   function handle(ev) {
@@ -178,12 +184,15 @@
       $('roster').innerHTML = '';
       wrap.innerHTML = '';
       colors.clear();
+      live = null;
+      $('connections').textContent = (ev.connections || []).map(x => x[0] + ': ' + x[1]).join(' · ');
       for (const p of ev.participants) {
         colors.set(p.name, p.hex);
         const chip = document.createElement('button');
         chip.className = 'chip';
         chip.title = 'Give ' + p.name + ' the floor — ' + p.model;
-        chip.innerHTML = '<span class="dot" style="background:' + p.hex + '"></span>';
+        const dot = document.createElement('span');
+        dot.className = 'dot'; dot.style.background = p.hex; chip.append(dot);
         chip.append(p.name);
         chip.onclick = () => post('/next', { speaker: p.name });
         $('roster').append(chip);
@@ -196,10 +205,15 @@
       }
       for (const t of ev.history) addTurn(t.speaker, t.text, t.hex, t.error);
       setAuto(ev.auto);
+      if (ev.active) {
+        handle({ ...ev.active, type: 'start' });
+        handle({ type: 'chunk', text: ev.active.text });
+      } else { $('next').disabled = false; }
       log.scrollTop = log.scrollHeight;
     }
     else if (ev.type === 'turn') addTurn(ev.speaker, ev.text, ev.hex, ev.error);
     else if (ev.type === 'start') {
+      $('next').disabled = true;
       live = addTurn(ev.speaker, '', ev.hex, false);
       const caret = document.createElement('span');
       caret.className = 'cursor';
@@ -216,16 +230,18 @@
     }
     else if (ev.type === 'end') {
       if (live) {
-        live.querySelector('.cursor')?.remove();
+        live.textContent = ev.text;
         if (ev.error) live.parentElement.classList.add('error');
       }
       live = null;
+      $('next').disabled = false;
     }
     else if (ev.type === 'auto') setAuto(ev.on);
   }
 
   const stream = new EventSource('/events?t=' + encodeURIComponent(token));
   stream.onmessage = e => handle(JSON.parse(e.data));
+  stream.onopen = () => { $('hints').textContent = 'Enter sends · Run one round gives every participant a turn · Pause stops after the current reply'; };
   stream.onerror = () => { $('hints').textContent = 'Connection lost — is the server still running?'; };
 
   const send = () => {
@@ -235,6 +251,10 @@
     post('/say', { text });
   };
 
+  $('new').onclick = () => {
+    const topic = window.prompt('What should your AIs discuss?');
+    if (topic && topic.trim()) post('/new', { topic: topic.trim() });
+  };
   $('send').onclick = send;
   $('next').onclick = () => post('/next');
   $('auto').onclick = () => post('/auto', { on: !auto });

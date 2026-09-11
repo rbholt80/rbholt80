@@ -19,7 +19,7 @@ HOST_COLOR = "\033[1;37m"
 HELP = """\
   Enter            let the next model speak
   <text>           join in; @Name hands the floor to that seat
-  /auto [n]        models keep talking (n turns, or until Ctrl+C)
+  /auto [n]        models keep talking (n turns; defaults to one round)
   /next <Name>     put a specific model up next
   /who             who is at the table
   /save            write a markdown transcript now
@@ -123,7 +123,7 @@ def cmd_talk(args: argparse.Namespace) -> int:
     auto_remaining = args.auto or 0
     try:
         while True:
-            if auto_remaining <= 0:
+            if auto_remaining == 0:
                 try:
                     line = input(f"{HOST_COLOR}> {RESET}").strip()
                 except (EOFError, KeyboardInterrupt):
@@ -148,7 +148,9 @@ def cmd_talk(args: argparse.Namespace) -> int:
                         continue
                 elif line.startswith("/auto"):
                     _, _, count = line.partition(" ")
-                    auto_remaining = int(count) if count.strip().isdigit() else -1
+                    auto_remaining = int(count) if count.strip().isdigit() else len(table.participants)
+                    if auto_remaining <= 0:
+                        continue
                     print(f"{DIM}(auto — Ctrl+C to take the wheel back){RESET}")
                 elif line.startswith("/"):
                     print(f"{DIM}unknown command; /help for the list{RESET}")
