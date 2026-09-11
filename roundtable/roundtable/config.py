@@ -53,6 +53,8 @@ class Participant:
     argv: list[str] = field(default_factory=list)   # kind == "cli"
     persona: str = ""              # extra system-prompt line, optional
     role: str = "principal"        # principal | panel | moderator
+    price_in: float | None = None  # $ per million input tokens, if you want $
+    price_out: float | None = None # $ per million output tokens
     weight: float = 1.0            # relative floor time under the weighted policy
     max_tokens: int = 1024
     effort: str | None = None      # Claude only: low|medium|high|xhigh|max
@@ -376,7 +378,7 @@ def load_config(path: Path) -> dict[str, Any]:
 _PARTICIPANT_FIELDS = {
     "kind", "model", "api_key_env", "base_url", "argv", "persona",
     "max_tokens", "effort", "temperature", "timeout", "enabled",
-    "role", "weight",
+    "role", "weight", "price_in", "price_out",
 }
 
 

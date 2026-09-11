@@ -10,6 +10,7 @@ from __future__ import annotations
 import codecs
 import subprocess
 import threading
+import time
 from typing import Iterator
 
 from dataclasses import replace
@@ -23,7 +24,8 @@ class ProviderError(RuntimeError):
 
 # --- Anthropic --------------------------------------------------------------
 
-def _stream_anthropic(p: Participant, system: str, prompt: str) -> Iterator[str]:
+def _stream_anthropic(p: Participant, system: str, prompt: str,
+                      metrics: dict | None = None) -> Iterator[str]:
     try:
         import anthropic
     except ImportError as exc:  # pragma: no cover
@@ -42,19 +44,30 @@ def _stream_anthropic(p: Participant, system: str, prompt: str) -> Iterator[str]
     # removed sampling parameters and reject them with a 400. Use `effort`
     # to trade depth against speed instead.
 
-    try:
-        with client.messages.stream(**kwargs) as stream:
+    def _run(call_kwargs: dict) -> Iterator[str]:
+        with client.messages.stream(**call_kwargs) as stream:
             yield from stream.text_stream
+            usage = getattr(stream.get_final_message(), "usage", None)
+            if usage is not None and metrics is not None:
+                metrics["prompt_tokens"] = getattr(usage, "input_tokens", 0)
+                metrics["output_tokens"] = getattr(usage, "output_tokens", 0)
+
+    try:
+        yield from _run(kwargs)
     except TypeError:
         # Older SDK that doesn't know output_config -- retry without it.
         kwargs.pop("output_config", None)
-        with client.messages.stream(**kwargs) as stream:
-            yield from stream.text_stream
+        yield from _run(kwargs)
 
 
 # --- OpenAI-compatible (OpenAI, xAI, Groq, Ollama, LM Studio, ...) ----------
 
-def _stream_openai(p: Participant, system: str, prompt: str) -> Iterator[str]:
+#: Which parameter spelling each endpoint accepted last time.
+_DIALECT: dict[tuple[str, str], dict] = {}
+
+
+def _stream_openai(p: Participant, system: str, prompt: str,
+                   metrics: dict | None = None) -> Iterator[str]:
     try:
         import openai
     except ImportError as exc:  # pragma: no cover
@@ -74,19 +87,42 @@ def _stream_openai(p: Participant, system: str, prompt: str) -> Iterator[str]:
     if p.temperature is not None:
         base["temperature"] = p.temperature
 
-    # Reasoning models on OpenAI reject `max_tokens` and want
-    # `max_completion_tokens`; xAI and most local servers want the reverse.
-    # Try the newer name, fall back on the parameter error rather than
-    # maintaining a list of which vendor is on which side of the rename.
-    try:
-        stream = client.chat.completions.create(
-            **base, max_completion_tokens=p.max_tokens)
-    except openai.BadRequestError as exc:
-        if "max_completion_tokens" not in str(exc):
-            raise
-        stream = client.chat.completions.create(**base, max_tokens=p.max_tokens)
+    # Vendors disagree about two parameters. Reasoning models on OpenAI reject
+    # `max_tokens` and want `max_completion_tokens`; xAI and most local servers
+    # want the reverse. `stream_options` (the only way to get token counts out
+    # of a stream) is missing from several OpenAI-compatible servers entirely.
+    # Rather than track which vendor is on which side, try the richest variant
+    # and step down -- then remember the winner, so the cost is paid once per
+    # endpoint instead of once per turn.
+    cap = p.max_tokens
+    variants = [
+        {"max_completion_tokens": cap, "stream_options": {"include_usage": True}},
+        {"max_tokens": cap, "stream_options": {"include_usage": True}},
+        {"max_completion_tokens": cap},
+        {"max_tokens": cap},
+    ]
+    key = (p.base_url or "openai", p.model)
+    if (known := _DIALECT.get(key)) is not None:
+        variants = [known] + [v for v in variants if v != known]
+
+    stream = None
+    last: Exception | None = None
+    for variant in variants:
+        try:
+            stream = client.chat.completions.create(**base, **variant)
+            _DIALECT[key] = variant
+            break
+        except openai.BadRequestError as exc:
+            last = exc
+            continue
+    if stream is None:
+        raise last or ProviderError("no accepted parameter combination")
 
     for chunk in stream:
+        usage = getattr(chunk, "usage", None)
+        if usage is not None and metrics is not None:
+            metrics["prompt_tokens"] = getattr(usage, "prompt_tokens", 0) or 0
+            metrics["output_tokens"] = getattr(usage, "completion_tokens", 0) or 0
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -97,7 +133,8 @@ def _stream_openai(p: Participant, system: str, prompt: str) -> Iterator[str]:
 
 # --- Gemini -----------------------------------------------------------------
 
-def _stream_gemini(p: Participant, system: str, prompt: str) -> Iterator[str]:
+def _stream_gemini(p: Participant, system: str, prompt: str,
+                   metrics: dict | None = None) -> Iterator[str]:
     try:
         from google import genai
         from google.genai import types
@@ -113,13 +150,18 @@ def _stream_gemini(p: Participant, system: str, prompt: str) -> Iterator[str]:
     for chunk in client.models.generate_content_stream(
         model=p.model, contents=prompt, config=config
     ):
+        meta = getattr(chunk, "usage_metadata", None)
+        if meta is not None and metrics is not None:
+            metrics["prompt_tokens"] = getattr(meta, "prompt_token_count", 0) or 0
+            metrics["output_tokens"] = getattr(meta, "candidates_token_count", 0) or 0
         if chunk.text:
             yield chunk.text
 
 
 # --- installed CLIs ---------------------------------------------------------
 
-def _stream_cli(p: Participant, system: str, prompt: str) -> Iterator[str]:
+def _stream_cli(p: Participant, system: str, prompt: str,
+                metrics: dict | None = None) -> Iterator[str]:
     """Drive an installed CLI as a conversational participant.
 
     The whole prompt goes in on stdin: argv has a length ceiling a long
@@ -192,7 +234,8 @@ def _stream_cli(p: Participant, system: str, prompt: str) -> Iterator[str]:
 
 # --- mock -------------------------------------------------------------------
 
-def _stream_mock(p: Participant, system: str, prompt: str) -> Iterator[str]:
+def _stream_mock(p: Participant, system: str, prompt: str,
+                 metrics: dict | None = None) -> Iterator[str]:
     """A seat that costs nothing, for checking the harness end to end.
 
     Useful before you point this at paid APIs: it exercises streaming, turn
@@ -221,7 +264,8 @@ _ADAPTERS = {
 }
 
 
-def stream(p: Participant, system: str, prompt: str) -> Iterator[str]:
+def stream(p: Participant, system: str, prompt: str,
+           metrics: dict | None = None) -> Iterator[str]:
     """Stream one reply.
 
     Any failure is raised as ProviderError, including one that arrives
@@ -235,12 +279,26 @@ def stream(p: Participant, system: str, prompt: str) -> Iterator[str]:
     adapter = _ADAPTERS.get(p.kind)
     if adapter is None:
         raise ProviderError(f"unknown participant kind {p.kind!r}")
+    started = time.monotonic()
+    characters = 0
     try:
-        yield from adapter(p, system, prompt)
+        for chunk in adapter(p, system, prompt, metrics):
+            characters += len(chunk)
+            yield chunk
     except ProviderError:
         raise
     except Exception as exc:  # noqa: BLE001 - one seat failing must not end the table
         raise ProviderError(f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        if metrics is not None:
+            metrics["seconds"] = time.monotonic() - started
+            metrics["characters"] = characters
+            # Local servers and CLIs often report nothing. Four characters per
+            # token is the usual rule of thumb; it is labelled estimated so a
+            # cost total never quietly mixes measured and guessed numbers.
+            if not metrics.get("output_tokens") and characters:
+                metrics["output_tokens"] = max(1, characters // 4)
+                metrics["estimated"] = True
 
 
 def probe(p: Participant, timeout: float = 60.0) -> tuple[bool, str]:

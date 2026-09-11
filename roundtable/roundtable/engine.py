@@ -28,6 +28,7 @@ class Turn:
     ts: float = field(default_factory=time.time)
     error: bool = False
     seq: int = -1        # position in the transcript; identity for the UI
+    metrics: dict = field(default_factory=dict)
 
     def as_event(self) -> dict:
         return {"type": "turn", **asdict(self)}
@@ -212,6 +213,45 @@ class Roundtable:
         self._forced = name
         return True
 
+    def ledger(self) -> dict:
+        """What this conversation has cost so far, per seat and in total.
+
+        Tokens are the honest unit: only some providers report them, and only
+        you know what you are paying per million. Set price_in / price_out on
+        a seat and its rows gain a dollar figure; leave them unset and the
+        row is tokens and seconds, which is still enough to see which seat is
+        expensive.
+        """
+        rows: dict[str, dict] = {}
+        for turn in self.history:
+            if not turn.metrics:
+                continue
+            seat = self.by_name(turn.speaker)
+            row = rows.setdefault(turn.speaker, {
+                "turns": 0, "prompt_tokens": 0, "output_tokens": 0,
+                "seconds": 0.0, "dollars": 0.0, "estimated": False,
+            })
+            row["turns"] += 1
+            prompt_tokens = turn.metrics.get("prompt_tokens", 0)
+            output_tokens = turn.metrics.get("output_tokens", 0)
+            row["prompt_tokens"] += prompt_tokens
+            row["output_tokens"] += output_tokens
+            row["seconds"] += turn.metrics.get("seconds", 0.0)
+            row["estimated"] |= bool(turn.metrics.get("estimated"))
+            if seat and seat.price_in is not None:
+                row["dollars"] += prompt_tokens / 1e6 * seat.price_in
+            if seat and seat.price_out is not None:
+                row["dollars"] += output_tokens / 1e6 * seat.price_out
+
+        total = {"turns": 0, "prompt_tokens": 0, "output_tokens": 0,
+                 "seconds": 0.0, "dollars": 0.0, "estimated": False}
+        for row in rows.values():
+            for key in ("turns", "prompt_tokens", "output_tokens",
+                        "seconds", "dollars"):
+                total[key] += row[key]
+            total["estimated"] |= row["estimated"]
+        return {"seats": rows, "total": total}
+
     # --- context ------------------------------------------------------------
 
     def _context(self) -> str:
@@ -255,8 +295,9 @@ class Roundtable:
                "seq": len(self.history)}
         parts: list[str] = []
         errored = False
+        metrics: dict = {}
         try:
-            for chunk in stream(p, system, prompt):
+            for chunk in stream(p, system, prompt, metrics):
                 parts.append(chunk)
                 yield {"type": "chunk", "speaker": p.name, "text": chunk}
         except ProviderError as exc:
@@ -273,7 +314,7 @@ class Roundtable:
             text = f"[{p.name} returned nothing]"
             errored = True
         turn = Turn(speaker=p.name, text=text, error=errored,
-                    seq=len(self.history))
+                    seq=len(self.history), metrics=metrics)
         # Resume round-robin from whoever actually spoke, so a forced turn or
         # an @mention reorders the table instead of double-seating someone.
         pool = self.regulars
@@ -285,4 +326,5 @@ class Roundtable:
         self.history.append(turn)
         self._append(turn.as_event())
         yield {"type": "end", "speaker": p.name, "text": text,
-               "error": errored, "seq": turn.seq, "hex": p.hex}
+               "error": errored, "seq": turn.seq, "hex": p.hex,
+               "metrics": metrics, "ledger": self.ledger()}

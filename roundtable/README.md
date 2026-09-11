@@ -187,6 +187,15 @@ spending loop. Two things bound it:
 - `max_tokens` (default 1024) caps each reply, and the system prompt asks for a
   few sentences.
 
+`/cost` at any time (and automatically on exit) prints tokens, seconds and
+turns per seat, so you can see which seat is actually expensive. Tokens are
+the default unit because only some providers report them and only you know
+your rates; set `price_in` / `price_out` on a seat (dollars per million
+tokens) and its row gains a cost column. Where a provider reports no token
+count — most local servers, every CLI — the output figure is estimated from
+character count and the table says so rather than quietly mixing measured and
+guessed numbers.
+
 For Claude seats, `effort = "low"` keeps conversational turns quick and cheap;
 raise it if you want the table thinking harder. `temperature` is not sent to
 Claude — current models removed sampling parameters — but it works on

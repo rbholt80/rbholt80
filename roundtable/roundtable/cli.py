@@ -23,6 +23,7 @@ HELP = """\
   /auto [n]        models keep talking (n turns, or until Ctrl+C)
   /next <Name>     put a specific model up next
   /who             who is at the table
+  /cost            tokens and seconds spent so far, per seat
   /moderate        ask the moderator seat to sum up where things stand
   /save            write a markdown transcript now
   /quit            exit
@@ -51,6 +52,32 @@ def _render(table: Roundtable, events, color: str) -> None:
             sys.stdout.flush()
         elif event["type"] == "end":
             print()
+
+
+def _print_ledger(table) -> None:
+    ledger = table.ledger()
+    if not ledger["seats"]:
+        print(f"{DIM}nothing spent yet{RESET}")
+        return
+    total = ledger["total"]
+    money = any(row["dollars"] for row in ledger["seats"].values())
+    head = f"  {'seat':<14}{'turns':>6}{'in':>10}{'out':>9}{'sec':>8}"
+    print(BOLD + head + (f"{'cost':>10}" if money else "") + RESET)
+    for name, row in sorted(ledger["seats"].items(),
+                            key=lambda kv: -kv[1]["output_tokens"]):
+        line = (f"  {name:<14}{row['turns']:>6}{row['prompt_tokens']:>10,}"
+                f"{row['output_tokens']:>9,}{row['seconds']:>8.1f}")
+        if money:
+            line += f"{'$' + format(row['dollars'], '.4f'):>10}"
+        print(line)
+    line = (f"  {'total':<14}{total['turns']:>6}{total['prompt_tokens']:>10,}"
+            f"{total['output_tokens']:>9,}{total['seconds']:>8.1f}")
+    if money:
+        line += f"{'$' + format(total['dollars'], '.4f'):>10}"
+    print(DIM + line + RESET)
+    if total["estimated"]:
+        print(f"{DIM}  output tokens estimated where the provider reported none"
+              f"{RESET}")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -157,6 +184,9 @@ def cmd_talk(args: argparse.Namespace) -> int:
                 if line == "/help":
                     print(HELP)
                     continue
+                if line == "/cost":
+                    _print_ledger(table)
+                    continue
                 if line == "/moderate":
                     mods = table.moderators
                     if not mods:
@@ -204,6 +234,8 @@ def cmd_talk(args: argparse.Namespace) -> int:
                     print(f"\n{DIM}(paused){RESET}")
     finally:
         if table.history:
+            print()
+            _print_ledger(table)
             md = table.export_markdown()
             print(f"\n{DIM}Transcript: {md}")
             print(f"Raw log:    {table.transcript_path}{RESET}")
