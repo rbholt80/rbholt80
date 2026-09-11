@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import Participant
+from . import safety
 from .providers import ProviderError, stream
 
 HOST = "Host"
@@ -29,6 +30,7 @@ class Turn:
     error: bool = False
     seq: int = -1        # position in the transcript; identity for the UI
     crossed: int = 0     # messages that landed while this reply was being written
+    flagged: list = field(default_factory=list)  # safety.scan() findings, if any
     metrics: dict = field(default_factory=dict)
 
     def as_event(self) -> dict:
@@ -175,7 +177,9 @@ class Roundtable:
             if turn.crossed:
                 what = ("the message" if turn.crossed == 1
                         else f"the {turn.crossed} messages")
-                note = f" *(written before {what} above it)*"
+                note += f" *(written before {what} above it)*"
+            if turn.flagged:
+                note += f" *(flagged: {', '.join(turn.flagged)})*"
             lines += [f"**{turn.speaker}:**{note} {turn.text}", ""]
         target.write_text("\n".join(lines), encoding="utf-8")
         return target
@@ -351,7 +355,8 @@ class Roundtable:
                 "the conversation is already in progress]\n\n"
             )
         return preamble + "\n\n".join(
-            f"{self._label(t)}: {t.text}" for t in turns)
+            f"{self._label(t)}: {safety.fence(t.text, t.flagged)}"
+            for t in turns)
 
     @staticmethod
     def _label(turn: Turn) -> str:
@@ -409,9 +414,14 @@ class Roundtable:
         if not text:
             text = f"[{p.name} returned nothing]"
             errored = True
+        # The host is the trusted operator; only AI-seat output is scanned.
+        # A turn is never hidden or edited for the host's own view -- only
+        # the copy other seats read gets fenced (see _context).
+        findings = [] if p.name == HOST else safety.scan(text)
         turn = Turn(speaker=p.name, text=text, error=errored,
                     seq=len(self.history), metrics=metrics,
-                    crossed=max(0, len(self.history) - saw))
+                    crossed=max(0, len(self.history) - saw),
+                    flagged=findings)
         # Resume round-robin from whoever actually spoke, so a forced turn or
         # an @mention reorders the table instead of double-seating someone.
         pool = self.regulars
@@ -424,5 +434,5 @@ class Roundtable:
         self._append(turn.as_event())
         yield {"type": "end", "speaker": p.name, "text": text,
                "error": errored, "seq": turn.seq, "hex": p.hex,
-               "crossed": turn.crossed,
+               "crossed": turn.crossed, "flagged": turn.flagged,
                "metrics": metrics, "ledger": self.ledger()}
