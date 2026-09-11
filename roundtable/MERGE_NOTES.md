@@ -5,7 +5,7 @@ This branch publishes the implementation already running on the user's computer.
 - Repository: `rbholt80/rbholt80`
 - Common base: `7ca060f` — Add Roundtable: a multi-model conversation harness
 - Local implementation: `codex/roundtable-local-integration`
-- Other implementation inspected: `claude/new-session-xif2fv` at `82738c8`
+- Other implementation inspected: `claude/new-session-xif2fv` at `4052c7b` (advanced from `82738c8` while this handoff was being published)
 - Final reconciliation belongs to the agent reviewing this handoff. This branch has not merged, replaced, or reset the other branch.
 
 ## Preserve from this branch
@@ -21,14 +21,23 @@ This branch publishes the implementation already running on the user's computer.
 
 ## Changes on the other branch to reconcile
 
-| Area | This branch | Other branch at 82738c8 | Merge consideration |
+| Area | This branch | Other branch at 4052c7b | Merge consideration |
 | --- | --- | --- | --- |
 | Ollama capabilities | `/api/show`, completion required | `/api/show`, name-based fallback when capabilities are unavailable | Both already use capability detection. Decide explicitly whether to retain the older-server fallback. |
 | Ollama transport | Native HTTP/NDJSON, no extra SDK | OpenAI-compatible adapter, requires OpenAI SDK | Preserve the working dependency-free local path unless there is a concrete reason to replace it. |
 | Seat names | `Ollama-gemma3:1b`, full model tag | `Gemma3`, generated short names | Preserve stable internal identity; consider a separate display label instead of silently renaming configured seats. |
 | Health checks | Claude/Codex login status during discovery | `doctor --probe` performs a live call | These are complementary. Port the probe and adapt it to exception-based failures; disclose that it invokes models. |
 | CLI compatibility | Flags verified on this installed version | Flags gated on CLI help | Bring across capability checks, but do not silently drop sandbox/tool restrictions and inherit broader permissions on an unfamiliar CLI. Report incompatibility instead. |
-| Probe failure detection | Provider exceptions and explicit engine flag | Probe inspects bracketed text | Handle `ProviderError`; partial text followed by failure must still fail the probe. |
+| Probe failure detection | Provider exceptions and explicit engine flag | Now also uses exceptions; probe catches `ProviderError` | The failure-contract fix now overlaps. Preserve both implementations’ partial-output behavior and keep the native CLI adapter’s process cleanup. |
+
+## Concurrent update: roles and weighted scheduling
+
+Commit `4052c7b` on the other branch also adds `role`, `weight`, `moderate_every`, role-specific prompts, and an `auto` policy that selects weighted random turns when weights differ. It assigns local models below 4B parameters a panel role and weight 0.35. These changes have been inspected but are not merged into this publication branch.
+
+- Reconcile the participant dataclass, TOML fields, CLI options, engine constructor, and browser new-topic path together; merging only the scheduler would leave incompatible configuration behavior.
+- **Weighted random turns conflict with the current “Run one round” promise.** A fixed budget of N randomly weighted turns can repeat some participants and omit others. Preserve one-turn-per-participant semantics for that button, or expose a separately named weighted mode with a clear turn budget.
+- Treat the 4B cutoff as a configurable hypothesis, not a demonstrated quality boundary. The short demo does not establish a reliable ranking across tasks.
+- Preserve the local text-only discussion instructions when merging role-specific prompts.
 
 ## Known issues to carry forward
 
