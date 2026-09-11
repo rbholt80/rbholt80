@@ -117,6 +117,17 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> boo
         return s.connect_ex((host, port)) == 0
 
 
+#: Context allocated per local seat. Deliberately modest.
+#:
+#: Measured on the host's machine: seven local models at 8192 exhausted
+#: memory and Ollama failed outright; at 2048 all seven answered. The cost is
+#: not per conversation but per resident model -- Ollama keeps recently used
+#: models loaded, so a roundtable multiplies the allocation by the number of
+#: seats, which is exactly the situation this tool creates and a single-model
+#: default never anticipates. Raise it per seat with context_tokens, or for
+#: every local seat with --local-context, when the machine has room.
+LOCAL_CONTEXT_TOKENS = 2048
+
 # Substrings that mark an embedding model. Only consulted when the Ollama
 # build is too old to report capabilities.
 _EMBED_HINTS = ("embed", "bge-", "gte-", "e5-", "minilm", "nomic-", "arctic-")
@@ -227,7 +238,8 @@ def _cli_supports(exe_path: str, flag: str, subcommand: str | None = None) -> bo
 
 
 def discover(include_cli: bool = True, include_local: bool = True,
-             dedupe: bool = True) -> list[Participant]:
+             dedupe: bool = True,
+             local_context: int = LOCAL_CONTEXT_TOKENS) -> list[Participant]:
     """Everything this machine can currently seat, best candidates first."""
     found: list[Participant] = []
 
@@ -268,7 +280,7 @@ def discover(include_cli: bool = True, include_local: bool = True,
                     found.append(Participant(
                         name=seat, kind="openai", model=model,
                         base_url=base_url, api_key_env=None, source="local",
-                        context_tokens=8192,
+                        context_tokens=local_context,
                         role="panel" if small else "principal",
                         weight=0.35 if small else 1.0,
                         max_tokens=160 if small else 1024,
@@ -402,18 +414,23 @@ def resolve(
     config_path: str | None = None,
     only: list[str] | None = None,
     include_cli: bool = True,
+    local_context: int | None = None,
 ) -> tuple[list[Participant], dict[str, Any]]:
     """Config file if there is one, otherwise whatever the machine offers."""
     settings: dict[str, Any] = {}
     path = find_config(config_path)
+    ctx = local_context or LOCAL_CONTEXT_TOKENS
     if path:
         data = load_config(path)
         settings = data.get("roundtable", {})
+        ctx = local_context or settings.get("local_context",
+                                             LOCAL_CONTEXT_TOKENS)
         seats = participants_from_config(data)
         if not seats:  # a config with no participants still means "discover"
-            seats = discover(include_cli=include_cli)
+            seats = discover(include_cli=include_cli, local_context=ctx)
     else:
-        seats = discover(include_cli=include_cli)
+        ctx = local_context or LOCAL_CONTEXT_TOKENS
+        seats = discover(include_cli=include_cli, local_context=ctx)
 
     if only:
         wanted = {n.casefold() for n in only}

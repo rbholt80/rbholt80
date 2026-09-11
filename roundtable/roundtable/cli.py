@@ -135,6 +135,7 @@ def _build(args: argparse.Namespace) -> tuple[Roundtable, dict]:
         config_path=args.config,
         only=args.only.split(",") if args.only else None,
         include_cli=not args.no_cli,
+        local_context=args.local_context,
     )
     if not seats:
         raise SystemExit(
@@ -272,6 +273,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--context-turns", type=int,
                         help="transcript turns each model sees (default 40)")
         sp.add_argument("--transcripts", help="directory for transcripts")
+        sp.add_argument("--local-context", type=int, default=None,
+                        metavar="N",
+                        help="context tokens per local model (default "
+                             f"{config.LOCAL_CONTEXT_TOKENS}); memory cost "
+                             "multiplies by the number of seats")
 
     talk = sub.add_parser("talk", help="terminal conversation (default)")
     common(talk)
