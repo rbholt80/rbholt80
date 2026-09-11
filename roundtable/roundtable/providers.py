@@ -62,8 +62,9 @@ def _stream_anthropic(p: Participant, system: str, prompt: str,
 
 # --- OpenAI-compatible (OpenAI, xAI, Groq, Ollama, LM Studio, ...) ----------
 
-#: Which parameter spelling each endpoint accepted last time.
-_DIALECT: dict[tuple[str, str], dict] = {}
+#: Which parameter NAMES each endpoint accepted last time -- (cap parameter,
+#: whether stream_options is tolerated). Never the values that went with them.
+_DIALECT: dict[tuple[str, str], tuple[str, bool]] = {}
 
 
 def _stream_openai(p: Participant, system: str, prompt: str,
@@ -94,23 +95,34 @@ def _stream_openai(p: Participant, system: str, prompt: str,
     # Rather than track which vendor is on which side, try the richest variant
     # and step down -- then remember the winner, so the cost is paid once per
     # endpoint instead of once per turn.
-    cap = p.max_tokens
-    variants = [
-        {"max_completion_tokens": cap, "stream_options": {"include_usage": True}},
-        {"max_tokens": cap, "stream_options": {"include_usage": True}},
-        {"max_completion_tokens": cap},
-        {"max_tokens": cap},
+    # Cache the SHAPE the endpoint accepted -- which parameter names it
+    # tolerates -- never the values. Caching a whole request body means the
+    # token cap of whichever call negotiated first is reused by every later
+    # call, so a 32-token connection probe silently truncates the rest of the
+    # conversation.
+    shapes = [
+        ("max_completion_tokens", True),
+        ("max_tokens", True),
+        ("max_completion_tokens", False),
+        ("max_tokens", False),
     ]
     key = (p.base_url or "openai", p.model)
     if (known := _DIALECT.get(key)) is not None:
-        variants = [known] + [v for v in variants if v != known]
+        shapes = [known] + [sh for sh in shapes if sh != known]
+
+    def body(shape: tuple[str, bool]) -> dict:
+        cap_name, wants_usage = shape
+        out: dict = {cap_name: p.max_tokens}
+        if wants_usage:
+            out["stream_options"] = {"include_usage": True}
+        return out
 
     stream = None
     last: Exception | None = None
-    for variant in variants:
+    for shape in shapes:
         try:
-            stream = client.chat.completions.create(**base, **variant)
-            _DIALECT[key] = variant
+            stream = client.chat.completions.create(**base, **body(shape))
+            _DIALECT[key] = shape
             break
         except openai.BadRequestError as exc:
             last = exc
