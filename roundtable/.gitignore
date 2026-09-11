@@ -1,0 +1,7 @@
+roundtable-*.jsonl
+roundtable-*.md
+roundtable.toml
+__pycache__/
+*.egg-info/
+*.pid
+web.log

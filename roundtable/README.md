@@ -1,0 +1,184 @@
+# Roundtable
+
+Put every AI you have in one room and let them argue.
+
+Claude, ChatGPT, Grok, Gemini, DeepSeek, a local Llama, even the CLIs already
+installed on your machine — each one sees the full labelled transcript, knows
+who else is at the table, and replies to what was actually just said. You watch
+it stream, and you can cut in whenever you want.
+
+Two front ends over one engine: a terminal and a local web page.
+
+```
+roundtable doctor                              # what can this machine seat?
+roundtable "Is it worth learning to code in 2026?"
+roundtable web "Should we ship on Friday?"     # same thing, in a browser
+```
+
+---
+
+## Install
+
+```bash
+cd roundtable
+pip install -e ".[all]"        # or: .[anthropic] / .[openai] / .[gemini]
+```
+
+`openai` is the workhorse dependency — it covers OpenAI, xAI, Groq, DeepSeek,
+Mistral, Together, OpenRouter, Perplexity, Ollama and LM Studio, because they
+all speak the same dialect. Install only the extras you want.
+
+Then export whichever keys you have. Roundtable seats whoever shows up:
+
+```bash
+export ANTHROPIC_API_KEY=...      # Claude
+export OPENAI_API_KEY=...         # ChatGPT
+export XAI_API_KEY=...            # Grok
+export GEMINI_API_KEY=...         # Gemini
+# ...and DEEPSEEK_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY,
+#    OPENROUTER_API_KEY, PERPLEXITY_API_KEY
+```
+
+`roundtable doctor` tells you exactly what it found, what it *nearly* found
+(key set but SDK missing, and the one-line fix), and what it skipped.
+
+---
+
+## How the table fills itself
+
+There is no hardcoded list of models. On every run Roundtable looks at the
+machine it is on:
+
+| Source | What it looks for |
+|---|---|
+| **Hosted APIs** | the key env vars above, plus the matching SDK |
+| **Local servers** | Ollama on `:11434`, LM Studio on `:1234` — no key needed |
+| **Installed CLIs** | `claude`, `codex`, `gemini`, `llm` on your `PATH` |
+
+If a vendor offers both an API seat and a CLI seat, the API seat wins by
+default: it is faster, cheaper, and it doesn't run an agent with filesystem
+access just to have an opinion. `doctor` still lists the CLI, and `--only` or
+the config file will seat it anyway.
+
+### About the CLI seats
+
+`Claude-CLI` and `Codex-CLI` are not chat endpoints. They are coding agents,
+and they run **in your current working directory with whatever tool access you
+have granted them** — they can read files, and depending on your settings,
+write them. That is occasionally what you want (a participant that can actually
+go look at the repo you are arguing about) and usually not. They are off by
+default when the API seat exists. Enable them deliberately, and mind the
+directory you start from.
+
+---
+
+## Driving it
+
+**Terminal**
+
+```
+Enter            let the next model speak
+<text>           join in; @Grok hands the floor to that seat
+/auto [n]        models keep talking (n turns, or until Ctrl+C)
+/next <Name>     put a specific model up next
+/who             who is at the table
+/save            write the markdown transcript now
+/quit            exit
+```
+
+**Browser** — `roundtable web "topic"` prints a localhost URL with a one-run
+token in the fragment. Click a name in the header to hand that model the floor,
+**Next** to advance, **Auto** to let them run, type to cut in. Cmd/Ctrl+Enter
+advances without sending. The page is theme-aware and works at phone width, so
+you can leave it open on a second screen.
+
+Both front ends drive the same engine over the same events, so they behave
+identically — and you can point a browser at a session you started from the
+terminal's `web` subcommand and watch the same conversation.
+
+---
+
+## Transcripts
+
+Every turn is appended to `roundtable-<timestamp>.jsonl` **the moment it
+finishes**, so a crash or a Ctrl+C costs you nothing. On exit (or `/save`) you
+also get a readable `.md` alongside it. Filenames are timestamped, so runs never
+overwrite each other.
+
+---
+
+## Configuration
+
+Optional. Drop a `roundtable.toml` in the working directory or
+`~/.config/roundtable/` to pin the table, change models, or give each model an
+angle. See `roundtable.example.toml` — copy it and delete what you don't have.
+
+The one setting worth knowing about is `persona`:
+
+```toml
+[[participant]]
+name = "Grok"
+kind = "openai"
+model = "grok-4"
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+persona = "the contrarian; find the strongest objection nobody has made yet"
+```
+
+Three assistants with no personas tend to violently agree. Give them different
+jobs and you get an actual discussion.
+
+### Cost
+
+Every turn resends the transcript, so an unattended `/auto` session is a
+spending loop. Two things bound it:
+
+- `context_turns` (default 40) caps how much transcript each model sees. Models
+  are told plainly that earlier turns were omitted rather than being left to
+  assume the conversation started mid-argument.
+- `max_tokens` (default 1024) caps each reply, and the system prompt asks for a
+  few sentences.
+
+For Claude seats, `effort = "low"` keeps conversational turns quick and cheap;
+raise it if you want the table thinking harder. `temperature` is not sent to
+Claude — current models removed sampling parameters — but it works on
+OpenAI-compatible and Gemini seats.
+
+### Testing without spending anything
+
+```toml
+[[participant]]
+name = "Mock"
+kind = "mock"
+```
+
+A `mock` seat streams a canned reply instantly and costs nothing. Useful for
+checking the UI, the transcript and your config before pointing it at anything
+billable.
+
+---
+
+## Layout
+
+```
+roundtable/
+  config.py      participants, discovery, TOML
+  providers.py   streaming adapters: anthropic | openai | gemini | cli | mock
+  engine.py      conversation state, turn taking, transcripts
+  cli.py         terminal front end
+  web.py         localhost server (SSE)
+  static/        the web page
+```
+
+Adding a provider means one function in `providers.py` and one line in
+`_ADAPTERS`.
+
+---
+
+## Failure behaviour
+
+One seat going down never ends the conversation. A model that errors, times
+out, or isn't configured gets an in-line `[Name unavailable: ...]` note, is
+marked as an errored turn in the transcript, and the table moves on. That is
+deliberate: a roundtable that dies because one API had a bad minute is useless
+for the long unattended sessions this is built for.

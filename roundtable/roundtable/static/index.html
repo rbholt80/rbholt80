@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roundtable</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1c1b19;
+    --muted: #6f6b64;
+    --line: #e4e0d9;
+    --accent: #1c1b19;
+    --host: #2f2d2a;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513;
+      --panel: #1e1d1a;
+      --ink: #eceae5;
+      --muted: #9a948a;
+      --line: #302e2a;
+      --accent: #eceae5;
+      --host: #d8d4cc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    background: var(--panel); display: flex; flex-wrap: wrap;
+    gap: 10px 16px; align-items: baseline;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .roster { display: flex; flex-wrap: wrap; gap: 10px; margin-left: auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+    background: none; font-family: inherit;
+  }
+  .chip:hover { border-color: var(--muted); color: var(--ink); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+  main {
+    flex: 1; overflow-y: auto; padding: 24px 20px 8px;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+  .wrap { width: 100%; max-width: 760px; margin: 0 auto; }
+  .turn { display: grid; grid-template-columns: 108px 1fr; gap: 16px; }
+  .who {
+    font-size: 13px; font-weight: 600; text-align: right;
+    padding-top: 1px; word-break: break-word;
+  }
+  .what { white-space: pre-wrap; word-wrap: break-word; }
+  .turn.host .what {
+    border-left: 2px solid var(--host); padding-left: 12px; color: var(--host);
+  }
+  .turn.error .what { color: var(--muted); font-style: italic; }
+  .cursor {
+    display: inline-block; width: 7px; height: 1em; vertical-align: -2px;
+    background: currentColor; opacity: .5; animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+
+  footer {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 12px 20px 16px;
+  }
+  .bar { display: flex; gap: 8px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; font: inherit; color: inherit;
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 10px 12px; min-height: 44px;
+    max-height: 160px;
+  }
+  textarea:focus { outline: 2px solid var(--muted); outline-offset: -1px; }
+  button {
+    font: inherit; font-size: 13px; border-radius: var(--radius);
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+    padding: 11px 16px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+  button.on { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+  .hints { color: var(--muted); font-size: 12px; margin: 8px 2px 0; }
+
+  @media (max-width: 620px) {
+    .turn { grid-template-columns: 1fr; gap: 4px; }
+    .who { text-align: left; }
+    .roster { margin-left: 0; }
+    .bar { flex-wrap: wrap; }
+    textarea { min-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>Roundtable —</span> <b id="topic">connecting…</b></h1>
+  <div class="roster" id="roster"></div>
+</header>
+
+<main id="log"><div class="wrap" id="wrap">
+  <p class="empty" id="empty">Press <b>Next</b> to open the discussion.</p>
+</div></main>
+
+<footer>
+  <div class="bar">
+    <textarea id="input" rows="1" placeholder="Say something to the table…  (@Name to hand them the floor)"></textarea>
+    <button id="send">Send</button>
+    <button id="next" class="primary">Next ⏎</button>
+    <button id="auto">Auto</button>
+    <button id="save">Save</button>
+  </div>
+  <p class="hints" id="hints">Enter sends · Shift+Enter for a new line · Cmd/Ctrl+Enter advances the table</p>
+</footer>
+
+<script>
+(() => {
+  const token = location.hash.slice(1);
+  if (!token) { document.getElementById('topic').textContent = 'missing token in URL'; return; }
+  // Keep the token out of the address bar, browser history and any Referer.
+  history.replaceState(null, '', location.pathname);
+
+  const $ = id => document.getElementById(id);
+  const wrap = $('wrap'), log = $('log'), input = $('input');
+  const colors = new Map();
+  let live = null;          // the turn currently streaming
+  let auto = false;
+
+  const post = (path, body = {}) =>
+    fetch(path + '?t=' + encodeURIComponent(token), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(r => r.json()).catch(() => ({}));
+
+  const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  const scroll = stick => { if (stick) log.scrollTop = log.scrollHeight; };
+
+  function addTurn(speaker, text, hex, isError) {
+    $('empty')?.remove();
+    const stick = atBottom();
+    const row = document.createElement('div');
+    row.className = 'turn' + (speaker === 'Host' ? ' host' : '') + (isError ? ' error' : '');
+    const who = document.createElement('div');
+    who.className = 'who';
+    who.style.color = hex || colors.get(speaker) || 'inherit';
+    who.textContent = speaker;
+    const what = document.createElement('div');
+    what.className = 'what';
+    what.textContent = text || '';
+    row.append(who, what);
+    wrap.append(row);
+    scroll(stick);
+    return what;
+  }
+
+  function setAuto(on) {
+    auto = on;
+    $('auto').classList.toggle('on', on);
+    $('auto').textContent = on ? 'Auto ⏸' : 'Auto';
+  }
+
+  function handle(ev) {
+    if (ev.type === 'snapshot') {
+      $('topic').textContent = ev.topic;
+      $('roster').innerHTML = '';
+      wrap.innerHTML = '';
+      colors.clear();
+      for (const p of ev.participants) {
+        colors.set(p.name, p.hex);
+        const chip = document.createElement('button');
+        chip.className = 'chip';
+        chip.title = 'Give ' + p.name + ' the floor — ' + p.model;
+        chip.innerHTML = '<span class="dot" style="background:' + p.hex + '"></span>';
+        chip.append(p.name);
+        chip.onclick = () => post('/next', { speaker: p.name });
+        $('roster').append(chip);
+      }
+      if (!ev.history.length) {
+        const p = document.createElement('p');
+        p.className = 'empty'; p.id = 'empty';
+        p.innerHTML = 'Press <b>Next</b> to open the discussion.';
+        wrap.append(p);
+      }
+      for (const t of ev.history) addTurn(t.speaker, t.text, t.hex, t.error);
+      setAuto(ev.auto);
+      log.scrollTop = log.scrollHeight;
+    }
+    else if (ev.type === 'turn') addTurn(ev.speaker, ev.text, ev.hex, ev.error);
+    else if (ev.type === 'start') {
+      live = addTurn(ev.speaker, '', ev.hex, false);
+      const caret = document.createElement('span');
+      caret.className = 'cursor';
+      live.append(caret);
+    }
+    else if (ev.type === 'chunk' && live) {
+      const stick = atBottom();
+      live.querySelector('.cursor')?.remove();
+      live.append(document.createTextNode(ev.text));
+      const caret = document.createElement('span');
+      caret.className = 'cursor';
+      live.append(caret);
+      scroll(stick);
+    }
+    else if (ev.type === 'end') {
+      if (live) {
+        live.querySelector('.cursor')?.remove();
+        if (ev.error) live.parentElement.classList.add('error');
+      }
+      live = null;
+    }
+    else if (ev.type === 'auto') setAuto(ev.on);
+  }
+
+  const stream = new EventSource('/events?t=' + encodeURIComponent(token));
+  stream.onmessage = e => handle(JSON.parse(e.data));
+  stream.onerror = () => { $('hints').textContent = 'Connection lost — is the server still running?'; };
+
+  const send = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = ''; input.style.height = 'auto';
+    post('/say', { text });
+  };
+
+  $('send').onclick = send;
+  $('next').onclick = () => post('/next');
+  $('auto').onclick = () => post('/auto', { on: !auto });
+  $('save').onclick = () => post('/save').then(r => {
+    if (r.path) $('hints').textContent = 'Saved ' + r.path;
+  });
+
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); post('/next'); }
+    else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+})();
+</script>
+</body>
+</html>
