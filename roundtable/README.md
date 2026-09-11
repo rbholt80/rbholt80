@@ -1,98 +1,142 @@
-# Roundtable — your AIs in one conversation
+# Roundtable
 
-This local app lets connected assistants take turns reading and responding to a shared discussion. You can watch, choose the next speaker, and join in from the browser or terminal.
+A local browser and terminal app where your connected AI models discuss one
+shared topic. You choose the topic, control the pace, and can interrupt. It
+uses the same engine for both interfaces.
 
-## Start
+## Start the browser
 
-Start the browser interface with:
+From this directory:
 
-```bash
+```sh
 ./roundtable.sh
 ```
 
-Click **New topic**, enter what you want to discuss, then **Run one round**. Every connected participant gets one turn. Click **Pause** to stop after the current response. Click a participant’s name for a specific speaker, or **Next** for the next participant. Type a message and press Enter to join in. The launcher reopens an existing running table.
+The launcher opens the existing table or starts one. Choose **New topic**, then
+**Independent round** for separate first assessments or **Run one round** for
+an ordinary discussion. A round gives each non-moderator seat one turn. Pause
+stops after the current response; a failed seat pauses automatic continuation.
 
-For the terminal, run:
+No Python packages are needed for Ollama or the installed CLI connections.
+Python 3.11 or newer is required. For hosted API adapters, run `./setup.sh` once;
+it installs optional SDKs in `.venv`, leaving system Python alone. The launcher
+uses that environment automatically when present.
 
-```bash
+```sh
 ./roundtable.sh --terminal "What should we discuss?"
-```
-
-Terminal controls: Enter advances; text joins the discussion; `/auto` runs one round; `/auto 3` runs three turns; `/next NAME` chooses a speaker; `/save` exports; `/quit` exits. Ctrl+C during a reply pauses the terminal discussion. To stop the browser server:
-
-```bash
 ./roundtable.sh --stop
+python3 create_shortcuts.py
 ```
 
-For optional Linux desktop shortcuts, run `python3 create_shortcuts.py` in this folder. It creates **Launch Roundtable.desktop** and **Roundtable Terminal.desktop** for this checkout. Generated shortcuts are ignored by Git.
+The last command creates two Linux desktop shortcuts in this directory. It
+does not install system menu entries. CLI installation users can also run
+`.venv/bin/roundtable web "Topic"` or activate `.venv` to use `roundtable` directly.
 
-Python 3.11 or newer is required. The local and subscription CLI connections need no pip packages or new API key.
+## Have a useful discussion
 
-## Connections verified on this computer
+**Independent round** freezes the starting transcript. Each model gives its
+assessment without seeing other answers produced in that round. New Host
+messages still reach subsequent speakers. This reduces first-speaker anchoring;
+it does not guarantee that model judgments are independent or correct.
 
-- **Codex-CLI** — uses your existing ChatGPT login through Codex.
-- **Claude-CLI** — uses the Claude Code login, separate from signing into the desktop chat app.
-- **Seven Ollama chat models** — Gemma 2, Gemma 3, Granite 3.3, Llama 3.2, Phi 3.5, and two Qwen 2.5 sizes.
-- **Grok** — no automatic connection configured yet.
+**Challenge** attaches a Host question to an exact quote in a completed model
+reply. The source turn number and quote are saved. Ask for evidence, missing
+assumptions, or a test that would resolve it. The model can agree with the claim;
+it is not instructed to manufacture disagreement. A transcript reference proves
+where a statement was made, not whether it is true.
 
-Every new topic refreshes discovery. Only Ollama models advertising completion support join the discussion; the installed embedding model is excluded. Signed-out Claude or Codex is reported as needing login, rather than appearing ready.
+The default context window is 40 turns. Models see a notice when older turns
+are omitted. Replies keep stable IDs and record which context they received,
+including when the Host interjects during a reply. Transcripts are written to
+JSONL after each completed turn and refreshed in Markdown after Host/model turns.
+The launcher keeps them in `transcripts/`; ordinary CLI runs honor `--transcripts`.
 
-To check connections:
+Terminal commands:
 
-```bash
-python3 -m roundtable doctor
-```
+| Command | Effect |
+| --- | --- |
+| Enter | Next model replies |
+| Your text | Join as Host; `@Name` requests that seat |
+| `/round` | One turn per non-moderator seat |
+| `/opening` | Independent round from the same starting transcript |
+| `/challenge 0 \| exact quote \| your question` | Question a claim in turn #0 |
+| `/next Name` | Choose the next speaker |
+| `/auto N` | Run N turns |
+| `/cost` | Show usage and time per seat |
+| `/moderate` | Ask the configured moderator to summarize |
+| `/save` | Export Markdown |
+| `/quit` | Save and exit |
 
-The app connects through installed CLIs and local model servers. Desktop apps and browser chat histories are not automatically imported. Messages at the table are sent to the selected speaker’s service; Ollama runs locally, while Claude and Codex use their hosted services and account usage allowances.
+Use finite rounds first. Ctrl+C during a terminal reply pauses it. The browser's
+Pause button lets the current reply finish.
 
-For an individual CLI login, use its normal terminal login flow, then choose **New topic** to discover it again:
+## Connections and roles
 
-```bash
-claude auth login
-codex login
-```
+`roundtable doctor` discovers installed connections and checks CLI sign-in.
+`roundtable doctor --probe` sends a short real request to each discovered seat
+and therefore uses its account allowance. Discovery alone does not prove a model
+will answer successfully.
 
-## Include Grok or another chat app manually
+- **Ollama:** discovers completion-capable installed models and uses native
+  streaming without an SDK. Embedding models are excluded. Models below 4B
+  parameters default to brief panel roles; configuration can override that.
+- **Claude CLI / Codex CLI:** reuse their existing logins. Automatic invocations
+  restrict tools and inherited configuration, and run in temporary directories.
+  Custom CLI commands in TOML are trusted operator configuration; review them
+  before enabling. Hosted CLI services still consume their account allowances.
+- **Hosted APIs:** enabled by their key environment variable and installed SDK.
+  Provider/model examples in configuration are defaults, not a live model catalog.
+  Override them for models available to your account. Do not export placeholder
+  keys such as `...`; an apparent API connection can shadow a working CLI seat.
+- **LM Studio:** uses the optional OpenAI-compatible adapter.
+- **Grok:** needs configured xAI API access for automatic replies. A browser chat
+  subscription is not automatically connected. Manual replies can be pasted as
+  Host messages with their origin identified.
 
-Until an automatic connection is configured, a chat app can contribute through the host input:
+The original verified machine has seven Ollama chat models and two signed-in
+CLI seats. `doctor` reports what is available on the current machine.
 
-1. Click **Save** and open the Markdown transcript from `transcripts/`.
-2. Copy the discussion into Grok (or another AI app) with: “Join this roundtable as yourself. Respond to the latest speaker in 2–4 sentences.”
-3. Paste the response into Roundtable’s message box, prefixed with `Grok (pasted reply):`, and click **Send**.
-4. Click **Next** or **Run one round** so the connected participants can respond to it.
+A `principal` gets a normal discussion brief. A `panel` seat offers one concrete
+objection, example, or uncertainty. A `moderator` is outside the normal rotation
+and speaks on `/moderate` or a configured cadence. `policy = "auto"` uses weighted
+selection when weights differ. Explicit rounds retain the one-turn-per-seat
+rule regardless of weights.
 
-These contributions are host-supplied quotes, clearly separate from the automatically connected speakers. Nothing is read from or sent to those other apps automatically.
+## Usage accounting
 
-## Transcripts and limits
+`/cost` and the browser show turns, elapsed seconds, and tokens per seat. Hosted
+providers and native Ollama can report token counts. Where counts are missing,
+output is estimated from character count and labeled as estimated. Estimates
+are not billing records. Configure `price_in` and `price_out` in dollars per
+million tokens to calculate usage at your own rates; otherwise no price is implied.
 
-Each completed reply is appended to a uniquely named JSONL transcript and exported to Markdown in `transcripts/`. A browser refresh restores the current table, including a response already streaming. Restarting the server creates a fresh conversation; saved transcripts remain readable but are not automatically resumed. A process crash may lose the unfinished reply.
+The OpenAI-compatible adapter negotiates supported token/usage parameters and
+caches the accepted parameter names per endpoint/model. A probe's small response
+budget does not cap later replies. Missing SDKs, connection failures, and
+mid-stream failures remain visible; already received text is kept and the turn
+is marked as failed.
 
-The browser’s automatic mode is limited to one round and pauses when a participant errors. Terminal auto mode is also finite by default. Recent transcript turns are sent to each speaker; long discussions eventually omit older turns with a notice. Replies are requested in 2–4 sentences. Small local models may still repeat themselves or reach the output limit.
+## Configuration and boundaries
 
-CLI speakers run from temporary working directories. Claude runs with tools/customizations disabled. Codex uses a read-only sandbox with the main execution, browser, plugin, and delegation features disabled and does not inherit user configuration. These are discussion seats, not tools for changing your projects. The default Codex model is selected by the installed CLI; no model ID is pinned by this app.
+Copy `roundtable.example.toml` to `roundtable.toml` to select models, roles,
+weights, timeouts, output limits, and rates. The default app sends the context
+to whichever seat is speaking. A mixed session containing hosted seats is not
+local-only. Choose only Ollama seats when the transcript must remain local.
 
-The server listens on loopback only by default. Its generated link contains a session token. Runtime connection information stays under `.runtime/`; keep that directory private and exclude it when sharing source.
+Other speakers' text is quoted discussion data. The app does not refuse ordinary
+discussion because it contains an injection phrase. CLI restrictions are applied
+separately; regex filtering is not treated as a sandbox.
 
-## Configuration and extension
+The localhost browser uses a per-session token, kept in the URL fragment and
+sessionStorage so reload can reconnect. Treat the token like a local session
+credential. A new topic creates a separate transcript and refreshes discovery.
 
-`roundtable.toml` can define explicit participants and personas. `--only` can select a smaller table, for example:
+## Development and collaboration
 
-```bash
-python3 -m roundtable talk "Compare these ideas" --only "Codex-CLI,Claude-CLI,Ollama-gemma3:1b" --transcripts transcripts
-```
-
-The inherited example config and hosted-provider adapters are retained for future connections, including Grok. Those hosted API adapters and their example model IDs were not validated in this local setup. Do not assume the examples identify current or account-accessible models. Adding a paid API connection is separate from using an installed chat app.
-
-The browser’s **New topic** starts a fresh automatically discovered roster; launch a terminal table with an explicit config to retain a custom roster.
-
-## Verification and source
-
-Live checks exercised Codex and all seven Ollama models against their actual connections. Claude’s live check is recorded in `transcripts/`. The regression suite covers process timeouts and descendants, large input/error streams, partial failures, unique transcripts, model discovery, mentions, HTTP authentication and request validation, bounded auto mode, new topics, and reconnect state:
-
-```bash
+```sh
 python3 -m unittest discover -s tests -v
 ```
 
-Recovered from [rbholt80/rbholt80, branch claude/new-session-xif2fv](https://github.com/rbholt80/rbholt80/tree/claude/new-session-xif2fv/roundtable), then adapted locally. This branch publishes the local integration separately so it can be reconciled with the newer Claude branch. See `MERGE_NOTES.md` before merging.
-
-Connection references: [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode), [Ollama chat API](https://docs.ollama.com/api/chat), and the installed CLIs’ help and login-status commands.
+See `COLLABORATION.md` for the ownership proposal and `CODEX_STATUS.md` for verified
+branch refs, integration work, validation results, and the next handoff. Fetch
+remote refs before drawing conclusions from a local tracking branch.

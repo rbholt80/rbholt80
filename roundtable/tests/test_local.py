@@ -56,7 +56,7 @@ class LocalTests(unittest.TestCase):
     def test_discovery_has_no_sdk_requirement_for_ollama(self):
         with patch('roundtable.config._port_open', side_effect=lambda port: port == 11434), \
              patch('roundtable.config._has_module',return_value=False), \
-             patch('roundtable.config.ollama_models',return_value=['small:1b','large:2b']):
+             patch('roundtable.config._ollama_chat_models',return_value=[('small:1b',1.0),('large:2b',2.0)]):
             seats = discover(include_cli=False)
         self.assertEqual([p.kind for p in seats], ['ollama','ollama'])
 
@@ -118,6 +118,26 @@ class WebTests(unittest.TestCase):
         self.hub.broadcast({'type':'start','speaker':'A','hex':'#123456'})
         self.hub.broadcast({'type':'chunk','speaker':'A','text':'In progress'})
         self.assertEqual(self.request('/state')[1]['active']['text'],'In progress')
+
+    def test_session_cookie_reconnect_and_cross_origin_write_boundary(self):
+        request = urllib.request.Request(self.url + '/session', data=b'{}',
+            headers={'X-Roundtable-Token': 'test-token'})
+        with urllib.request.urlopen(request) as response:
+            cookie = response.headers['Set-Cookie']
+        self.assertIn('HttpOnly', cookie)
+        self.assertIn('SameSite=Strict', cookie)
+        header = cookie.split(';', 1)[0]
+        request = urllib.request.Request(self.url + '/state', headers={'Cookie': header})
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(json.load(response)['type'], 'snapshot')
+        request = urllib.request.Request(self.url + '/say', data=b'{"text":"cookie write"}',
+            headers={'Cookie': header})
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 403)
+        request.add_header('X-Roundtable-Client', 'browser')
+        with urllib.request.urlopen(request) as response:
+            self.assertTrue(json.load(response)['ok'])
 
 
 if __name__ == '__main__':

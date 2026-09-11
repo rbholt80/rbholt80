@@ -13,13 +13,13 @@ import json
 import os
 import shutil
 import socket
-
-from .local import cli_ready, ollama_models
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
+
+from .local import cli_ready
 
 try:  # py3.11+
     import tomllib
@@ -46,13 +46,18 @@ class Participant:
     """One seat at the table."""
 
     name: str
-    kind: str                      # anthropic | openai | gemini | cli
+    kind: str                      # anthropic | openai | gemini | ollama | cli | mock
     model: str = ""
     api_key_env: str | None = None
     base_url: str | None = None
     argv: list[str] = field(default_factory=list)   # kind == "cli"
     persona: str = ""              # extra system-prompt line, optional
+    role: str = "principal"        # principal | panel | moderator
+    price_in: float | None = None  # $ per million input tokens, if you want $
+    price_out: float | None = None # $ per million output tokens
+    weight: float = 1.0            # relative floor time under the weighted policy
     max_tokens: int = 1024
+    context_tokens: int = 2048     # native Ollama context; increase on larger machines
     effort: str | None = None      # Claude only: low|medium|high|xhigh|max
     temperature: float | None = None
     timeout: float = 180.0
@@ -118,15 +123,89 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> boo
         return s.connect_ex((host, port)) == 0
 
 
-def _ollama_first_model(base_url: str) -> str | None:
-    """Ask a running Ollama which models it actually has pulled."""
-    url = base_url.rsplit("/v1", 1)[0] + "/api/tags"
+# Substrings that mark an embedding model. Only consulted when the Ollama
+# build is too old to report capabilities.
+_EMBED_HINTS = ("embed", "bge-", "gte-", "e5-", "minilm", "nomic-", "arctic-")
+
+
+def _ollama_capabilities(root: str, model: str) -> list[str] | None:
+    """What a pulled model can do. None if this Ollama build won't say."""
+    req = urllib.request.Request(
+        root + "/api/show",
+        data=json.dumps({"model": model}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as resp:
-            models = json.load(resp).get("models") or []
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return json.load(resp).get("capabilities")
     except (urllib.error.URLError, OSError, ValueError):
         return None
-    return models[0].get("name") if models else None
+
+
+def _parameter_billions(raw: str | None) -> float | None:
+    """'3.8B' -> 3.8, '596.05M' -> 0.596. None if Ollama didn't say."""
+    if not raw:
+        return None
+    text = raw.strip().upper()
+    try:
+        if text.endswith("B"):
+            return float(text[:-1])
+        if text.endswith("M"):
+            return float(text[:-1]) / 1000
+        return float(text) / 1e9
+    except ValueError:
+        return None
+
+
+# Default scheduling heuristic, not a capability guarantee. Small models
+# contribute shorter panel turns; config can override each role and weight.
+PANEL_THRESHOLD_B = 4.0
+
+
+def _ollama_chat_models(base_url: str) -> list[tuple[str, float | None]]:
+    """Every pulled model that can hold a conversation.
+
+    An embedding model has no business at a roundtable -- it cannot produce a
+    reply at all -- so ask Ollama what each model is actually capable of and
+    seat only the ones that can complete text. Older Ollama builds don't
+    report capabilities; fall back to the name, which is a weaker signal but
+    beats seating `nomic-embed-text` and waiting for it to say something.
+    """
+    root = base_url.rsplit("/v1", 1)[0]
+    try:
+        with urllib.request.urlopen(root + "/api/tags", timeout=2.0) as resp:
+            entries = json.load(resp).get("models") or []
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+
+    chat: list[tuple[str, float | None]] = []
+    for entry in entries:
+        name = entry.get("name")
+        if not name:
+            continue
+        size = _parameter_billions((entry.get("details") or {}).get("parameter_size"))
+        caps = _ollama_capabilities(root, name)
+        if caps is None:
+            if not any(h in name.lower() for h in _EMBED_HINTS):
+                chat.append((name, size))
+        elif "completion" in caps:
+            chat.append((name, size))
+    return chat
+
+
+def _seat_name(model: str, taken: set[str]) -> str:
+    """A short, @mentionable name for a local model tag."""
+    base, _, tag = model.partition(":")
+    pretty = base.replace("-", " ").replace("_", " ").title().replace(" ", "")
+    if pretty not in taken:
+        return pretty
+    # Two variants of the same family -- keep the tag to tell them apart.
+    candidate = f"{pretty}-{tag}" if tag else pretty
+    suffix = 2
+    while candidate in taken:
+        candidate, suffix = f"{pretty}-{suffix}", suffix + 1
+    return candidate
+
 
 
 def discover(include_cli: bool = True, include_local: bool = True,
@@ -159,25 +238,40 @@ def discover(include_cli: bool = True, include_local: bool = True,
             ))
 
     if include_local:
+        # Native Ollama streaming needs no hosted-provider SDK.
         if _port_open(11434):
-            try:
-                models = ollama_models("http://127.0.0.1:11434")
-            except (OSError, ValueError):
-                models = []
+            base_url = "http://127.0.0.1:11434"
+            taken = {p.name for p in found}
             angles = ["offer practical examples", "question assumptions", "suggest alternatives",
-                      "identify uncertainties", "connect others' ideas", "look for tradeoffs", "summarize disagreements"]
-            for i, model in enumerate(models):
-                found.append(Participant(name="Ollama-" + model, kind="ollama", model=model,
-                    base_url="http://127.0.0.1:11434", source="local", max_tokens=384,
-                    persona=angles[i % len(angles)], note="Local chat model; no API key needed"))
+                      "identify uncertainties", "connect others' ideas", "look for tradeoffs",
+                      "summarize disagreements"]
+            for i, (model, size) in enumerate(_ollama_chat_models(base_url)):
+                seat = _seat_name(model, taken)
+                taken.add(seat)
+                small = size is not None and size < PANEL_THRESHOLD_B
+                found.append(Participant(
+                    name=seat, kind="ollama", model=model,
+                    base_url=base_url, source="local",
+                    role="panel" if small else "principal",
+                    weight=0.35 if small else 1.0,
+                    max_tokens=160 if small else 1024,
+                    persona=angles[i % len(angles)],
+                    note=("Local chat model via Ollama; no API key needed"
+                          + (f", {size:g}B — panel seat" if small else "")),
+                ))
         if _has_module("openai") and _port_open(1234):
-            found.append(Participant(name="LMStudio", kind="openai", model="local-model",
-                base_url="http://127.0.0.1:1234/v1", source="local"))
+            found.append(Participant(
+                name="LMStudio", kind="openai", model="local-model",
+                base_url="http://127.0.0.1:1234/v1", source="local",
+                note="Local server on :1234; no API key needed",
+            ))
 
     if include_cli:
         for name, exe, args, note in CLI_CANDIDATES:
             path = shutil.which(exe)
             if path and cli_ready(exe, path)[0]:
+                # Preserve the verified restricted CLI invocation. Do not drop
+                # restrictions silently to accommodate an unfamiliar binary.
                 found.append(Participant(
                     name=name, kind="cli", model=exe, argv=[path, *args],
                     source="cli", note=note,
@@ -267,7 +361,8 @@ def load_config(path: Path) -> dict[str, Any]:
 
 _PARTICIPANT_FIELDS = {
     "kind", "model", "api_key_env", "base_url", "argv", "persona",
-    "max_tokens", "effort", "temperature", "timeout", "enabled",
+    "max_tokens", "context_tokens", "effort", "temperature", "timeout", "enabled",
+    "role", "weight", "price_in", "price_out",
 }
 
 

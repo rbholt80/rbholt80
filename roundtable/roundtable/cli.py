@@ -19,9 +19,15 @@ HOST_COLOR = "\033[1;37m"
 HELP = """\
   Enter            let the next model speak
   <text>           join in; @Name hands the floor to that seat
-  /auto [n]        models keep talking (n turns; defaults to one round)
+  /round           every regular seat speaks once, in order
+  /opening         one independent answer each before seeing this round's replies
+  /auto [n]        N model turns; no number means one fair round
+  /challenge <seq> | <quote> | <question>
+                   challenge an exact claim from a numbered reply
   /next <Name>     put a specific model up next
   /who             who is at the table
+  /cost            tokens and seconds spent so far, per seat
+  /moderate        ask the moderator seat to sum up where things stand
   /save            write a markdown transcript now
   /quit            exit
 """
@@ -32,21 +38,49 @@ def _print_roster(seats: list[Participant]) -> None:
         detail = p.model or p.kind
         if p.kind == "cli":
             detail += " (CLI)"
+        if p.role != "principal":
+            detail += f" · {p.role}"
         note = f"  {DIM}{p.note}{RESET}" if p.note else ""
-        print(f"  {p.color}●{RESET} {p.name:<12} {DIM}{detail}{RESET}{note}")
+        print(f"  {p.color}●{RESET} {p.name:<14} {DIM}{detail}{RESET}{note}")
 
 
 def _render(table: Roundtable, events, color: str) -> None:
     """Paint one streamed turn."""
     for event in events:
         if event["type"] == "start":
-            sys.stdout.write(f"\n{color}{event['speaker']}:{RESET} ")
+            sys.stdout.write(f"\n{color}{event['speaker']} [#{event['seq']}]:{RESET} ")
             sys.stdout.flush()
         elif event["type"] == "chunk":
             sys.stdout.write(event["text"])
             sys.stdout.flush()
         elif event["type"] == "end":
             print()
+
+
+def _print_ledger(table) -> None:
+    ledger = table.ledger()
+    if not ledger["seats"]:
+        print(f"{DIM}nothing spent yet{RESET}")
+        return
+    total = ledger["total"]
+    money = any(row["dollars"] for row in ledger["seats"].values())
+    head = f"  {'seat':<14}{'turns':>6}{'in':>10}{'out':>9}{'sec':>8}"
+    print(BOLD + head + (f"{'cost':>10}" if money else "") + RESET)
+    for name, row in sorted(ledger["seats"].items(),
+                            key=lambda kv: -kv[1]["output_tokens"]):
+        line = (f"  {name:<14}{row['turns']:>6}{row['prompt_tokens']:>10,}"
+                f"{row['output_tokens']:>9,}{row['seconds']:>8.1f}")
+        if money:
+            line += f"{'$' + format(row['dollars'], '.4f'):>10}"
+        print(line)
+    line = (f"  {'total':<14}{total['turns']:>6}{total['prompt_tokens']:>10,}"
+            f"{total['output_tokens']:>9,}{total['seconds']:>8.1f}")
+    if money:
+        line += f"{'$' + format(total['dollars'], '.4f'):>10}"
+    print(DIM + line + RESET)
+    if total["estimated"]:
+        print(f"{DIM}  output tokens estimated where the provider reported none"
+              f"{RESET}")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -83,8 +117,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  {DIM}○{RESET} {name:<12} {DIM}{remedy}{RESET}")
         print()
 
-    print(f"{len(seats)} seat(s) ready.")
-    return 0
+    if not getattr(args, "probe", False):
+        print(f"{len(seats)} seat(s) found. `doctor --probe` checks they answer.")
+        return 0
+
+    from .providers import probe
+    print(f"{BOLD}Live check{RESET}")
+    working = 0
+    for seat in seats:
+        print(f"  {seat.color}●{RESET} {seat.name:<12} ", end="", flush=True)
+        ok, detail = probe(seat)
+        working += ok
+        print(("✓ " if ok else "✗ ") + f"{DIM}{detail}{RESET}")
+    print(f"\n{working}/{len(seats)} seat(s) answered.")
+    return 0 if working else 1
 
 
 def _build(args: argparse.Namespace) -> tuple[Roundtable, dict]:
@@ -107,9 +153,19 @@ def _build(args: argparse.Namespace) -> tuple[Roundtable, dict]:
         topic=topic,
         participants=seats,
         transcript_dir=args.transcripts or settings.get("transcripts", "."),
-        policy=args.policy or settings.get("policy", "round_robin"),
+        policy=args.policy or settings.get("policy", "auto"),
         context_turns=args.context_turns or settings.get("context_turns", 40),
+        moderate_every=(args.moderate_every
+                        if args.moderate_every is not None
+                        else settings.get("moderate_every", 0)),
     )
+    # Refresh availability without silently widening a deliberately selected
+    # roster (for example --only local seats or --no-cli) on New topic.
+    table.refresh_participants = lambda: config.resolve(
+        config_path=args.config,
+        only=args.only.split(",") if args.only else None,
+        include_cli=not args.no_cli,
+    )[0]
     return table, settings
 
 
@@ -120,7 +176,8 @@ def cmd_talk(args: argparse.Namespace) -> int:
     _print_roster(table.participants)
     print(f"\n{DIM}{HELP}{RESET}")
 
-    auto_remaining = args.auto or 0
+    auto_remaining = max(0, args.auto or 0)
+    queued_round = False
     try:
         while True:
             if auto_remaining == 0:
@@ -132,25 +189,52 @@ def cmd_talk(args: argparse.Namespace) -> int:
 
                 if line in ("/quit", "/q", "/exit"):
                     break
-                if line == "/who":
+                elif line == "/who":
                     _print_roster(table.participants)
                     continue
-                if line == "/help":
+                elif line == "/help":
                     print(HELP)
                     continue
-                if line == "/save":
+                elif line == "/cost":
+                    _print_ledger(table)
+                    continue
+                elif line == "/moderate":
+                    mods = table.moderators
+                    if not mods:
+                        print(f'{DIM}no moderator seat; set role = "moderator" '
+                              f'on one in roundtable.toml{RESET}')
+                        continue
+                    table.force_next(mods[0].name)
+                elif line == "/save":
                     print(f"{DIM}wrote {table.export_markdown()}{RESET}")
                     continue
-                if line.startswith("/next"):
+                elif line.startswith("/next ") or line == "/next":
                     _, _, who = line.partition(" ")
                     if not table.force_next(who.strip()):
                         print(f"{DIM}no seat called {who.strip()!r}{RESET}")
                         continue
-                elif line.startswith("/auto"):
-                    _, _, count = line.partition(" ")
-                    auto_remaining = int(count) if count.strip().isdigit() else len(table.participants)
-                    if auto_remaining <= 0:
+                elif line in ("/round", "/opening"):
+                    queued_round = True
+                    auto_remaining = len(table.queue_round(independent=line == "/opening"))
+                    print(f"{DIM}(one turn each — Ctrl+C to stop){RESET}")
+                elif line.startswith("/challenge "):
+                    fields = [part.strip() for part in line[len("/challenge "):].split("|", 2)]
+                    try:
+                        if len(fields) < 2:
+                            raise ValueError("Use /challenge <seq> | <exact quote> | <question>")
+                        seq = int(fields[0].lstrip("#"))
+                        question = fields[2] if len(fields) > 2 else "What evidence supports or weakens this claim?"
+                        table.add_challenge(seq, fields[1], question)
+                    except ValueError as exc:
+                        print(f"{DIM}{exc}{RESET}")
                         continue
+                elif line.startswith("/auto ") or line == "/auto":
+                    _, _, count = line.partition(" ")
+                    if count.strip() and (not count.strip().isdigit() or int(count) <= 0):
+                        print(f"{DIM}Use /auto with a positive number of turns{RESET}")
+                        continue
+                    queued_round = not bool(count.strip())
+                    auto_remaining = (len(table.queue_round()) if queued_round else int(count))
                     print(f"{DIM}(auto — Ctrl+C to take the wheel back){RESET}")
                 elif line.startswith("/"):
                     print(f"{DIM}unknown command; /help for the list{RESET}")
@@ -163,20 +247,33 @@ def cmd_talk(args: argparse.Namespace) -> int:
                 _render(table, table.run_turn(speaker), speaker.color)
             except KeyboardInterrupt:
                 auto_remaining = 0
+                queued_round = False
+                table.clear_round()
                 print(f"\n{DIM}(paused){RESET}")
                 continue
 
-            if auto_remaining > 0:
+            if table.history and table.history[-1].error:
+                auto_remaining = 0
+                queued_round = False
+                table.clear_round()
+                print(f"{DIM}(paused after a provider error){RESET}")
+            elif queued_round:
+                auto_remaining = table.pending_round
+                queued_round = auto_remaining > 0
+            elif auto_remaining > 0:
                 auto_remaining -= 1
-            if auto_remaining != 0:
+            if auto_remaining:
                 try:
-                    # A readable beat between turns, interruptible.
-                    threading.Event().wait(args.pause)
+                    threading.Event().wait(max(0, args.pause))
                 except KeyboardInterrupt:
                     auto_remaining = 0
+                    queued_round = False
+                    table.clear_round()
                     print(f"\n{DIM}(paused){RESET}")
     finally:
         if table.history:
+            print()
+            _print_ledger(table)
             md = table.export_markdown()
             print(f"\n{DIM}Transcript: {md}")
             print(f"Raw log:    {table.transcript_path}{RESET}")
@@ -203,8 +300,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--only", help="comma-separated seats, e.g. Claude,Grok")
         sp.add_argument("--no-cli", action="store_true",
                         help="skip locally installed CLIs, APIs only")
-        sp.add_argument("--policy", choices=["round_robin", "random"],
-                        help="who speaks next (default round_robin)")
+        sp.add_argument("--policy",
+                        choices=["auto", "round_robin", "random", "weighted"],
+                        help="who speaks next (default auto: weighted when "
+                             "seats have different weights)")
+        sp.add_argument("--moderate-every", type=int, default=None,
+                        metavar="N",
+                        help="let a moderator seat sum up every N turns")
         sp.add_argument("--context-turns", type=int,
                         help="transcript turns each model sees (default 40)")
         sp.add_argument("--transcripts", help="directory for transcripts")
@@ -226,6 +328,8 @@ def build_parser() -> argparse.ArgumentParser:
     web.set_defaults(func=cmd_web)
 
     doctor = sub.add_parser("doctor", help="list the models this machine can seat")
+    doctor.add_argument("--probe", action="store_true",
+                        help="actually call each seat once to confirm it answers")
     doctor.set_defaults(func=cmd_doctor)
 
     return parser

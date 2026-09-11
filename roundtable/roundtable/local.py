@@ -53,8 +53,9 @@ def ollama_models(base_url: str) -> list[str]:
     return sorted(models)
 
 
-def stream_ollama(p: Participant, system: str, prompt: str) -> Iterator[str]:
-    options = {"num_predict": p.max_tokens, "num_ctx": 8192}
+def stream_ollama(p: Participant, system: str, prompt: str,
+                  metrics: dict | None = None) -> Iterator[str]:
+    options = {"num_predict": p.max_tokens, "num_ctx": p.context_tokens}
     if p.temperature is not None:
         options["temperature"] = p.temperature
     request = urllib.request.Request((p.base_url or "http://127.0.0.1:11434").rstrip("/") + "/api/chat",
@@ -74,16 +75,25 @@ def stream_ollama(p: Participant, system: str, prompt: str) -> Iterator[str]:
             if text:
                 yield text
             if event.get("done"):
+                if metrics is not None:
+                    # Counts arrive on Ollama's terminal NDJSON event. Keep
+                    # reported zero distinct from missing usage.
+                    for source, target in (("prompt_eval_count", "prompt_tokens"),
+                                           ("eval_count", "output_tokens")):
+                        count = event.get(source)
+                        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                            metrics[target] = count
                 finished = True
                 break
     if not finished:
         raise RuntimeError("Ollama connection ended before the reply finished")
 
 
-def stream_cli(p: Participant, system: str, prompt: str) -> Iterator[str]:
+def stream_cli(p: Participant, system: str, prompt: str,
+               metrics: dict | None = None) -> Iterator[str]:
     """Bounded subprocess lifetime, isolated working directory, drained stderr."""
     payload = f"{system}\n\n---\n\n{prompt}".encode()
-    # Keep inherited coding sessions and API overrides out of subscription CLIs.
+    # Keep inherited coding-session markers out of child CLI sessions.
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("CLAUDECODE", "CLAUDE_CODE_", "CODEX_THREAD_"))}
     timed_out = threading.Event()

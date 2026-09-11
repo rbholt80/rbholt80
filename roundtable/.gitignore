@@ -13,3 +13,4 @@ transcripts/
 *.desktop
 .env
 .env.*
+.venv/
