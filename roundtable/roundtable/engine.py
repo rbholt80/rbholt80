@@ -254,24 +254,60 @@ class Roundtable:
 
     # --- context ------------------------------------------------------------
 
-    def _context(self) -> str:
-        """The transcript each model sees, trimmed to bound cost.
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Four characters per token: the usual rule of thumb.
 
-        Resending everything every turn makes cost grow quadratically with
-        conversation length, so keep a window and tell the model what it
-        missed rather than pretending the conversation started there.
+        Deliberately not a real tokenizer. Every seat is a different model
+        with a different vocabulary, and the only exact answer costs a
+        network call per turn to measure something we are about to spend
+        anyway. An estimate that is generous by a few percent trims one turn
+        too many; an exact count that arrives 300ms late costs more.
+        """
+        return max(1, len(text) // 4)
+
+    def _context(self, speaker: Participant | None = None) -> str:
+        """The transcript one seat sees, trimmed to what it can actually hold.
+
+        A turn count is the wrong unit. The same forty turns are nothing to a
+        model with a million tokens of context and an overrun for a local one
+        with eight thousand -- and an overrun does not announce itself, it
+        just quietly drops the start of the conversation, which is where the
+        question was asked. Seats that declare a context budget get as much
+        transcript as fits inside it; the turn window still applies to
+        everyone as a cost ceiling.
         """
         turns = self.history
-        preamble = ""
+        dropped = 0
+
         if self.context_turns and len(turns) > self.context_turns:
             dropped = len(turns) - self.context_turns
             turns = turns[-self.context_turns:]
+
+        budget = getattr(speaker, "context_tokens", None) if speaker else None
+        if budget:
+            # Leave room for the system prompt and the reply itself, or the
+            # request fits and the generation does not.
+            spare = budget - (speaker.max_tokens if speaker else 0) - 512
+            kept: list[Turn] = []
+            used = 0
+            for turn in reversed(turns):
+                cost = self._estimate_tokens(turn.text) + 8  # speaker label
+                if used + cost > spare and kept:
+                    break
+                used += cost
+                kept.append(turn)
+            dropped += len(turns) - len(kept)
+            turns = list(reversed(kept))
+
+        if not turns:
+            return "(no one has spoken yet — you open the discussion)"
+        preamble = ""
+        if dropped:
             preamble = (
                 f"[{dropped} earlier turn(s) omitted for length; "
                 "the conversation is already in progress]\n\n"
             )
-        if not turns:
-            return "(no one has spoken yet — you open the discussion)"
         return preamble + "\n\n".join(f"{t.speaker}: {t.text}" for t in turns)
 
     # --- driving ------------------------------------------------------------
@@ -289,7 +325,7 @@ class Roundtable:
         p = speaker or self.next_speaker()
         others = [n for n in self.names if n != p.name]
         system = _system_prompt(p, others, self.topic)
-        prompt = self._context() + f"\n\n{p.name}:"
+        prompt = self._context(p) + f"\n\n{p.name}:"
 
         yield {"type": "start", "speaker": p.name, "hex": p.hex,
                "seq": len(self.history)}

@@ -181,6 +181,12 @@ reply doubles your calls to buy an ordering the transcript already implies.
 Every turn resends the transcript, so an unattended `/auto` session is a
 spending loop. Two things bound it:
 
+- `context_tokens` on a seat caps the transcript by what that model can
+  actually hold, rather than by a turn count that means something different
+  for every seat. Local models are given 8192 automatically (Ollama's
+  default); a seat with a large window still sees everything. Without this, a
+  long session silently overruns the small models — and an overrun drops the
+  *start* of the conversation, which is where the question was asked.
 - `context_turns` (default 40) caps how much transcript each model sees. Models
   are told plainly that earlier turns were omitted rather than being left to
   assume the conversation started mid-argument.

@@ -53,6 +53,7 @@ class Participant:
     argv: list[str] = field(default_factory=list)   # kind == "cli"
     persona: str = ""              # extra system-prompt line, optional
     role: str = "principal"        # principal | panel | moderator
+    context_tokens: int | None = None  # usable context; None = use turn count
     price_in: float | None = None  # $ per million input tokens, if you want $
     price_out: float | None = None # $ per million output tokens
     weight: float = 1.0            # relative floor time under the weighted policy
@@ -267,6 +268,7 @@ def discover(include_cli: bool = True, include_local: bool = True,
                     found.append(Participant(
                         name=seat, kind="openai", model=model,
                         base_url=base_url, api_key_env=None, source="local",
+                        context_tokens=8192,
                         role="panel" if small else "principal",
                         weight=0.35 if small else 1.0,
                         max_tokens=160 if small else 1024,
@@ -378,7 +380,7 @@ def load_config(path: Path) -> dict[str, Any]:
 _PARTICIPANT_FIELDS = {
     "kind", "model", "api_key_env", "base_url", "argv", "persona",
     "max_tokens", "effort", "temperature", "timeout", "enabled",
-    "role", "weight", "price_in", "price_out",
+    "role", "weight", "price_in", "price_out", "context_tokens",
 }
 
 
