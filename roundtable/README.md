@@ -21,7 +21,28 @@ roundtable web "Should we ship on Friday?"     # same thing, in a browser
 
 ```bash
 cd roundtable
+./setup.sh
+```
+
+That builds a virtual environment and installs into it. Debian, Ubuntu and
+Fedora mark the system Python as externally managed (PEP 668), so a plain
+`pip install` there fails with `externally-managed-environment` — that is the
+OS protecting itself, not a problem with this project. If `setup.sh` reports
+that it cannot create the environment, install `python3-venv` (`sudo apt
+install python3-venv`) and run it again.
+
+By hand, if you prefer, or to install only some of the seats:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"        # or: .[anthropic] / .[openai] / .[gemini]
+```
+
+The `roundtable` command lives inside that environment, so it is on your PATH
+only while it is activated. To reach it from any shell, link it once:
+
+```bash
+mkdir -p ~/.local/bin && ln -sf "$PWD/.venv/bin/roundtable" ~/.local/bin/roundtable
 ```
 
 `openai` is the workhorse dependency — it covers OpenAI, xAI, Groq, DeepSeek,
