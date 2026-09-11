@@ -65,6 +65,9 @@
     border-left: 2px solid var(--host); padding-left: 12px; color: var(--host);
   }
   .turn.error .what { color: var(--muted); font-style: italic; }
+  .turn-context { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .raw-output { margin-top: 8px; font-size: 12px; }
+  .raw-output pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   .claim-action { display: block; font-size: 11px; padding: 2px 6px; margin: 5px 0 0 auto; }
   .usage { margin-top: 8px; color: var(--muted); font-size: 12px; }
   .usage table { width: 100%; border-collapse: collapse; text-align: right; }
@@ -122,10 +125,13 @@
 </div></main>
 
 <footer>
+  <div id="solve-status" class="hints" role="status"></div>
+  <details id="solve-result" hidden><summary>Proposed answer</summary><p id="solve-answer" style="white-space:pre-wrap"></p></details>
   <div class="bar">
     <textarea aria-label="Message to the table" id="input" rows="1" placeholder="Join the discussion… (@Name chooses the next speaker)"></textarea>
     <button id="send">Send</button>
     <button id="next" class="primary">Next ⏎</button>
+    <button id="solve" title="Keep working and reviewing without turn clicks">Auto solve</button>
     <button id="round">Run one round</button>
     <button id="opening" title="Every seat answers from the same starting transcript">Independent round</button>
     <button id="auto" disabled>Pause</button>
@@ -158,7 +164,7 @@
   const wrap = $('wrap'), log = $('log'), input = $('input');
   const colors = new Map();
   const rendered = new Map();
-  let live = null, liveSeq = -1, running = false;
+  let live = null, liveSeq = -1, running = false, autoArmed = false;
 
   const post = (path, body = {}) => fetch(path, {
     method: 'POST',
@@ -179,9 +185,9 @@
 
   function updateControls() {
     const busy = running || live !== null;
-    for (const id of ['next', 'round', 'opening', 'new']) $(id).disabled = busy;
+    for (const id of ['next', 'round', 'opening', 'new', 'solve']) $(id).disabled = busy;
     for (const chip of $('roster').children) chip.disabled = busy;
-    $('auto').disabled = !running;
+    $('auto').disabled = !running && !autoArmed;
     $('auto').classList.toggle('on', running);
   }
 
@@ -282,6 +288,34 @@
     $('cost').replaceChildren(table);
   }
 
+  function annotateTurn(what, ev) {
+    what.querySelector('.turn-context')?.remove();
+    what.querySelector('.raw-output')?.remove();
+    if (ev.crossed) {
+      const note = document.createElement('small'); note.className = 'turn-context';
+      note.textContent = ev.crossed + ' message(s) arrived while this reply was being written; '
+        + 'it could not answer them yet.';
+      what.prepend(note);
+    }
+    if (ev.rejected_output) {
+      const audit = document.createElement('details'); audit.className = 'raw-output';
+      const title = document.createElement('summary');
+      title.textContent = 'Original model output — withheld from discussion';
+      const original = document.createElement('pre'); original.textContent = ev.rejected_output;
+      audit.append(title, original); what.append(audit);
+    }
+  }
+
+  function showSolve(state) {
+    if (!state) return;
+    autoArmed = Boolean(state.enabled);
+    $('solve-status').textContent = state.message || '';
+    $('solve-result').hidden = !state.answer;
+    $('solve-answer').textContent = state.answer || '';
+    if (state.answer) $('solve-result').open = true;
+    updateControls();
+  }
+
   function cursor() {
     const caret = document.createElement('span');
     caret.className = 'cursor';
@@ -318,10 +352,11 @@
       }
       running = Boolean(ev.running ?? ev.auto);
       showLedger(ev.ledger);
+      showSolve(ev.solve);
       updateControls();
       log.scrollTop = log.scrollHeight;
     } else if (ev.type === 'turn') {
-      addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq);
+      annotateTurn(addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq), ev);
     } else if (ev.type === 'start') {
       if (rendered.has(ev.seq) || (live && liveSeq === ev.seq)) return;
       live = addTurn(ev.speaker, ev.text || '', ev.hex, false, ev.seq, false);
@@ -339,6 +374,7 @@
         addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq);
       // The complete reply is authoritative, including a late error note.
       what.textContent = ev.text;
+      annotateTurn(what, ev);
       what.parentElement.classList.toggle('error', Boolean(ev.error));
       if (hasSeq(ev.seq)) rendered.set(ev.seq, what);
       challengeAction(what, ev.speaker, ev.text, ev.seq);
@@ -346,6 +382,8 @@
       showLedger(ev.ledger);
       updateControls();
       scroll(stick);
+    } else if (ev.type === 'solve') {
+      showSolve(ev);
     } else if (ev.type === 'running' || ev.type === 'auto') {
       running = Boolean(ev.on);
       updateControls();
@@ -371,6 +409,7 @@
   $('send').onclick = send;
   $('next').onclick = () => post('/next');
   $('round').onclick = () => post('/round');
+  $('solve').onclick = () => post('/auto', {on: true});
   $('opening').onclick = () => post('/round', {independent: true});
   $('auto').onclick = () => post('/auto', {on: false});
   $('save').onclick = () => post('/save').then(result => {

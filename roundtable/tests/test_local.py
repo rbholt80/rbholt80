@@ -99,9 +99,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request('/auto', {'on':'false'})[0],400)
         self.assertEqual(self.request('/say', {'text':'hello'})[0],200)
 
-    def test_bounded_auto_and_new_topic(self):
+    def test_bounded_round_and_new_topic(self):
         with patch('roundtable.providers._ADAPTERS', {'mock': lambda *args: iter(['hello'])}):
-            self.hub.set_auto(True)
+            self.hub.run_round()
             deadline = time.monotonic()+5
             while self.hub.auto.is_set() and time.monotonic()<deadline:
                 time.sleep(.02)

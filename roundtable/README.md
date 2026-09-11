@@ -14,8 +14,25 @@ From this directory:
 
 The launcher opens the existing table or starts one. Choose **New topic**, then
 **Independent round** for separate first assessments or **Run one round** for
-an ordinary discussion. A round gives each non-moderator seat one turn. Pause
-stops after the current response; a failed seat pauses automatic continuation.
+an ordinary discussion. A round gives each non-moderator seat one turn. **Auto
+solve** keeps drafting and requesting a separate review without further turn
+clicks. It prefers configured principal seats, tries other connections on
+failure, and waits before retrying unavailable seats. Pause stops after the
+current response.
+
+Auto stops generating when another seat accepts a concrete answer, or identifies
+essential missing input. It labels the result **Proposed answer**, not verified
+truth. New Host messages restart Auto without another click while Auto remains
+enabled. It can keep running indefinitely if reviewers cannot resolve the
+question; usage continues to accumulate until an answer, missing-input pause,
+or manual Pause. No provider restrictions, billing limits, or tool permissions
+are bypassed.
+
+The latest actual Host message stays in context even if older turns are trimmed.
+Apparent invented speaker lines are flagged on completion, kept out of later
+prompts, and preserved in an expandable audit block and the local transcript.
+Streaming text is provisional until that check completes. The format check
+allows quotations and code examples; it cannot detect all fabricated claims.
 
 No Python packages are needed for Ollama or the installed CLI connections.
 Python 3.11 or newer is required. For hosted API adapters, run `./setup.sh` once;
@@ -68,6 +85,7 @@ Terminal commands:
 | `/challenge 0 \| exact quote \| your question` | Question a claim in turn #0 |
 | `/next Name` | Choose the next speaker |
 | `/auto N` | Run N turns |
+| `/auto` | Keep drafting and reviewing until a proposed answer or essential missing input; Ctrl+C pauses |
 | `/cost` | Show usage and time per seat |
 | `/moderate` | Ask the configured moderator to summarize |
 | `/save` | Export Markdown |

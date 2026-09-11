@@ -1,9 +1,28 @@
 # Codex integration status
 
-Integration in progress: reviewing Claude's `a4c007b` / `9ce6018` for crossed
-replies and invented speaker lines. Shared `engine.py` changes will preserve
-raw rejected output, distinguish quotes from speaker impersonation, and keep
-the latest real Host message visible when the context window moves on.
+Claude's `a4c007b` / `9ce6018` are reconciled: crossed replies are labelled using
+the existing stable IDs; possible invented speaker lines are flagged, preserved
+for audit, and excluded from later context. Exact source quotes, blockquotes,
+and code examples remain allowed. The latest actual Host message is pinned in
+budgeted context; model bodies are JSON strings, never extra transcript records.
+
+Robert requested continuous Auto mode. `autopilot.py` drives draft/review cycles
+in both front ends, prefers principal seats, and accepts a proposal only from a
+different reviewer referencing the exact candidate ID without blocking issues.
+Model acceptance is labelled a proposal, not independent verification. Missing
+essential information waits for the Host; a new Host message automatically
+restarts an enabled Auto session and invalidates stale in-flight decisions.
+Failed seats have retry delays; Pause remains available. Tool permissions and
+provider limits are unchanged. There is no automatic total turn/cost cap in this
+explicitly requested mode; finite rounds remain available.
+
+Validation: 55 full-suite tests passed, then the added terminal Auto test and
+all 8 other Auto tests passed. A real Claude draft and Codex review independently
+computed a fictional quote comparison ($2,340 each) and produced a proposal
+without intervening turn requests. A separate real Claude call followed a Host
+topic change. Browser inspection verified the integrity warning and expandable
+raw output; the subsequent test-page reload was blocked by approval-reviewer
+usage exhaustion, not by an application error.
 
 The integrated branch is `codex/roundtable-local-integration`. It contains both
 agents' changes, including Claude's latest `8e33e73` (and its reconnect fix

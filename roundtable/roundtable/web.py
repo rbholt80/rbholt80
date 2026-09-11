@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .engine import Roundtable
+from .autopilot import AutoSolve
 from .config import blocked, paint, discover
 
 STATIC = Path(__file__).parent / "static"
@@ -48,6 +49,7 @@ class Hub:
         self.pause = 1.2
         self.remaining = 0
         self._round_mode = False
+        self.solve = AutoSolve()
         self.active: dict | None = None
         self._history = [t.as_event() for t in table.history]
         self._ledger = table.ledger()
@@ -102,6 +104,7 @@ class Hub:
                 "remaining": self.remaining,
                 "active": self.active, "connections": self.connection_notes,
                 "ledger": self._ledger,
+                "solve": self.solve.snapshot(),
             })
 
     def _hex(self, speaker: str) -> str:
@@ -121,11 +124,24 @@ class Hub:
         self.wake.set()
 
     def set_auto(self, on: bool) -> bool:
-        # The default is bounded: starting automatic discussion is one fair
-        # round. Pause takes effect after the current reply is saved.
         if on:
-            return self.run_round()
+            if not self.turn_lock.acquire(blocking=False):
+                return False
+            try:
+                with self.lock:
+                    if self.running:
+                        return False
+                    self.table.clear_round()
+                    self._round_mode = False
+                    self.solve.start(self.table)
+                    self.broadcast({"type": "solve", **self.solve.snapshot()})
+                    self._owe(1)
+                return True
+            finally:
+                self.turn_lock.release()
         with self.lock:
+            self.solve.pause()
+            self.broadcast({"type": "solve", **self.solve.snapshot()})
             self.table.clear_round()
             self._round_mode = False
             self._owe(0)
@@ -138,6 +154,8 @@ class Hub:
             with self.lock:
                 if self.running:
                     return False
+                self.solve.pause()
+                self.broadcast({"type": "solve", **self.solve.snapshot()})
                 names = self.table.queue_round(independent=independent)
                 self._round_mode = True
                 self._owe(len(names))
@@ -145,23 +163,27 @@ class Hub:
         finally:
             self.turn_lock.release()
 
-    def _run_owned(self, speaker_name: str | None = None) -> bool:
+    def _run_owned(self, speaker_name: str | None = None, *,
+                   instruction: str = "", review: bool = False):
         """The caller owns turn_lock and releases it after this returns."""
         speaker = (self.table.by_name(speaker_name) if speaker_name
                    else self.table.next_speaker())
         if speaker is None:
             return False
-        for event in self.table.run_turn(speaker):
+        completed_seq = None
+        for event in self.table.run_turn(speaker, instruction=instruction, review=review):
             self.broadcast(event)
-            if event["type"] == "end" and event.get("error"):
+            if event["type"] == "end":
+                completed_seq = event["seq"]
+            if event["type"] == "end" and event.get("error") and not self.solve.enabled:
                 self.set_auto(False)
-        return True
+        return next((t for t in self.table.history if t.seq == completed_seq), None)
 
     def run_one(self, speaker_name: str | None = None) -> bool:
         if not self.turn_lock.acquire(blocking=False):
             return False
         try:
-            return self._run_owned(speaker_name)
+            return bool(self._run_owned(speaker_name))
         finally:
             self.turn_lock.release()
 
@@ -197,8 +219,27 @@ class Hub:
                         self.remaining -= 1
                         ran = True
                 if ran:
-                    self._run_owned()
                     with self.lock:
+                        solving = self.solve.enabled
+                        step = self.solve.next_step(self.table) if solving else None
+                        generation = self.solve.generation
+                        if solving:
+                            self.broadcast({"type": "solve", **self.solve.snapshot()})
+                    if not solving:
+                        self._run_owned()
+                    elif step:
+                        seat, instruction, review = step
+                        completed = self._run_owned(seat.name, instruction=instruction, review=review)
+                    with self.lock:
+                        if solving and self.solve.enabled:
+                            if step and completed:
+                                self.solve.observe(self.table, completed, generation)
+                                self.table._append({"type": "solve", **self.solve.snapshot()})
+                            self.broadcast({"type": "solve", **self.solve.snapshot()})
+                            if self.solve.status in ('proposed', 'needs_input'):
+                                self._owe(0)
+                            elif self.running:
+                                self.remaining = 1
                         if self.running and self._round_mode:
                             self.remaining = self.table.pending_round
                         if self.running and not self.remaining:
@@ -207,17 +248,25 @@ class Hub:
             finally:
                 self.turn_lock.release()
             if ran and self.running:
-                self.stopping.wait(self.pause)
+                self.stopping.wait(max(1, self.pause) if solving and not step else self.pause)
 
     def say(self, text: str) -> None:
         with self.lock:
             turn = self.table.add_host_message(text)
             self.broadcast({**turn.as_event(), "hex": "#e6e6e6"})
+            self._continue_solve()
 
     def challenge(self, seq: int, quote: str, question: str) -> None:
         with self.lock:
             turn = self.table.add_challenge(seq, quote, question)
             self.broadcast({**turn.as_event(), "hex": "#e6e6e6"})
+            self._continue_solve()
+
+    def _continue_solve(self):
+        if self.solve.enabled:
+            self.solve.start(self.table)
+            self.broadcast({"type": "solve", **self.solve.snapshot()})
+            self._owe(1)
 
     def new_topic(self, topic: str) -> bool:
         if not self.turn_lock.acquire(blocking=False):
