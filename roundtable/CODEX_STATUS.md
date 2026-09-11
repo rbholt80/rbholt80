@@ -1,5 +1,13 @@
 # Codex integration status
 
+Live Auto inspection found a drift into a model-invented paper phone stand
+experiment. Both drafting and review now receive the explicit current Host task
+(the starting topic when no Host message exists). Peer examples cannot change
+that stored task; only actual Host input updates it. The UI exposes Auto's
+current request for inspection. All 11 focused Auto tests passed, including two
+new task-drift regressions. This strengthens prompting, not a guarantee that
+models will always follow it.
+
 Claude's `a4c007b` / `9ce6018` are reconciled: crossed replies are labelled using
 the existing stable IDs; possible invented speaker lines are flagged, preserved
 for audit, and excluded from later context. Exact source quotes, blockquotes,

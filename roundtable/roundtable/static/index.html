@@ -126,6 +126,7 @@
 
 <footer>
   <div id="solve-status" class="hints" role="status"></div>
+  <details id="solve-task" hidden><summary>Auto’s current request</summary><p id="solve-task-text" style="white-space:pre-wrap;max-height:120px;overflow:auto"></p></details>
   <details id="solve-result" hidden><summary>Proposed answer</summary><p id="solve-answer" style="white-space:pre-wrap"></p></details>
   <div class="bar">
     <textarea aria-label="Message to the table" id="input" rows="1" placeholder="Join the discussion… (@Name chooses the next speaker)"></textarea>
@@ -310,6 +311,8 @@
     if (!state) return;
     autoArmed = Boolean(state.enabled);
     $('solve-status').textContent = state.message || '';
+    $('solve-task').hidden = !state.task;
+    $('solve-task-text').textContent = state.task || '';
     $('solve-result').hidden = !state.answer;
     $('solve-answer').textContent = state.answer || '';
     if (state.answer) $('solve-result').open = true;
