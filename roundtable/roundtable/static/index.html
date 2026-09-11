@@ -65,6 +65,10 @@
     border-left: 2px solid var(--host); padding-left: 12px; color: var(--host);
   }
   .turn.error .what { color: var(--muted); font-style: italic; }
+  .crossed {
+    display: block; font-size: 12px; color: var(--muted);
+    font-style: italic; margin-bottom: 2px;
+  }
   .cursor {
     display: inline-block; width: 7px; height: 1em; vertical-align: -2px;
     background: currentColor; opacity: .5; animation: blink 1s steps(2) infinite;
@@ -165,7 +169,7 @@
   const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   const scroll = stick => { if (stick) log.scrollTop = log.scrollHeight; };
 
-  function addTurn(speaker, text, hex, isError, seq) {
+  function addTurn(speaker, text, hex, isError, seq, crossed) {
     if (seq !== undefined && seq >= 0) {
       if (rendered.has(seq)) return null;
       rendered.add(seq);
@@ -180,7 +184,14 @@
     who.textContent = speaker;
     const what = document.createElement('div');
     what.className = 'what';
-    what.textContent = text || '';
+    if (crossed) {
+      const note = document.createElement('span');
+      note.className = 'crossed';
+      note.textContent = 'written before ' + (crossed > 1
+        ? 'the ' + crossed + ' messages above' : 'the message above');
+      what.append(note);
+    }
+    what.append(document.createTextNode(text || ''));
     row.append(who, what);
     wrap.append(row);
     scroll(stick);
@@ -219,11 +230,12 @@
         p.innerHTML = 'Press <b>Next</b> to open the discussion.';
         wrap.append(p);
       }
-      for (const t of ev.history) addTurn(t.speaker, t.text, t.hex, t.error, t.seq);
+      for (const t of ev.history)
+        addTurn(t.speaker, t.text, t.hex, t.error, t.seq, t.crossed);
       setRunning(ev.running);
       log.scrollTop = log.scrollHeight;
     }
-    else if (ev.type === 'turn') addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq);
+    else if (ev.type === 'turn') addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq, ev.crossed);
     else if (ev.type === 'start') {
       // Do not claim the number yet — the turn is still streaming — but do
       // skip it if the snapshot already showed us this turn finished.
@@ -251,10 +263,17 @@
         // or a reconnect, does not render it a second time.
         live.querySelector('.cursor')?.remove();
         if (ev.error) live.parentElement.classList.add('error');
+        if (ev.crossed) {
+          const note = document.createElement('span');
+          note.className = 'crossed';
+          note.textContent = 'written before ' + (ev.crossed > 1
+            ? 'the ' + ev.crossed + ' messages above' : 'the message above');
+          live.prepend(note);
+        }
         if (ev.seq >= 0) rendered.add(ev.seq);
       } else {
         // Connected mid-reply and missed the stream: render it whole.
-        addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq);
+        addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq, ev.crossed);
       }
       live = null; liveSeq = -1;
     }

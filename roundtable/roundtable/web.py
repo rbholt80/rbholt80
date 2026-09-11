@@ -83,7 +83,8 @@ class Hub:
             ],
             "history": [
                 {"speaker": t.speaker, "text": t.text, "error": t.error,
-                 "seq": t.seq, "hex": self._hex(t.speaker)}
+                 "seq": t.seq, "crossed": t.crossed,
+                 "hex": self._hex(t.speaker)}
                 for t in self.table.history
             ],
             "running": self.running,

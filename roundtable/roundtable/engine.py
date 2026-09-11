@@ -28,6 +28,7 @@ class Turn:
     ts: float = field(default_factory=time.time)
     error: bool = False
     seq: int = -1        # position in the transcript; identity for the UI
+    crossed: int = 0     # messages that landed while this reply was being written
     metrics: dict = field(default_factory=dict)
 
     def as_event(self) -> dict:
@@ -134,7 +135,12 @@ class Roundtable:
         )
         lines.append("")
         for turn in self.history:
-            lines += [f"**{turn.speaker}:** {turn.text}", ""]
+            note = ""
+            if turn.crossed:
+                what = ("the message" if turn.crossed == 1
+                        else f"the {turn.crossed} messages")
+                note = f" *(written before {what} above it)*"
+            lines += [f"**{turn.speaker}:**{note} {turn.text}", ""]
         target.write_text("\n".join(lines), encoding="utf-8")
         return target
 
@@ -308,7 +314,22 @@ class Roundtable:
                 f"[{dropped} earlier turn(s) omitted for length; "
                 "the conversation is already in progress]\n\n"
             )
-        return preamble + "\n\n".join(f"{t.speaker}: {t.text}" for t in turns)
+        return preamble + "\n\n".join(
+            f"{self._label(t)}: {t.text}" for t in turns)
+
+    @staticmethod
+    def _label(turn: Turn) -> str:
+        """Speaker name, saying so when the reply predates what sits above it.
+
+        Without this the next model reads a reply positioned under a host
+        message as an answer to it, and treats the speaker as having ignored
+        the question. It did not ignore anything -- it was already talking.
+        """
+        if not turn.crossed:
+            return turn.speaker
+        n = turn.crossed
+        what = "the message" if n == 1 else f"the {n} messages"
+        return f"{turn.speaker} (was already writing; had not seen {what} above)"
 
     # --- driving ------------------------------------------------------------
 
@@ -326,6 +347,9 @@ class Roundtable:
         others = [n for n in self.names if n != p.name]
         system = _system_prompt(p, others, self.topic)
         prompt = self._context(p) + f"\n\n{p.name}:"
+        # Everything visible at the moment the prompt was built. A reply takes
+        # seconds to stream, and the host can type during those seconds.
+        saw = len(self.history)
 
         yield {"type": "start", "speaker": p.name, "hex": p.hex,
                "seq": len(self.history)}
@@ -350,7 +374,8 @@ class Roundtable:
             text = f"[{p.name} returned nothing]"
             errored = True
         turn = Turn(speaker=p.name, text=text, error=errored,
-                    seq=len(self.history), metrics=metrics)
+                    seq=len(self.history), metrics=metrics,
+                    crossed=max(0, len(self.history) - saw))
         # Resume round-robin from whoever actually spoke, so a forced turn or
         # an @mention reorders the table instead of double-seating someone.
         pool = self.regulars
@@ -363,4 +388,5 @@ class Roundtable:
         self._append(turn.as_event())
         yield {"type": "end", "speaker": p.name, "text": text,
                "error": errored, "seq": turn.seq, "hex": p.hex,
+               "crossed": turn.crossed,
                "metrics": metrics, "ledger": self.ledger()}
