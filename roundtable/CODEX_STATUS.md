@@ -1,5 +1,10 @@
 # Codex integration status
 
+Shared `engine.py` follow-up: the real run exposed an ordinary `Host:` address
+being mistaken for a forged turn, and a reviewer ignoring its verdict format.
+Reconcile ambiguous plain addresses with JSON-framed transcript bodies, and
+reserve context for concise Auto output instructions after the transcript.
+
 Live Auto inspection found a drift into a model-invented paper phone stand
 experiment. Both drafting and review now receive the explicit current Host task
 (the starting topic when no Host message exists). Peer examples cannot change
