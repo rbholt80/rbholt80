@@ -62,6 +62,39 @@ _ROLE_BRIEF: dict[str, list[str]] = {
     ],
 }
 
+#: A line that claims to be somebody's turn: "Host:", "[#7] Gemma3:".
+_ATTRIBUTION = re.compile(r"^\s*(?:\[#\d+\]\s*)?([\w.\-]{1,24})\s*:\s?")
+
+
+def strip_fabrications(text: str, speaker: str, roster: list[str]) -> str:
+    """Remove turns a model wrote on other participants' behalf.
+
+    Small models imitate the transcript they are shown and start producing
+    other people's lines -- observed live: a 1B model invented two Host
+    messages and answered them. Those inventions are appended verbatim, every
+    later model reads them as things that were said, and the conversation
+    proceeds from words the host never wrote.
+
+    The model's own name at the start is just a label it was told not to add,
+    so that is trimmed. Another participant's name is fabrication, and
+    everything from there on is discarded rather than patched: once a model
+    has started writing the transcript instead of its turn, the rest of the
+    reply is about a conversation that did not happen.
+    """
+    known = {n.casefold() for n in roster} | {HOST.casefold()}
+    kept: list[str] = []
+    for i, line in enumerate(text.splitlines()):
+        match = _ATTRIBUTION.match(line)
+        name = match.group(1).casefold() if match else None
+        if name in known:
+            if name == speaker.casefold() and i == 0:
+                kept.append(line[match.end():])
+                continue
+            break
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
 def _system_prompt(me: Participant, others: list[str], topic: str) -> str:
     roster = ", ".join(others) if others else "no one else yet"
     lines = [
@@ -70,8 +103,11 @@ def _system_prompt(me: Participant, others: list[str], topic: str) -> str:
         f"The topic on the table: {topic}",
         "",
         "The transcript is labelled by speaker. Reply as yourself, in first "
-        "person, to what was actually just said. Do not prefix your reply "
-        "with your own name.",
+        "person, to what was actually just said. Write only your own words: "
+        "do not prefix your reply with your own name, and never write a line "
+        "in anyone else's voice — no \"Host:\", no \"[#4] Someone:\", no "
+        "invented quotes. Quoting a real line back is fine; composing a turn "
+        "for another participant is not.",
     ]
     lines += _ROLE_BRIEF[me.role if me.role in _ROLE_BRIEF else "principal"]
     if me.persona:
@@ -367,7 +403,7 @@ class Roundtable:
             parts.append(note)
             yield {"type": "chunk", "speaker": p.name, "text": note}
 
-        text = "".join(parts).strip()
+        text = strip_fabrications("".join(parts), p.name, self.names)
         # A model that says nothing at all still has to occupy its turn,
         # or the rotation silently skips it forever.
         if not text:
