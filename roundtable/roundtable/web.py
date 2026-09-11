@@ -29,7 +29,8 @@ class Hub:
     def __init__(self, table: Roundtable, token: str) -> None:
         self.table = table
         self.token = token
-        self.subscribers: list[queue.Queue] = []
+        #: (queue, watermark) -- how much transcript that client already had.
+        self.subscribers: list[tuple[queue.Queue, int]] = []
         self.lock = threading.Lock()          # guards subscriber list
         self.turn_lock = threading.Lock()     # only one speaker at a time
         self.stopping = threading.Event()
@@ -41,22 +42,36 @@ class Hub:
 
     # --- pub/sub ------------------------------------------------------------
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self) -> tuple[queue.Queue, dict]:
+        """Join the fan-out and take a snapshot together.
+
+        Locking the pair is not enough on its own: a turn is appended to the
+        transcript and broadcast as two steps, so a snapshot taken between
+        them contains a turn whose event is still to come. Rather than force
+        every mutation through this lock, each subscriber records how much of
+        the transcript its snapshot already held. Events at or below that
+        watermark are not delivered to it -- so the same turn cannot arrive
+        twice however the two operations interleave.
+        """
         q: queue.Queue = queue.Queue()
         with self.lock:
-            self.subscribers.append(q)
-        return q
+            snapshot = self.snapshot()
+            self.subscribers.append((q, len(self.table.history)))
+            return q, snapshot
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self.lock:
-            if q in self.subscribers:
-                self.subscribers.remove(q)
+            self.subscribers = [s for s in self.subscribers if s[0] is not q]
 
     def broadcast(self, event: dict) -> None:
+        seq = event.get("seq")
         with self.lock:
-            targets = list(self.subscribers)
-        for q in targets:
-            q.put(event)
+            for q, watermark in self.subscribers:
+                # A turn the subscriber's snapshot already carried. Events
+                # with no sequence number (running, auto) are always current.
+                if seq is not None and event.get("type") == "turn" and seq < watermark:
+                    continue
+                q.put(event)
 
     def snapshot(self) -> dict:
         return {
@@ -238,9 +253,9 @@ def _handler_factory(hub: Hub):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
 
-            q = hub.subscribe()
+            q, snapshot = hub.subscribe()
             try:
-                self._emit(hub.snapshot())
+                self._emit(snapshot)
                 while not hub.stopping.is_set():
                     try:
                         event = q.get(timeout=15)

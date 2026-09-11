@@ -225,6 +225,9 @@
     }
     else if (ev.type === 'turn') addTurn(ev.speaker, ev.text, ev.hex, ev.error, ev.seq);
     else if (ev.type === 'start') {
+      // Do not claim the number yet — the turn is still streaming — but do
+      // skip it if the snapshot already showed us this turn finished.
+      if (ev.seq !== undefined && rendered.has(ev.seq)) return;
       live = addTurn(ev.speaker, '', ev.hex, false);
       liveSeq = ev.seq;
       if (live) {
