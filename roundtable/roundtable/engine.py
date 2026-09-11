@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import Participant, LOCAL_CONTEXT_TOKENS
+from . import safety
 from .providers import ProviderError, stream
 from .autopilot import extract_review
 
@@ -37,6 +38,7 @@ class Turn:
     crossed: int = 0
     rejected_output: str = ""  # audit only; never used as another seat's context
     control: dict = field(default_factory=dict)
+    flagged: list = field(default_factory=list)  # safety.scan() findings, if any
 
     def as_event(self) -> dict:
         return {"type": "turn", **asdict(self)}
@@ -204,6 +206,8 @@ class Roundtable:
                 lines += [f"*Context through turn #{turn.responding_to_seq}.*", ""]
             if turn.crossed:
                 lines += [f"*{turn.crossed} message(s) arrived while this reply was being written.*", ""]
+            if turn.flagged:
+                lines += [f"*flagged: resembles an instruction ({', '.join(turn.flagged)})*", ""]
             if turn.rejected_output:
                 lines += ["<details><summary>Original model output (withheld from discussion)</summary>", ""]
                 # Blockquote every line: even forged Markdown headings stay in
@@ -379,7 +383,8 @@ class Roundtable:
                 provenance = (f" (context through #{turn.responding_to_seq})"
                               if turn.responding_to_seq is not None else "")
                 records.append(f"[#{turn.seq}] {turn.speaker}{provenance}: "
-                               + json.dumps(turn.text, ensure_ascii=False))
+                               + json.dumps(safety.fence(turn.text, turn.flagged),
+                                            ensure_ascii=False))
             rendered = preamble + '\n\n'.join(records)
             if latest_host:
                 rendered += (f"\n\nLatest real Host message [#{latest_host.seq}] "
@@ -520,7 +525,8 @@ class Roundtable:
         turn = Turn(speaker=p.name, text=text, error=errored,
                     seq=seq, metrics=metrics, responding_to_seq=context_seq,
                     crossed=sum(t.seq not in seen_ids for t in self.history),
-                    rejected_output=raw_text if rejected else "", control=control)
+                    rejected_output=raw_text if rejected else "", control=control,
+                    flagged=safety.scan(text))
         # Resume round-robin from whoever actually spoke, so a forced turn or
         # an @mention reorders the table instead of double-seating someone.
         pool = self.regulars
@@ -536,5 +542,5 @@ class Roundtable:
                "error": errored, "seq": turn.seq, "hex": p.hex,
                "metrics": metrics, "ledger": self.ledger(),
                "crossed": turn.crossed, "rejected_output": turn.rejected_output,
-               "control": turn.control,
+               "control": turn.control, "flagged": turn.flagged,
                "responding_to_seq": context_seq}

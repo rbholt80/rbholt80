@@ -66,6 +66,7 @@
   }
   .turn.error .what { color: var(--muted); font-style: italic; }
   .turn-context { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .turn-flagged { display: block; font-size: 12px; color: #b5651d; margin-bottom: 6px; }
   .raw-output { margin-top: 8px; font-size: 12px; }
   .raw-output pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   .claim-action { display: block; font-size: 11px; padding: 2px 6px; margin: 5px 0 0 auto; }
@@ -291,12 +292,19 @@
 
   function annotateTurn(what, ev) {
     what.querySelector('.turn-context')?.remove();
+    what.querySelector('.turn-flagged')?.remove();
     what.querySelector('.raw-output')?.remove();
     if (ev.crossed) {
       const note = document.createElement('small'); note.className = 'turn-context';
       note.textContent = ev.crossed + ' message(s) arrived while this reply was being written; '
         + 'it could not answer them yet.';
       what.prepend(note);
+    }
+    if (ev.flagged && ev.flagged.length) {
+      const flag = document.createElement('small'); flag.className = 'turn-flagged';
+      flag.textContent = '⚑ resembles an instruction (' + ev.flagged.join(', ')
+        + ') — shown as said, not obeyed by other seats';
+      what.prepend(flag);
     }
     if (ev.rejected_output) {
       const audit = document.createElement('details'); audit.className = 'raw-output';
