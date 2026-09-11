@@ -1,52 +1,87 @@
-# Codex coordination status
+# Codex integration status
 
-GitHub refs verified on 2026-09-10 (Robert's local date):
-
-- Claude: `6caf4b0934424063eada7042a782c124038ad6c9`
-- Codex: `27af2da880a781606c97f6b81f23841d38270229`
-- Codex implementation commit: `a3f5e8908abe9e3bffeec14dab6777375037d298`
-
-The local integration is committed and published. If the Codex branch appears
-to point to `7ca060f`, refresh the explicit ref rather than inspecting a stale
-local branch:
+The integrated branch is `codex/roundtable-local-integration`. It contains both
+agents' changes, including Claude's latest `9544ed6` (and its reconnect fix
+`7a83b0e`). The initial integration merge is `2b790d0`; reconciliation with those
+latest commits is `3b96112`. Subsequent commits finish installed-browser behavior
+and documentation. Use the branch head, not an old local tracking ref.
 
 ```sh
 git fetch origin refs/heads/codex/roundtable-local-integration:refs/remotes/origin/codex/roundtable-local-integration
-git log -3 --oneline origin/codex/roundtable-local-integration
+git log -5 --oneline origin/codex/roundtable-local-integration
 ```
 
-## Shared-file notice and current work
+## What is integrated
 
-Codex is integrating Claude's `6caf4b0` into this branch. This includes shared
-`engine.py`, `providers.py`, and `config.py`, plus CLI/web integration. Preserve
-Claude's roles, weighted selection, queued fair rounds, turn sequence IDs,
-reload credentials, venv setup, token accounting, and dialect negotiation.
-Preserve Codex's native local transport, CLI restrictions and timeout cleanup,
-launchers, partial-failure recording, and local integration checks.
+- Claude's roles, weights, fair queued rounds, moderator cadence, venv setup,
+  usage accounting, and OpenAI-compatible parameter negotiation.
+- Codex's native Ollama transport, CLI sign-in checks and restrictions,
+  subprocess timeout cleanup, partial-failure persistence, and launchers.
+- Independent rounds: freeze starting context for all queued seats, while still
+  accepting fresh Host input. Earlier replies in that round do not influence
+  later seats' input.
+- Claim challenges: exact source quote, turn ID, and Host question are validated
+  and persisted. The quote remains available when its original turn is outside
+  the context window. Agreement remains allowed.
+- Stable turn IDs allocated when a reply begins; a Host interjection cannot
+  reuse its ID. Saved replies record the context boundary they actually saw.
 
-The ownership proposal is a useful default, not an exclusive lock: source
-inspection and isolated tests are valuable on either machine. Tests with fake
-providers verify contracts; real providers verify compatibility. Both matter.
+## Reconciled choices
 
-Next discussion features are independent opening answers and challenges tied
-to transcript claims, after the combined baseline passes its checks. These
-require coordinated engine/frontend changes; do not duplicate them concurrently.
+The SSE server snapshots a committed event view under the same lock used to
+publish and subscribe. It does not snapshot the engine's partially published
+history. This closes the persistence/broadcast gap without relying on history
+length as an event watermark, which would be wrong for out-of-order completion
+IDs after a Host interjection. Clients also deduplicate completed and live starts.
 
-## Instruction-smuggling policy
+Dialect caching stores parameter names, never a previous call's token limit.
+Both agents independently fixed this; a 32-token probe no longer limits later
+responses. Retries do not replay partially emitted replies.
 
-Do not refuse discussion text merely because it matches an injection phrase.
-A discussion about prompt injection must remain possible. Treat quoted turns
-as untrusted material and restrict the CLI's tools, inherited configuration,
-working directory, and permissions independently of the prompt contents.
-Pattern matching may become an advisory signal, not the permission boundary.
+Actual browser tests exposed two embedded-browser differences: sessionStorage
+was not retained on reload, and native prompt dialogs did not open. The app now
+has an authenticated HttpOnly session-cookie fallback and accessible in-page
+forms. Cookie-only POSTs require a custom header; arbitrary cross-origin form
+submissions are not accepted. Cookies are separated by the server port.
 
-The audited FourHorsemen version has `INJECTION_PATTERNS` and a class method
-`assert_data_not_instruction`; the complete validator is coupled to its game
-models/database. The regex flagged a harmless quoted example and missed a plain
-request to open a terminal. This is why a blanket refusal port is not planned.
+The earlier native Ollama 8192-token setting triggered an OOM kill on Robert's
+7.4 GiB machine during the demo. The default is now 2048; `context_tokens` is
+configurable per seat. All seven local models subsequently answered short probes.
+A long window of turns may still exceed a model's token context; do not assume
+40 turns fit in 2048 tokens. Small local models can produce weak or inaccurate
+answers; model agreement is not evidence.
 
-## Review and merge
+## Verification
 
-Integration is in progress; this notice is not a passing-test claim. The final
-commit will update this file with commands, results, and outstanding limits.
-Claude can review and merge the published integration branch into its branch.
+- 33 regression tests passed with the installed venv interpreter, including
+  offline streaming through the actual OpenAI SDK, subprocess descendants,
+  partial failures, exact rounds, independent context, claim provenance,
+  concurrent Host IDs, auth, cookie reload, and configuration-preserving New topic.
+- 500 subscribers raced a writer of 80 Host messages: each saw every message
+  once across its snapshot plus queued events.
+- `doctor --probe`: **9/9 answered** (seven installed Ollama chat models,
+  Claude CLI, Codex CLI). No paid API key was added or used.
+- The installed browser reloaded with its conversation intact. A real local
+  Qwen reply, exact-quote challenge form, and cross-model follow-up were exercised.
+
+## Organization and next handoff
+
+Robert's existing `~/rbholt80-merge/roundtable` installation now runs this branch.
+The original output copy and transcripts were archived locally; its familiar
+output path points to the installed tree. The command and launcher use the same
+installation. Development happens in the Git checkout; runtime tokens and
+transcripts are ignored and are not published.
+
+`PAID_PILOT.md` contains a proposed $149 website-quote comparison service, a
+fictional sample, outreach drafts, and explicit paid-validation gates. No buyer,
+revenue, outreach, invoice, or sale is claimed.
+
+The ownership proposal remains a useful default. Both isolated contract tests
+and real-machine compatibility checks are needed. No blanket instruction-regex
+refusal is planned: quoted injection discussion is legitimate, and CLI permissions
+must be restricted independently of prompt contents. The complete FourHorsemen
+validator is game-coupled; the inspected regex also has false positives and gaps.
+
+Claude can review this branch and fast-forward its branch if it has made no
+additional commits since `9544ed6`. Otherwise merge it normally and inspect any
+new conflicts. No force push is needed.

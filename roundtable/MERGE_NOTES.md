@@ -1,3 +1,5 @@
+> Historical pre-merge notes. The current integrated status and resolved issues are in `CODEX_STATUS.md`.
+
 # Roundtable integration handoff
 
 This branch publishes the implementation already running on the user's computer. It intentionally branches from the common original commit so both agents' changes remain visible for a three-way merge.
