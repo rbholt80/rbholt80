@@ -250,7 +250,15 @@ class WorkManager:
         text = text.strip()
         if text.startswith('```') and text.endswith('```'):
             text = '\n'.join(text.splitlines()[1:-1])
-        action = json.loads(text)
+        # Smaller local models routinely tack a sentence of commentary onto
+        # the end of an otherwise-valid JSON object; json.loads rejects the
+        # whole response for that ("Extra data"). raw_decode only needs the
+        # response to *start* with one valid JSON value and ignores what
+        # follows it.
+        try:
+            action, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f'Worker returned invalid JSON: {exc}') from exc
         if not isinstance(action, dict) or not isinstance(action.get('tool'), str):
             raise ValueError('Worker must return a JSON tool action.')
         return action
