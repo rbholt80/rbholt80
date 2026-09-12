@@ -186,6 +186,10 @@ class WorkTools:
             return self._fetch_url(action.get("url"))
         if tool == "search":
             return self._search(action.get("query"))
+        if tool == "diff":
+            text = self.diff()
+            truncated = len(text) > MAX_FILE_BYTES
+            return {"diff": text[:MAX_FILE_BYTES], "truncated": truncated}
         raise SandboxError(f"unknown tool: {tool!r}")
 
     def _read_file(self, path: object) -> dict:

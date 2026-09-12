@@ -316,8 +316,10 @@ class WorkManager:
                 try:
                     extra = ''
                     if pending:
-                        extra = ('Independently review this candidate against the goal. Use read_file, read_evidence, diff, '
-                                 'fetch_url or checks to inspect it first. Do not edit. Then return '
+                        extra = ('Independently review this candidate against the goal. You must call '
+                                 'read_file, read_evidence, diff, fetch_url or checks at least once FIRST -- '
+                                 'do not return a review action until you have. Do not edit. Only after '
+                                 'inspecting, return '
                                  '{"tool":"review","verdict":"accept|revise","reason":"specific findings"}. '
                                  'Agreement is not verification. Candidate: ' + json.dumps(pending))
                     action = self._ask(goal, seat, extra)
@@ -333,9 +335,22 @@ class WorkManager:
                         reason = action.get('reason')
                         if not isinstance(reason, str) or not reason.strip():
                             raise ValueError('Review needs specific findings.')
+                        if action.get('verdict') == 'accept' and not pending.get('inspected'):
+                            # A weak seat jumping straight to accept is an
+                            # instruction-following failure, not evidence the
+                            # candidate is bad -- don't burn it as an error
+                            # (which would rotate to a different seat and
+                            # never let this one actually try inspecting).
+                            # Keep seat_index unchanged so the same seat is
+                            # asked again, now under a sharper instruction.
+                            with self.lock:
+                                self.record(goal, 'review', {'seat': seat.name,
+                                            'reason': 'tried to accept without inspecting first', 'verdict': 'revise'})
+                                goal['message'] = f'{seat.name}: must inspect before it may accept. Asking again.'
+                                self.save(goal)
+                            self.emit()
+                            continue
                         if action.get('verdict') == 'accept':
-                            if not pending.get('inspected'):
-                                raise ValueError('Inspect actual files or evidence before accepting.')
                             self._finish_check(goal, tools, pending)
                             goal['review'] = {'seat': seat.name, 'reason': reason}
                             goal['summary'] = pending['summary']
