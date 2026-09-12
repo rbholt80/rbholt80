@@ -169,9 +169,21 @@ class Roundtable:
         self.moderate_every = moderate_every
         self._since_moderation = 0
         self.history: list[Turn] = []
-        self._index = 0
         self._forced: str | None = None
         self._pending: list[str] = []
+        # No longer a stored index into a fixed roster -- see
+        # _next_in(). A raw counter went stale the moment the pool it
+        # indexed into could change length turn to turn (a cooling-down
+        # seat shrinks it, a recovered one grows it back).
+        # Backoff for a seat that just failed. A repeating failure -- a
+        # context-budget overflow, a CLI that isn't logged in -- does not
+        # self-heal by retrying immediately, and the automatic rotation had
+        # no memory of this: a broken seat got re-selected every single
+        # round, each pick costing a real subprocess spawn or provider call
+        # that was going to fail identically. Observed live: Codex-CLI
+        # failing on a login error every rotation for 80+ consecutive turns.
+        self._consecutive_errors: dict[str, int] = {}
+        self._cooldown_until: dict[str, int] = {}
         self._independent: dict[str, tuple[list[Turn], int]] = {}
         self._next_seq = 0
         self._sequence_lock = threading.Lock()
@@ -240,6 +252,21 @@ class Roundtable:
     def _last_speaker(self) -> str | None:
         return self.history[-1].speaker if self.history else None
 
+    def _next_in(self, pool: list[Participant]) -> int:
+        """Position right after whoever last actually spoke, in this pool.
+
+        Derived fresh from the transcript and the pool's current membership
+        every call, rather than a stored counter -- a stored index tracked
+        against the full roster went stale the instant a seat's cooldown
+        changed the effective pool's length: dividing an index meant for one
+        length by a different one can converge on a fixed point and repeat
+        a single seat indefinitely, which is what happened the first time
+        this was tried against a roster with one seat cooling down.
+        """
+        names = [p.name for p in pool]
+        last = self._last_speaker()
+        return (names.index(last) + 1) % len(pool) if last in names else 0
+
     @property
     def moderators(self) -> list[Participant]:
         return [p for p in self.participants if p.role == "moderator"]
@@ -249,6 +276,37 @@ class Roundtable:
         """Everyone in the normal rotation. A moderator is not a debater."""
         return [p for p in self.participants if p.role != "moderator"] or self.participants
 
+    def _off_cooldown(self, pool: list[Participant]) -> list[Participant]:
+        """Pool with any seat still failing-backoff removed.
+
+        Never returns empty: if every candidate is cooling down, the pool is
+        returned unfiltered rather than producing no speaker at all -- when
+        nothing is available, trying anyway is still better than stalling.
+        """
+        now = len(self.history)
+        available = [p for p in pool if now >= self._cooldown_until.get(p.name, 0)]
+        return available or pool
+
+    #: Cooldown length by consecutive-failure streak (in total turns across
+    #: the whole table, not this seat's own turns). Exponential, not linear:
+    #: observed live, a broken seat kept failing on literally every pick for
+    #: 80+ consecutive turns -- each one a real subprocess spawn and timeout
+    #: -- so a cooldown that only grows by one turn per failure barely
+    #: suppresses anything against a roster of several seats. Capped so a
+    #: fixed problem (a login, a restarted server) is rechecked within a
+    #: bounded time rather than needing the host to intervene.
+    _COOLDOWN_CAP = 30
+
+    def _record_outcome(self, name: str, errored: bool) -> None:
+        if errored:
+            streak = self._consecutive_errors.get(name, 0) + 1
+            self._consecutive_errors[name] = streak
+            cooldown = min(2 ** (streak - 1), self._COOLDOWN_CAP)
+            self._cooldown_until[name] = len(self.history) + cooldown
+        else:
+            self._consecutive_errors.pop(name, None)
+            self._cooldown_until.pop(name, None)
+
     def queue_round(self, independent: bool = False) -> list[str]:
         """Everyone speaks once, in rotation order, before anyone speaks twice.
 
@@ -256,8 +314,8 @@ class Roundtable:
         crediting N turns to the ordinary selector -- a weighted selector
         given eight credits produces eight weighted picks, not a round.
         """
-        pool = self.regulars
-        start = self._index % len(pool)
+        pool = self._off_cooldown(self.regulars)
+        start = self._next_in(pool)
         self._pending = [p.name for p in pool[start:] + pool[:start]]
         self._independent.clear()
         if independent:
@@ -294,7 +352,7 @@ class Roundtable:
                 and self._since_moderation >= self.moderate_every):
             return self.moderators[0]
 
-        pool = self.regulars
+        pool = self._off_cooldown(self.regulars)
         if len(pool) > 1:
             others = [p for p in pool if p.name != self._last_speaker()] or pool
             if self.policy == "random":
@@ -302,7 +360,7 @@ class Roundtable:
             if self.policy == "weighted":
                 weights = [max(p.weight, 0.01) for p in others]
                 return random.choices(others, weights=weights, k=1)[0]
-        return pool[self._index % len(pool)]
+        return pool[self._next_in(pool)]
 
     def force_next(self, name: str) -> bool:
         if self.by_name(name) is None:
@@ -619,14 +677,11 @@ class Roundtable:
                     crossed=sum(t.seq not in seen_ids for t in self.history),
                     rejected_output=raw_text if rejected else "", control=control,
                     flagged=safety.scan(text))
-        # Resume round-robin from whoever actually spoke, so a forced turn or
-        # an @mention reorders the table instead of double-seating someone.
-        pool = self.regulars
-        self._index = (pool.index(p) + 1) if p in pool else self._index
         if p.role == "moderator":
             self._since_moderation = 0
         else:
             self._since_moderation += 1
+        self._record_outcome(p.name, errored)
         self.history.append(turn)
         self._append(turn.as_event())
         self.export_markdown()
