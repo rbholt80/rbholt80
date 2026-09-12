@@ -361,6 +361,24 @@ class Roundtable:
         """
         return max(1, (len(text.encode("utf-8")) + 2) // 3)
 
+    @classmethod
+    def _truncate_to_tokens(cls, text: str, budget: int) -> str:
+        """Cut text to roughly fit an estimated token budget, marked as cut.
+
+        Character-based and approximate, matching _estimate_tokens's own
+        3-bytes-per-token heuristic -- exactness is not the point, staying
+        well clear of a hard failure is.
+        """
+        if budget <= 0:
+            return "[omitted for length]"
+        limit = max(1, budget * 3)
+        if len(text.encode("utf-8")) <= limit:
+            return text
+        # Trim on the code point boundary, not the byte boundary, so
+        # multi-byte UTF-8 characters are never split.
+        truncated = text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        return truncated.rstrip() + " [...truncated for length]"
+
     def _context(self, speaker: Participant | None = None,
                  turns: list[Turn] | None = None, system: str | None = None,
                  suffix: str | None = None) -> str:
@@ -445,6 +463,80 @@ class Roundtable:
             raise ValueError("The quote must match text in the selected reply")
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise ValueError("Enter a question of 1–4000 characters")
+        question = question.strip()
+        # The question -- unlike the quote, which is a validated exact
+        # substring of the source turn and must never be altered -- has no
+        # such constraint, and continuous auto-review tends to generate
+        # longer ones over a session. This challenge becomes the pinned
+        # "latest Host message" that every seat's turn is built around until
+        # a newer one replaces it (see _context()), so an oversized one does
+        # not just cost this turn -- it permanently locks out every local
+        # seat below that size until something newer supersedes it. Observed
+        # live: a single ~5,200-character challenge (within the 4,000-char
+        # limit on each field) put every 2048-token local seat into that
+        # state for 80+ consecutive turns.
+        #
+        # Cap the question against whichever currently configured seat has
+        # the least room to spare, computed from that seat's own system
+        # prompt and reply budget rather than a guessed constant -- system
+        # prompt length varies by role and persona, and a flat number was
+        # off by nearly 2x against the measured overhead the first time
+        # this was tried. A seat with no context_tokens set (unbounded, or
+        # no local seats at all) contributes no ceiling.
+        boilerplate = self._estimate_tokens(
+            f"Challenge to {source.speaker}'s claim in turn #{seq}:\n"
+            "Quoted claim: \nHost question: \nAssess this specific claim. "
+            "Distinguish evidence from assumptions and name a concrete check "
+            "that could settle it. Agreement is allowed.")
+        others_by_seat = {p.name: [n for n in self.names if n != p.name]
+                          for p in self.participants}
+        ceilings = [
+            p.context_tokens - p.max_tokens - 256
+            - self._estimate_tokens(_system_prompt(p, others_by_seat[p.name], self.topic))
+            for p in self.participants if p.context_tokens
+        ]
+        if ceilings:
+            # render() can include this same turn's text twice once its own
+            # trim loop shrinks `kept` down to just this turn: once as an
+            # ordinary transcript record, and again in the explicit "latest
+            # Host message" pinning it always adds on top (see _context()).
+            # Halving the budget here is what actually gets measured under
+            # that condition -- accounted for once above (quote_cost +
+            # boilerplate already sized for a single occurrence) turned out
+            # ~9 tokens short of the true failure boundary before this.
+            quote_cost = self._estimate_tokens(quote)
+            wrapper_overhead = 40  # two small wrapper strings, not one
+            tightest = min(ceilings)
+            # Both occurrences of this turn's text get JSON-quoted a second
+            # time by _context() itself (once as an ordinary record, once as
+            # the pinned "latest Host message"), on top of the quote's own
+            # json.dumps() here -- nested escaping costs more than a flat
+            # per-character estimate predicts. A fixed safety margin is
+            # simpler and more robust than modeling escaping expansion
+            # exactly, and a few words of question length is a cheap price
+            # for actually staying inside the budget.
+            safety_margin = 60
+            question_budget = max(0, (tightest - wrapper_overhead) // 2
+                                  - quote_cost - boilerplate - safety_margin)
+            if self._estimate_tokens(question) > question_budget:
+                question = self._truncate_to_tokens(question, question_budget)
+            # The question can be shortened to nothing; the quote cannot --
+            # it is a validated exact substring, and mangling it would defeat
+            # the whole point of binding a challenge to real transcript text.
+            # If the quote alone still would not fit even a bare question,
+            # that seat is going to fail on *every* future turn this
+            # challenge is the pinned Host message for, identically, until
+            # something newer replaces it -- which is exactly the failure
+            # observed live over 80+ consecutive turns. Reject it here,
+            # once, with a specific reason, instead of creating it and
+            # deferring that same failure onto every turn that follows.
+            if question_budget <= 0:
+                raise ValueError(
+                    "This quote alone is too long for at least one seat's "
+                    f"context budget (needs roughly {quote_cost} tokens, "
+                    f"~{tightest // 2} available) and would fail on every "
+                    "turn from here on for that seat. Choose a shorter "
+                    "quote, or raise that seat's context_tokens.")
         reference = {"seq": seq, "speaker": source.speaker, "quote": quote}
         text = (f"Challenge to {source.speaker}'s claim in turn #{seq}:\n"
                 f"Quoted claim: {json.dumps(quote, ensure_ascii=False)}\n"
