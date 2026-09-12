@@ -1,0 +1,16 @@
+roundtable-*.jsonl
+roundtable-*.md
+roundtable.toml
+__pycache__/
+*.egg-info/
+*.pid
+web.log
+
+.runtime/
+transcripts/
+
+# Generated shortcuts contain installation-specific absolute paths.
+*.desktop
+.env
+.env.*
+.venv/
