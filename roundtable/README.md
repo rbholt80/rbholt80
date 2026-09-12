@@ -145,6 +145,42 @@ budget does not cap later replies. Missing SDKs, connection failures, and
 mid-stream failures remain visible; already received text is kept and the turn
 is marked as failed.
 
+## Goal mode
+
+Beyond open-ended discussion, connected CLI and Ollama seats can also be set
+loose on a bounded, autonomous goal -- writing code against a real project,
+researching a question, or scoping a money-making idea -- via a separate
+command-line driver:
+
+```sh
+python3 goal.py create "add a --verbose flag" --project ~/some/repo
+python3 goal.py create "what do people complain about with X" --mode research
+python3 goal.py list
+python3 goal.py show <id>
+python3 goal.py resume <id> --feedback "also handle the empty case" --steps 10
+python3 goal.py outcome <id> "sold for $40"
+```
+
+A goal runs against a **sandboxed copy** of the target project (bubblewrap
+filesystem/network isolation where available, `unshare --net` as a weaker
+fallback), never the original directory. Only `cli`/`ollama`/`mock` seats
+work goals; hosted API seats are excluded. Each step is one JSON tool call
+(`plan`, `read_file`, `write_file`, `run`, `check_python`, `fetch_url`,
+`diff`, `finish`, `needs_input`, ...) recorded as durable evidence on disk.
+
+A `finish` proposal is never accepted by its own author: a second seat must
+independently inspect the actual files or evidence (not just agree) before
+the goal reaches `ready` status and a `changes.patch` is written. Small
+local models often try to accept without inspecting first -- that is
+rejected and the same seat is asked again rather than treated as a fatal
+error, but it still costs step budget, so give a goal enough steps (`create
+--steps N` or `resume --steps N`) to get through both the work and the
+review.
+
+This is not yet wired into the browser or terminal UI above (`cli.py`/
+`web.py`) -- `goal.py` is a thin standalone driver over the same
+`WorkManager` used by future UI integration.
+
 ## Configuration and boundaries
 
 Copy `roundtable.example.toml` to `roundtable.toml` to select models, roles,
