@@ -19,8 +19,11 @@ HOST_COLOR = "\033[1;37m"
 HELP = """\
   Enter            let the next model speak
   <text>           join in; @Name hands the floor to that seat
-  /round           every seat speaks once, in order
-  /auto [n]        models keep talking (n turns, or until Ctrl+C)
+  /round           every regular seat speaks once, in order
+  /opening         one independent answer each before seeing this round's replies
+  /auto [n]        continuous draft/review; an optional number limits turns
+  /challenge <seq> | <quote> | <question>
+                   challenge an exact claim from a numbered reply
   /next <Name>     put a specific model up next
   /who             who is at the table
   /cost            tokens and seconds spent so far, per seat
@@ -41,17 +44,21 @@ def _print_roster(seats: list[Participant]) -> None:
         print(f"  {p.color}●{RESET} {p.name:<14} {DIM}{detail}{RESET}{note}")
 
 
-def _render(table: Roundtable, events, color: str) -> None:
+def _render(table: Roundtable, events, color: str, buffered: bool = False) -> None:
     """Paint one streamed turn."""
     for event in events:
         if event["type"] == "start":
-            sys.stdout.write(f"\n{color}{event['speaker']}:{RESET} ")
+            sys.stdout.write(f"\n{color}{event['speaker']} [#{event['seq']}]:{RESET} ")
             sys.stdout.flush()
-        elif event["type"] == "chunk":
+        elif event["type"] == "chunk" and not buffered:
             sys.stdout.write(event["text"])
             sys.stdout.flush()
         elif event["type"] == "end":
+            if buffered:
+                sys.stdout.write(event['text'])
             print()
+            if event.get('rejected_output') and not buffered:
+                print('[Transcript correction — accepted text follows:]\n' + event['text'])
 
 
 def _print_ledger(table) -> None:
@@ -157,6 +164,14 @@ def _build(args: argparse.Namespace) -> tuple[Roundtable, dict]:
                         if args.moderate_every is not None
                         else settings.get("moderate_every", 0)),
     )
+    # Refresh availability without silently widening a deliberately selected
+    # roster (for example --only local seats or --no-cli) on New topic.
+    table.refresh_participants = lambda: config.resolve(
+        config_path=args.config,
+        only=args.only.split(",") if args.only else None,
+        include_cli=not args.no_cli,
+        local_context=args.local_context,
+    )[0]
     return table, settings
 
 
@@ -167,10 +182,14 @@ def cmd_talk(args: argparse.Namespace) -> int:
     _print_roster(table.participants)
     print(f"\n{DIM}{HELP}{RESET}")
 
-    auto_remaining = args.auto or 0
+    auto_remaining = max(0, args.auto or 0)
+    queued_round = False
+    from .autopilot import AutoSolve
+    solver = AutoSolve()
+    auto_followups = False
     try:
         while True:
-            if auto_remaining <= 0:
+            if auto_remaining == 0 and not solver.enabled:
                 try:
                     line = input(f"{HOST_COLOR}> {RESET}").strip()
                 except (EOFError, KeyboardInterrupt):
@@ -179,59 +198,116 @@ def cmd_talk(args: argparse.Namespace) -> int:
 
                 if line in ("/quit", "/q", "/exit"):
                     break
-                if line == "/who":
+                elif line == "/who":
                     _print_roster(table.participants)
                     continue
-                if line == "/help":
+                elif line == "/help":
                     print(HELP)
                     continue
-                if line == "/cost":
+                elif line == "/cost":
                     _print_ledger(table)
                     continue
-                if line == "/moderate":
+                elif line == "/moderate":
                     mods = table.moderators
                     if not mods:
-                        print(f"{DIM}no moderator seat; set role = \"moderator\" "
-                              f"on one in roundtable.toml{RESET}")
+                        print(f'{DIM}no moderator seat; set role = "moderator" '
+                              f'on one in roundtable.toml{RESET}')
                         continue
                     table.force_next(mods[0].name)
                 elif line == "/save":
                     print(f"{DIM}wrote {table.export_markdown()}{RESET}")
                     continue
-                if line.startswith("/next"):
+                elif line.startswith("/next ") or line == "/next":
                     _, _, who = line.partition(" ")
                     if not table.force_next(who.strip()):
                         print(f"{DIM}no seat called {who.strip()!r}{RESET}")
                         continue
-                elif line == "/round":
-                    auto_remaining = len(table.queue_round())
+                elif line in ("/round", "/opening"):
+                    auto_followups = False
+                    queued_round = True
+                    auto_remaining = len(table.queue_round(independent=line == "/opening"))
                     print(f"{DIM}(one turn each — Ctrl+C to stop){RESET}")
-                elif line.startswith("/auto"):
+                elif line.startswith("/challenge "):
+                    fields = [part.strip() for part in line[len("/challenge "):].split("|", 2)]
+                    try:
+                        if len(fields) < 2:
+                            raise ValueError("Use /challenge <seq> | <exact quote> | <question>")
+                        seq = int(fields[0].lstrip("#"))
+                        question = fields[2] if len(fields) > 2 else "What evidence supports or weakens this claim?"
+                        table.add_challenge(seq, fields[1], question)
+                        if auto_followups:
+                            solver.start(table)
+                    except ValueError as exc:
+                        print(f"{DIM}{exc}{RESET}")
+                        continue
+                elif line.startswith("/auto ") or line == "/auto":
                     _, _, count = line.partition(" ")
-                    auto_remaining = int(count) if count.strip().isdigit() else -1
+                    if count.strip() and (not count.strip().isdigit() or int(count) <= 0):
+                        print(f"{DIM}Use /auto with a positive number of turns{RESET}")
+                        continue
+                    queued_round = False
+                    table.clear_round()
+                    auto_followups = not bool(count.strip())
+                    if auto_followups:
+                        solver.start(table)
+                    else:
+                        auto_remaining = int(count)
                     print(f"{DIM}(auto — Ctrl+C to take the wheel back){RESET}")
                 elif line.startswith("/"):
                     print(f"{DIM}unknown command; /help for the list{RESET}")
                     continue
                 elif line:
                     table.add_host_message(line)
+                    if auto_followups:
+                        solver.start(table)
 
-            speaker = table.next_speaker()
+            step = solver.next_step(table) if solver.enabled else None
+            if solver.enabled and not step:
+                try:
+                    threading.Event().wait(1)
+                except KeyboardInterrupt:
+                    solver.pause()
+                    auto_followups = False
+                continue
+            speaker = step[0] if step else table.next_speaker()
             try:
-                _render(table, table.run_turn(speaker), speaker.color)
+                events = (table.run_turn(speaker, instruction=step[1], review=step[2])
+                          if step else table.run_turn(speaker))
+                _render(table, events, speaker.color, buffered=bool(step and step[2]))
             except KeyboardInterrupt:
+                solver.pause()
+                auto_followups = False
                 auto_remaining = 0
+                queued_round = False
+                table.clear_round()
                 print(f"\n{DIM}(paused){RESET}")
                 continue
 
-            if auto_remaining > 0:
+            if solver.enabled:
+                solver.observe(table, table.history[-1])
+                table._append({'type': 'solve', **solver.snapshot()})
+                print(f'{DIM}{solver.message}{RESET}')
+                if solver.status in ('proposed', 'needs_input'):
+                    solver.enabled = False
+            elif table.history and table.history[-1].error:
+                auto_remaining = 0
+                queued_round = False
+                table.clear_round()
+                print(f"{DIM}(paused after a provider error){RESET}")
+            elif queued_round:
+                auto_remaining = table.pending_round
+                queued_round = auto_remaining > 0
+            elif auto_remaining > 0:
                 auto_remaining -= 1
-            if auto_remaining != 0:
+            if auto_remaining or solver.enabled:
                 try:
-                    # A readable beat between turns, interruptible.
-                    threading.Event().wait(args.pause)
+                    threading.Event().wait(max(0, args.pause))
                 except KeyboardInterrupt:
+                    solver.pause()
+                    auto_followups = False
                     auto_remaining = 0
+                    queued_round = False
+                    table.clear_round()
                     print(f"\n{DIM}(paused){RESET}")
     finally:
         if table.history:

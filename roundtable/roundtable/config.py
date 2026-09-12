@@ -8,18 +8,18 @@ seat whoever shows up.
 
 from __future__ import annotations
 
-import functools
 import importlib.util
 import json
 import os
 import shutil
 import socket
-import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
+
+from .local import cli_ready
 
 try:  # py3.11+
     import tomllib
@@ -40,24 +40,26 @@ PALETTE: list[tuple[str, str]] = [
     ("\033[38;5;108m", "#8aab86"),  # sage
 ]
 
+LOCAL_CONTEXT_TOKENS = 2048
+
 
 @dataclass
 class Participant:
     """One seat at the table."""
 
     name: str
-    kind: str                      # anthropic | openai | gemini | cli
+    kind: str                      # anthropic | openai | gemini | ollama | cli | mock
     model: str = ""
     api_key_env: str | None = None
     base_url: str | None = None
     argv: list[str] = field(default_factory=list)   # kind == "cli"
     persona: str = ""              # extra system-prompt line, optional
     role: str = "principal"        # principal | panel | moderator
-    context_tokens: int | None = None  # usable context; None = use turn count
     price_in: float | None = None  # $ per million input tokens, if you want $
     price_out: float | None = None # $ per million output tokens
     weight: float = 1.0            # relative floor time under the weighted policy
     max_tokens: int = 1024
+    context_tokens: int | None = None  # total input/output budget; local default is 2048
     effort: str | None = None      # Claude only: low|medium|high|xhigh|max
     temperature: float | None = None
     timeout: float = 180.0
@@ -66,6 +68,10 @@ class Participant:
     hex: str = PALETTE[0][1]
     source: str = "config"         # where this seat came from, for `doctor`
     note: str = ""                 # human-readable caveat, for `doctor`
+
+    def __post_init__(self) -> None:
+        if self.context_tokens is not None and (type(self.context_tokens) is not int or self.context_tokens < 1):
+            raise ValueError("context_tokens must be a positive integer")
 
     @property
     def api_key(self) -> str | None:
@@ -96,10 +102,13 @@ LOCAL_SERVERS: list[tuple[str, str, int, str]] = [
 # argv -- argv has length limits and quoting hazards a transcript will hit.
 CLI_CANDIDATES: list[tuple[str, str, list[str], str]] = [
     # (display name, executable, args, note)
-    ("Claude-CLI", "claude", ["-p"],
-     "Claude Code CLI: runs with its own tool access in the working directory."),
-    ("Codex-CLI",  "codex",  ["exec", "-"],
-     "OpenAI Codex CLI: agentic, may touch the filesystem."),
+    ("Claude-CLI", "claude", ["-p", "--safe-mode", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence", "--output-format", "text"],
+     "Claude subscription CLI; tools and customizations disabled."),
+    ("Codex-CLI", "codex", ["-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
+        "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+        *[item for feature in ("shell_tool", "unified_exec", "code_mode", "code_mode_host", "apps", "plugins", "hooks", "multi_agent", "multi_agent_v2", "browser_use", "computer_use", "in_app_browser", "image_generation", "view_image", "skill_search") for item in ("--disable", feature)],
+        "-c", 'web_search="disabled"', "-"],
+     "ChatGPT login via Codex; isolated read-only discussion."),
     ("Gemini-CLI", "gemini", ["-p"],
      "Gemini CLI."),
     ("LLM-CLI",    "llm",    [],
@@ -108,7 +117,10 @@ CLI_CANDIDATES: list[tuple[str, str, list[str], str]] = [
 
 
 def _has_module(name: str) -> bool:
-    return importlib.util.find_spec(name) is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> bool:
@@ -116,17 +128,6 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> boo
         s.settimeout(timeout)
         return s.connect_ex((host, port)) == 0
 
-
-#: Context allocated per local seat. Deliberately modest.
-#:
-#: Measured on the host's machine: seven local models at 8192 exhausted
-#: memory and Ollama failed outright; at 2048 all seven answered. The cost is
-#: not per conversation but per resident model -- Ollama keeps recently used
-#: models loaded, so a roundtable multiplies the allocation by the number of
-#: seats, which is exactly the situation this tool creates and a single-model
-#: default never anticipates. Raise it per seat with context_tokens, or for
-#: every local seat with --local-context, when the machine has room.
-LOCAL_CONTEXT_TOKENS = 2048
 
 # Substrings that mark an embedding model. Only consulted when the Ollama
 # build is too old to report capabilities.
@@ -162,9 +163,8 @@ def _parameter_billions(raw: str | None) -> float | None:
         return None
 
 
-# Below this, a model reliably restates the topic and hedges rather than
-# holding a position. It is still useful for breadth -- just not as a
-# full-weight voice. See Participant.role.
+# Default scheduling heuristic, not a capability guarantee. Small models
+# contribute shorter panel turns; config can override each role and weight.
 PANEL_THRESHOLD_B = 4.0
 
 
@@ -213,33 +213,9 @@ def _seat_name(model: str, taken: set[str]) -> str:
     return candidate
 
 
-@functools.lru_cache(maxsize=32)
-def _cli_help(exe_path: str) -> str:
-    """A CLI's own --help, so we can check a flag exists before passing it."""
-    try:
-        done = subprocess.run(
-            [exe_path, "--help"], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return (done.stdout or "") + (done.stderr or "")
-
-
-def _cli_supports(exe_path: str, flag: str, subcommand: str | None = None) -> bool:
-    if _cli_help(exe_path) and flag in _cli_help(exe_path):
-        return True
-    if subcommand:
-        try:
-            done = subprocess.run([exe_path, subcommand, "--help"],
-                                  capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return flag in (done.stdout or "") + (done.stderr or "")
-    return False
-
 
 def discover(include_cli: bool = True, include_local: bool = True,
-             dedupe: bool = True,
-             local_context: int = LOCAL_CONTEXT_TOKENS) -> list[Participant]:
+             dedupe: bool = True, local_context: int = LOCAL_CONTEXT_TOKENS) -> list[Participant]:
     """Everything this machine can currently seat, best candidates first."""
     found: list[Participant] = []
 
@@ -267,52 +243,45 @@ def discover(include_cli: bool = True, include_local: bool = True,
                 note="check the model id against current Gemini releases",
             ))
 
-    if include_local and _has_module("openai"):
-        for name, base_url, port, default_model in LOCAL_SERVERS:
-            if not _port_open(port):
-                continue
-            if name == "Ollama":
-                taken = {p.name for p in found}
-                for model, size in _ollama_chat_models(base_url):
-                    seat = _seat_name(model, taken)
-                    taken.add(seat)
-                    small = size is not None and size < PANEL_THRESHOLD_B
-                    found.append(Participant(
-                        name=seat, kind="openai", model=model,
-                        base_url=base_url, api_key_env=None, source="local",
-                        context_tokens=local_context,
-                        role="panel" if small else "principal",
-                        weight=0.35 if small else 1.0,
-                        max_tokens=160 if small else 1024,
-                        note=("local via Ollama"
-                              + (f", {size:g}B — panel seat" if small else "")),
-                    ))
-                continue
+    if include_local:
+        # Native Ollama streaming needs no hosted-provider SDK.
+        if _port_open(11434):
+            base_url = "http://127.0.0.1:11434"
+            taken = {p.name for p in found}
+            angles = ["offer practical examples", "question assumptions", "suggest alternatives",
+                      "identify uncertainties", "connect others' ideas", "look for tradeoffs",
+                      "summarize disagreements"]
+            for i, (model, size) in enumerate(_ollama_chat_models(base_url)):
+                seat = _seat_name(model, taken)
+                taken.add(seat)
+                small = size is not None and size < PANEL_THRESHOLD_B
+                found.append(Participant(
+                    name=seat, kind="ollama", model=model,
+                    base_url=base_url, source="local", context_tokens=local_context,
+                    role="panel" if small else "principal",
+                    weight=0.35 if small else 1.0,
+                    max_tokens=160 if small else 1024,
+                    persona=angles[i % len(angles)],
+                    note=("Local chat model via Ollama; no API key needed"
+                          + (f", {size:g}B — panel seat" if small else "")),
+                ))
+        if _has_module("openai") and _port_open(1234):
             found.append(Participant(
-                name=name, kind="openai", model=default_model,
-                base_url=base_url, api_key_env=None, source="local",
-                note=f"local server on :{port}, no API key needed",
+                name="LMStudio", kind="openai", model="local-model",
+                base_url="http://127.0.0.1:1234/v1", source="local", context_tokens=local_context,
+                note="Local server on :1234; no API key needed",
             ))
 
     if include_cli:
         for name, exe, args, note in CLI_CANDIDATES:
             path = shutil.which(exe)
-            if not path:
-                continue
-            argv = [path, *args]
-            # Being on PATH says nothing about being signed in, and a CLI
-            # agent inherits whatever tool access its config grants. Pin the
-            # sandbox where the binary offers one -- checked against its own
-            # --help rather than assumed, so an unknown build degrades to the
-            # user's default instead of dying on a bad flag.
-            if exe == "codex" and _cli_supports(path, "--sandbox", "exec"):
-                argv = [path, "exec", "--sandbox", "read-only", "-"]
-                note = "Codex CLI, pinned to a read-only sandbox."
-            found.append(Participant(
-                name=name, kind="cli", model=exe, argv=argv,
-                source="cli",
-                note=note + " Sign-in not verified — `doctor --probe`.",
-            ))
+            if path and cli_ready(exe, path)[0]:
+                # Preserve the verified restricted CLI invocation. Do not drop
+                # restrictions silently to accommodate an unfamiliar binary.
+                found.append(Participant(
+                    name=name, kind="cli", model=exe, argv=[path, *args],
+                    source="cli", note=note,
+                ))
 
     return _dedupe(found) if dedupe else found
 
@@ -336,6 +305,13 @@ def _dedupe(found: list[Participant]) -> list[Participant]:
 def blocked() -> list[tuple[str, str]]:
     """Seats that would exist if something small were fixed. (name, remedy)"""
     out: list[tuple[str, str]] = []
+    for name, exe, _args, _note in CLI_CANDIDATES:
+        if path := shutil.which(exe):
+            ready, remedy = cli_ready(exe, path)
+            if not ready:
+                out.append((name, remedy))
+    if not os.environ.get("XAI_API_KEY"):
+        out.append(("Grok", "No automatic connection configured on this computer."))
 
     if os.environ.get("ANTHROPIC_API_KEY") and not _has_module("anthropic"):
         out.append(("Claude", "ANTHROPIC_API_KEY is set — pip install anthropic"))
@@ -391,8 +367,8 @@ def load_config(path: Path) -> dict[str, Any]:
 
 _PARTICIPANT_FIELDS = {
     "kind", "model", "api_key_env", "base_url", "argv", "persona",
-    "max_tokens", "effort", "temperature", "timeout", "enabled",
-    "role", "weight", "price_in", "price_out", "context_tokens",
+    "max_tokens", "context_tokens", "effort", "temperature", "timeout", "enabled",
+    "role", "weight", "price_in", "price_out",
 }
 
 
@@ -407,7 +383,11 @@ def participants_from_config(data: dict[str, Any]) -> list[Participant]:
             raise ValueError(f"{entry['name']}: unknown keys {sorted(unknown)}")
         kwargs = {k: v for k, v in entry.items() if k in _PARTICIPANT_FIELDS}
         out.append(Participant(name=entry["name"], source="config", **kwargs))
-    return [p for p in out if p.enabled]
+    active = [p for p in out if p.enabled]
+    names = [p.name.casefold() for p in active]
+    if len(names) != len(set(names)) or "host" in names:
+        raise ValueError("Participant names must be unique and cannot be Host")
+    return active
 
 
 def resolve(
@@ -419,18 +399,21 @@ def resolve(
     """Config file if there is one, otherwise whatever the machine offers."""
     settings: dict[str, Any] = {}
     path = find_config(config_path)
-    ctx = local_context or LOCAL_CONTEXT_TOKENS
+    ctx = LOCAL_CONTEXT_TOKENS if local_context is None else local_context
     if path:
         data = load_config(path)
         settings = data.get("roundtable", {})
-        ctx = local_context or settings.get("local_context",
-                                             LOCAL_CONTEXT_TOKENS)
+        ctx = settings.get("local_context", LOCAL_CONTEXT_TOKENS) if local_context is None else local_context
         seats = participants_from_config(data)
         if not seats:  # a config with no participants still means "discover"
-            seats = discover(include_cli=include_cli, local_context=ctx)
+            seats = discover(include_cli=include_cli, dedupe=not bool(only), local_context=ctx)
     else:
-        ctx = local_context or LOCAL_CONTEXT_TOKENS
-        seats = discover(include_cli=include_cli, local_context=ctx)
+        seats = discover(include_cli=include_cli, dedupe=not bool(only), local_context=ctx)
+
+    if type(ctx) is not int or ctx < 1:
+        raise ValueError("local_context must be a positive integer")
+    seats = [replace(p, context_tokens=ctx) if (p.kind == "ollama" or p.source == "local")
+             and (local_context is not None or p.context_tokens is None) else p for p in seats]
 
     if only:
         wanted = {n.casefold() for n in only}

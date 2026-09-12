@@ -1,253 +1,173 @@
 # Roundtable
 
-Put every AI you have in one room and let them argue.
+A local browser and terminal app where your connected AI models discuss one
+shared topic. You choose the topic, control the pace, and can interrupt. It
+uses the same engine for both interfaces.
 
-Claude, ChatGPT, Grok, Gemini, DeepSeek, a local Llama, even the CLIs already
-installed on your machine — each one sees the full labelled transcript, knows
-who else is at the table, and replies to what was actually just said. You watch
-it stream, and you can cut in whenever you want.
+## Start the browser
 
-Two front ends over one engine: a terminal and a local web page.
+From this directory:
 
-```
-roundtable doctor                              # what can this machine seat?
-roundtable "Is it worth learning to code in 2026?"
-roundtable web "Should we ship on Friday?"     # same thing, in a browser
+```sh
+./roundtable.sh
 ```
 
----
+The launcher opens the existing table or starts one. Choose **New topic**, then
+**Independent round** for separate first assessments or **Run one round** for
+an ordinary discussion. A round gives each non-moderator seat one turn. **Auto
+solve** keeps drafting and requesting a separate review without further turn
+clicks. It prefers configured principal seats, tries other connections on
+failure, and waits before retrying unavailable seats. Pause stops after the
+current response.
 
-## Install
+Auto stops generating when another seat accepts a concrete answer, or identifies
+essential missing input. It labels the result **Proposed answer**, not verified
+truth. New Host messages restart Auto without another click while Auto remains
+enabled. It can keep running indefinitely if reviewers cannot resolve the
+question; usage continues to accumulate until an answer, missing-input pause,
+or manual Pause. No provider restrictions, billing limits, or tool permissions
+are bypassed.
 
-```bash
-cd roundtable
-./setup.sh
+The latest actual Host message stays in context even if older turns are trimmed.
+Forged numbered speaker records are flagged on completion, kept out of later
+prompts, and preserved in an expandable audit block and the local transcript.
+Streaming text is provisional until that check completes. Plain addresses such
+as "Host:" remain model text inside JSON-framed bodies. The format check
+allows quotations and code examples; it cannot detect all fabricated claims.
+
+No Python packages are needed for Ollama or the installed CLI connections.
+Python 3.11 or newer is required. For hosted API adapters, run `./setup.sh` once;
+it installs optional SDKs in `.venv`, leaving system Python alone. The launcher
+uses that environment automatically when present.
+
+```sh
+./roundtable.sh --terminal "What should we discuss?"
+./roundtable.sh --stop
+python3 create_shortcuts.py
 ```
 
-That builds a virtual environment and installs into it. Debian, Ubuntu and
-Fedora mark the system Python as externally managed (PEP 668), so a plain
-`pip install` there fails with `externally-managed-environment` — that is the
-OS protecting itself, not a problem with this project. If `setup.sh` reports
-that it cannot create the environment, install `python3-venv` (`sudo apt
-install python3-venv`) and run it again.
+The last command creates two Linux desktop shortcuts in this directory. It
+does not install system menu entries. CLI installation users can also run
+`.venv/bin/roundtable web "Topic"` or activate `.venv` to use `roundtable` directly.
 
-By hand, if you prefer, or to install only some of the seats:
+## Have a useful discussion
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[all]"        # or: .[anthropic] / .[openai] / .[gemini]
+**Independent round** freezes the starting transcript. Each model gives its
+assessment from that shared baseline, within its own context budget, without
+seeing other answers produced in that round. New Host
+messages still reach subsequent speakers. This reduces first-speaker anchoring;
+it does not guarantee that model judgments are independent or correct.
+
+**Challenge** attaches a Host question to an exact quote in a completed model
+reply. The source turn number and quote are saved. Ask for evidence, missing
+assumptions, or a test that would resolve it. The model can agree with the claim;
+it is not instructed to manufacture disagreement. A transcript reference proves
+where a statement was made, not whether it is true.
+
+The default context window is 40 turns. Seats with `context_tokens` also trim
+old whole turns to an estimated token budget, reserving the actual system prompt,
+reply allowance, and framing space. Estimates use UTF-8 bytes and are not exact
+model token counts. If the newest message or topic alone cannot fit, that seat
+records a visible error before making a provider call; shorten it or use a
+larger-context seat. Models see a notice when older turns
+are omitted. Replies keep stable IDs and record which context they received,
+including when the Host interjects during a reply. Transcripts are written to
+JSONL after each completed turn and refreshed in Markdown after Host/model turns.
+The launcher keeps them in `transcripts/`; ordinary CLI runs honor `--transcripts`.
+
+Terminal commands:
+
+| Command | Effect |
+| --- | --- |
+| Enter | Next model replies |
+| Your text | Join as Host; `@Name` requests that seat |
+| `/round` | One turn per non-moderator seat |
+| `/opening` | Independent round from the same starting transcript |
+| `/challenge 0 \| exact quote \| your question` | Question a claim in turn #0 |
+| `/next Name` | Choose the next speaker |
+| `/auto N` | Run N turns |
+| `/auto` | Keep drafting and reviewing until a proposed answer or essential missing input; Ctrl+C pauses |
+| `/cost` | Show usage and time per seat |
+| `/moderate` | Ask the configured moderator to summarize |
+| `/save` | Export Markdown |
+| `/quit` | Save and exit |
+
+Use finite rounds first. Ctrl+C during a terminal reply pauses it. The browser's
+Pause button lets the current reply finish.
+
+## Connections and roles
+
+`roundtable doctor` discovers installed connections and checks CLI sign-in.
+`roundtable doctor --probe` sends a short real request to each discovered seat
+and therefore uses its account allowance. Discovery alone does not prove a model
+will answer successfully.
+
+- **Ollama:** discovers completion-capable installed models and uses native
+  streaming without an SDK. Embedding models are excluded. Models below 4B
+  parameters default to brief panel roles; configuration can override that.
+  Native context defaults to 2,048 tokens to limit memory on small machines.
+  Set `context_tokens` on a seat, `local_context` in `[roundtable]`, or use
+  `--local-context N` for longer local inputs if memory permits. Hosted seats
+  default to the turn window unless their own context budget is configured.
+- **Claude CLI / Codex CLI:** reuse their existing logins. Automatic invocations
+  restrict tools and inherited configuration, and run in temporary directories.
+  Custom CLI commands in TOML are trusted operator configuration; review them
+  before enabling. Hosted CLI services still consume their account allowances.
+- **Hosted APIs:** enabled by their key environment variable and installed SDK.
+  Provider/model examples in configuration are defaults, not a live model catalog.
+  Override them for models available to your account. Do not export placeholder
+  keys such as `...`; an apparent API connection can shadow a working CLI seat.
+- **LM Studio:** uses the optional OpenAI-compatible adapter.
+- **Grok:** needs configured xAI API access for automatic replies. A browser chat
+  subscription is not automatically connected. Manual replies can be pasted as
+  Host messages with their origin identified.
+
+The original verified machine has seven Ollama chat models and two signed-in
+CLI seats. `doctor` reports what is available on the current machine.
+
+A `principal` gets a normal discussion brief. A `panel` seat offers one concrete
+objection, example, or uncertainty. A `moderator` is outside the normal rotation
+and speaks on `/moderate` or a configured cadence. `policy = "auto"` uses weighted
+selection when weights differ. Explicit rounds retain the one-turn-per-seat
+rule regardless of weights.
+
+## Usage accounting
+
+`/cost` and the browser show turns, elapsed seconds, and tokens per seat. Hosted
+providers and native Ollama can report token counts. Where counts are missing,
+output is estimated from character count and labeled as estimated. Estimates
+are not billing records. Configure `price_in` and `price_out` in dollars per
+million tokens to calculate usage at your own rates; otherwise no price is implied.
+
+The OpenAI-compatible adapter negotiates supported token/usage parameters and
+caches the accepted parameter names per endpoint/model. A probe's small response
+budget does not cap later replies. Missing SDKs, connection failures, and
+mid-stream failures remain visible; already received text is kept and the turn
+is marked as failed.
+
+## Configuration and boundaries
+
+Copy `roundtable.example.toml` to `roundtable.toml` to select models, roles,
+weights, timeouts, output limits, and rates. The default app sends the context
+to whichever seat is speaking. A mixed session containing hosted seats is not
+local-only. Choose only Ollama seats when the transcript must remain local.
+
+Other speakers' text is quoted discussion data. The app does not refuse ordinary
+discussion because it contains an injection phrase. CLI restrictions are applied
+separately; regex filtering is not treated as a sandbox.
+
+The localhost browser uses a per-session token, kept in the URL fragment and
+sessionStorage, with an HttpOnly session-cookie fallback for browsers that clear
+storage on reload. Cookie-only writes also require a custom request header.
+Treat the token like a local session
+credential. A new topic creates a separate transcript and refreshes discovery.
+
+## Development and collaboration
+
+```sh
+python3 -m unittest discover -s tests -v
 ```
 
-The `roundtable` command lives inside that environment, so it is on your PATH
-only while it is activated. To reach it from any shell, link it once:
-
-```bash
-mkdir -p ~/.local/bin && ln -sf "$PWD/.venv/bin/roundtable" ~/.local/bin/roundtable
-```
-
-`openai` is the workhorse dependency — it covers OpenAI, xAI, Groq, DeepSeek,
-Mistral, Together, OpenRouter, Perplexity, Ollama and LM Studio, because they
-all speak the same dialect. Install only the extras you want.
-
-Then export whichever keys you have. Roundtable seats whoever shows up:
-
-```bash
-export ANTHROPIC_API_KEY=...      # Claude
-export OPENAI_API_KEY=...         # ChatGPT
-export XAI_API_KEY=...            # Grok
-export GEMINI_API_KEY=...         # Gemini
-# ...and DEEPSEEK_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY,
-#    OPENROUTER_API_KEY, PERPLEXITY_API_KEY
-```
-
-`roundtable doctor` tells you exactly what it found, what it *nearly* found
-(key set but SDK missing, and the one-line fix), and what it skipped.
-
-Being on `PATH` is not the same as being signed in, and an exported key is not
-the same as a working one. `roundtable doctor --probe` calls every seat once
-with a trivial prompt and reports what actually came back — a signed-out CLI
-shows up as a failure with its own error text, not as a ready seat.
-
----
-
-## How the table fills itself
-
-There is no hardcoded list of models. On every run Roundtable looks at the
-machine it is on:
-
-| Source | What it looks for |
-|---|---|
-| **Hosted APIs** | the key env vars above, plus the matching SDK |
-| **Local servers** | Ollama on `:11434` (every chat-capable model gets its own seat), LM Studio on `:1234` — no key needed |
-| **Installed CLIs** | `claude`, `codex`, `gemini`, `llm` on your `PATH` |
-
-If a vendor offers both an API seat and a CLI seat, the API seat wins by
-default: it is faster, cheaper, and it doesn't run an agent with filesystem
-access just to have an opinion. `doctor` still lists the CLI, and `--only` or
-the config file will seat it anyway.
-
-### About the CLI seats
-
-`Claude-CLI` and `Codex-CLI` are not chat endpoints. They are coding agents,
-and they run **in your current working directory with whatever tool access you
-have granted them** — they can read files, and depending on your settings,
-write them. That is occasionally what you want (a participant that can actually
-go look at the repo you are arguing about) and usually not. They are off by
-default when the API seat exists. Enable them deliberately, and mind the
-directory you start from.
-
----
-
-## Driving it
-
-**Terminal**
-
-```
-Enter            let the next model speak
-<text>           join in; @Grok hands the floor to that seat
-/auto [n]        models keep talking (n turns, or until Ctrl+C)
-/next <Name>     put a specific model up next
-/who             who is at the table
-/save            write the markdown transcript now
-/quit            exit
-```
-
-**Browser** — `roundtable web "topic"` prints a localhost URL with a one-run
-token in the fragment. Click a name in the header to hand that model the floor,
-**Next** to advance, **Auto** to let them run, type to cut in. Cmd/Ctrl+Enter
-advances without sending. The page is theme-aware and works at phone width, so
-you can leave it open on a second screen.
-
-Both front ends drive the same engine over the same events, so they behave
-identically — and you can point a browser at a session you started from the
-terminal's `web` subcommand and watch the same conversation.
-
----
-
-## Transcripts
-
-Every turn is appended to `roundtable-<timestamp>.jsonl` **the moment it
-finishes**, so a crash or a Ctrl+C costs you nothing. On exit (or `/save`) you
-also get a readable `.md` alongside it. Filenames are timestamped, so runs never
-overwrite each other.
-
----
-
-## Configuration
-
-Optional. Drop a `roundtable.toml` in the working directory or
-`~/.config/roundtable/` to pin the table, change models, or give each model an
-angle. See `roundtable.example.toml` — copy it and delete what you don't have.
-
-The one setting worth knowing about is `persona`:
-
-```toml
-[[participant]]
-name = "Grok"
-kind = "openai"
-model = "grok-4"
-base_url = "https://api.x.ai/v1"
-api_key_env = "XAI_API_KEY"
-persona = "the contrarian; find the strongest objection nobody has made yet"
-```
-
-Three assistants with no personas tend to violently agree. Give them different
-jobs and you get an actual discussion.
-
-### Roles: not every seat should carry equal weight
-
-A 1B local model given the same brief as a frontier model produces four hedged
-sentences that restate the topic. That is not a bug in the model — it is the
-wrong job for it. Each seat has a `role`:
-
-| Role | Brief | Floor time |
-|---|---|---|
-| `principal` | argue, disagree, concede, ask real questions | full |
-| `panel` | exactly one concrete objection or piece of evidence, 1–2 sentences, no summarising and no praise — and an explicit licence to say only what it would need to know instead of padding | reduced (`weight`) |
-| `moderator` | does not argue; names the disagreement, what is settled, and what would resolve it | on a cadence, not in rotation |
-
-Local models are assigned a role automatically from their parameter count
-(under 4B → `panel`), which Ollama reports. Override any of it in the config.
-
-Turn policy defaults to `auto`: plain round-robin when every seat has the same
-weight, weighted rotation once they don't. `--policy` forces a specific one.
-
-A moderator speaks every `moderate_every` turns (0 = never), or on `/moderate`.
-Deliberately *not* per-turn: asking a model who should speak next before every
-reply doubles your calls to buy an ordering the transcript already implies.
-
-### Cost
-
-Every turn resends the transcript, so an unattended `/auto` session is a
-spending loop. Two things bound it:
-
-- `context_tokens` on a seat caps the transcript by what that model can
-  actually hold, rather than by a turn count that means something different
-  for every seat. Local models are given 8192 automatically (Ollama's
-  default); a seat with a large window still sees everything. Without this, a
-  long session silently overruns the small models — and an overrun drops the
-  *start* of the conversation, which is where the question was asked.
-- `context_turns` (default 40) caps how much transcript each model sees. Models
-  are told plainly that earlier turns were omitted rather than being left to
-  assume the conversation started mid-argument.
-- `max_tokens` (default 1024) caps each reply, and the system prompt asks for a
-  few sentences.
-
-`/cost` at any time (and automatically on exit) prints tokens, seconds and
-turns per seat, so you can see which seat is actually expensive. Tokens are
-the default unit because only some providers report them and only you know
-your rates; set `price_in` / `price_out` on a seat (dollars per million
-tokens) and its row gains a cost column. Where a provider reports no token
-count — most local servers, every CLI — the output figure is estimated from
-character count and the table says so rather than quietly mixing measured and
-guessed numbers.
-
-For Claude seats, `effort = "low"` keeps conversational turns quick and cheap;
-raise it if you want the table thinking harder. `temperature` is not sent to
-Claude — current models removed sampling parameters — but it works on
-OpenAI-compatible and Gemini seats.
-
-### Testing without spending anything
-
-```toml
-[[participant]]
-name = "Mock"
-kind = "mock"
-```
-
-A `mock` seat streams a canned reply instantly and costs nothing. Useful for
-checking the UI, the transcript and your config before pointing it at anything
-billable.
-
----
-
-## Layout
-
-```
-roundtable/
-  config.py      participants, discovery, TOML
-  providers.py   streaming adapters: anthropic | openai | gemini | cli | mock
-  engine.py      conversation state, turn taking, transcripts
-  cli.py         terminal front end
-  web.py         localhost server (SSE)
-  static/        the web page
-```
-
-Adding a provider means one function in `providers.py` and one line in
-`_ADAPTERS`.
-
----
-
-## Failure behaviour
-
-One seat going down never ends the conversation. A model that errors, times
-out, or isn't configured gets an in-line `[Name unavailable: ...]` note, is
-marked as an errored turn in the transcript, and the table moves on. That is
-deliberate: a roundtable that dies because one API had a bad minute is useless
-for the long unattended sessions this is built for.
-
-Failure is raised, never returned as text. Adapters raise `ProviderError`;
-whatever streamed before the failure is kept, and the engine appends the note
-and sets the errored flag. A reply that got three sentences out before the
-connection dropped is still worth three sentences — and the flag comes from the
-exception rather than from pattern-matching the reply's punctuation.
+See `COLLABORATION.md` for the ownership proposal and `CODEX_STATUS.md` for verified
+branch refs, integration work, validation results, and the next handoff. Fetch
+remote refs before drawing conclusions from a local tracking branch.
