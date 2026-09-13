@@ -149,8 +149,12 @@ is marked as failed.
 
 Beyond open-ended discussion, connected CLI and Ollama seats can also be set
 loose on a bounded, autonomous goal -- writing code against a real project,
-researching a question, or scoping a money-making idea -- via a separate
-command-line driver:
+researching a question, or scoping a money-making idea -- via a native
+desktop app or a command-line driver, both over the same `WorkManager`:
+
+```sh
+./goal-gui.sh                                   # native window: create, watch, resume
+```
 
 ```sh
 python3 goal.py create "add a --verbose flag" --project ~/some/repo
@@ -160,6 +164,11 @@ python3 goal.py show <id>
 python3 goal.py resume <id> --feedback "also handle the empty case" --steps 10
 python3 goal.py outcome <id> "sold for $40"
 ```
+
+The GUI (`goal_gui.py`) is Tkinter, so it needs your system's Tk bindings --
+usually already present, otherwise `sudo apt install python3-tk` on
+Debian/Ubuntu. `python3 create_shortcuts.py` also generates a desktop
+launcher for it alongside the discussion-app shortcuts.
 
 A goal runs against a **sandboxed copy** of the target project (bubblewrap
 filesystem/network isolation where available, `unshare --net` as a weaker
@@ -177,9 +186,9 @@ error, but it still costs step budget, so give a goal enough steps (`create
 --steps N` or `resume --steps N`) to get through both the work and the
 review.
 
-This is not yet wired into the browser or terminal UI above (`cli.py`/
-`web.py`) -- `goal.py` is a thin standalone driver over the same
-`WorkManager` used by future UI integration.
+This is not yet wired into the browser/terminal discussion UI above
+(`cli.py`/`web.py`) -- `goal_gui.py` and `goal.py` are separate front ends
+over the same `WorkManager`, not an extension of the discussion app.
 
 ## Configuration and boundaries
 
