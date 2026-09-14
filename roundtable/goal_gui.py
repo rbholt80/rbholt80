@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import queue
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -162,6 +163,7 @@ class GoalGUI(tk.Tk):
         self.title("Roundtable — Goal Mode")
         self.geometry("1040x660")
         self.events: "queue.Queue[dict]" = queue.Queue()
+        self.main_thread_calls: "queue.Queue" = queue.Queue()
         self.row_ids: list[str] = []  # treeview iid == goal id, kept for order
         self.seats_error = ""
         try:
@@ -242,8 +244,12 @@ class GoalGUI(tk.Tk):
 
     # ------------------------------------------------------------------
     # WorkManager plumbing -- notify() fires on the manager's own worker
-    # thread, so it only ever queues data; every widget touch happens back
-    # on the Tk main thread inside _pump_events, via .after().
+    # thread, and _run_off_thread's workers fire on their own throwaway
+    # threads, so neither may touch a widget or call .after() itself --
+    # Tk raises "main thread is not in main loop" if a background thread
+    # calls .after() directly (confirmed by a scripted test, not assumed).
+    # Both only ever put data/callables on a queue; only _pump_events,
+    # which the main thread keeps re-scheduling via .after(), drains them.
 
     def _on_notify(self, state):
         self.events.put(state)
@@ -257,6 +263,11 @@ class GoalGUI(tk.Tk):
             pass
         if state is not None:
             self._apply_state(state)
+        try:
+            while True:
+                self.main_thread_calls.get_nowait()()
+        except queue.Empty:
+            pass
         self.after(POLL_MS, self._pump_events)
 
     def _apply_state(self, state):
@@ -358,13 +369,41 @@ class GoalGUI(tk.Tk):
         self.manager.participants = seats
         self._refresh_seats_label()
 
+    def _run_off_thread(self, work, on_done=None):
+        """Run a WorkManager call in the background and hop back to the Tk
+        main thread for the result. manager.create() copies the whole
+        target project synchronously (a real, possibly slow filesystem
+        walk) -- calling it directly from a dialog's button handler freezes
+        the entire window for that long, since Tkinter has one thread.
+        manager.start() is normally fast, but nothing here should ever
+        assume that and risk it again."""
+        def worker():
+            try:
+                result = work()
+            except ValueError as exc:
+                self.main_thread_calls.put(lambda: messagebox.showerror("Roundtable", str(exc)))
+                return
+            self.main_thread_calls.put(lambda: self._after_manager_call(result, on_done))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_manager_call(self, result, on_done):
+        self._apply_state(self.manager.snapshot())
+        if on_done:
+            on_done(result)
+
     def _new_goal(self):
         def create(task, mode, project, steps, start_now):
-            identifier = self.manager.create(task, mode=mode, project=project, max_steps=steps)
-            if start_now:
-                self.manager.start(identifier)
-            self._apply_state(self.manager.snapshot())
-            self.tree.selection_set(identifier)
+            def work():
+                identifier = self.manager.create(task, mode=mode, project=project,
+                                                  max_steps=steps)
+                if start_now:
+                    self.manager.start(identifier)
+                return identifier
+
+            def select(identifier):
+                if identifier in self.tree.get_children(""):
+                    self.tree.selection_set(identifier)
+            self._run_off_thread(work, select)
         NewGoalDialog(self, create)
 
     def _resume(self):
@@ -373,8 +412,9 @@ class GoalGUI(tk.Tk):
             return
 
         def resume(feedback, extra_steps):
-            self.manager.start(goal["id"], feedback=feedback, extra_steps=extra_steps)
-            self._apply_state(self.manager.snapshot())
+            self._run_off_thread(
+                lambda: self.manager.start(goal["id"], feedback=feedback,
+                                           extra_steps=extra_steps))
         ResumeDialog(self, resume)
 
     def _pause(self):
