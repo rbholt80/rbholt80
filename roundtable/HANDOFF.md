@@ -115,14 +115,30 @@ anything needing the real machine). Both branches are merged now, but the
 rule about flagging `engine.py`/`providers.py`/`config.py` changes in the
 commit message still applies to whoever touches them next.
 
+## Longer-horizon directive
+
+`MASTER_MANIFEST_OF_DUTY.md` is a much larger product/engineering directive
+for where Roundtable is meant to go (Repo Registry, model reputation,
+structured evidence, adaptive review, Money Lab, a full desktop control
+center, and more) — most of it PLANNED, not built. `MANIFEST_STATUS.md`
+maps every section of it against actual repo state, and `CAPABILITIES.md`
+tracks per-capability maturity (PLANNED/BUILT/TESTED/VERIFIED_REAL_MACHINE).
+This file stays the short version; those two are where "is X actually real
+yet" gets answered honestly. Update both when reality changes here.
+
 ## If you're an AI picking this up cold
 
 1. Read this file, then `README.md` for usage, then `COLLABORATION.md`
-   before changing shared files.
+   before changing shared files. If you're about to do substantial new
+   work rather than a small fix, read `MASTER_MANIFEST_OF_DUTY.md` and
+   `MANIFEST_STATUS.md` first — they say what's actually next and what's
+   already been tried.
 2. Robert runs everything from `~/rbholt80-merge/roundtable` on a real
    Ubuntu desktop. Nothing here — sandbox behavior, live model responses,
    whether a fix actually works — can be verified from description alone;
-   ask him to run it and paste output.
+   ask him to run it and paste output. A scripted Xvfb/mock-provider test
+   is real evidence of code correctness; it is not real-machine
+   verification — don't conflate the two in these docs.
 3. Goal-mode evidence for any run lives at
    `~/.roundtable-goals/<goal-id>/` on that machine, not in this repo.
 4. Session that produced this file:
