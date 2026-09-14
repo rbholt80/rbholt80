@@ -261,6 +261,13 @@ class WorkManager:
         # whole response for that ("Extra data"). raw_decode only needs the
         # response to *start* with one valid JSON value and ignores what
         # follows it.
+        # Included in every failure below: what the model actually said, not
+        # just that something went wrong. Observed live: Claude-CLI hit the
+        # "no valid JSON" error three times in one run, and there was no way
+        # to tell why -- the error only ever recorded the failure category,
+        # never the text that caused it. Bounded to keep the evidence record
+        # (and the 2000-char cap `_run()` applies to error strings) sane.
+        preview = repr(text[:300] + ('...' if len(text) > 300 else ''))
         try:
             action, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except json.JSONDecodeError as exc:
@@ -279,10 +286,12 @@ class WorkManager:
                     'or content that is not JSON). Likely too little context '
                     'budget left for this seat, or it cannot follow this '
                     'protocol; try a larger-context worker or raise '
-                    'context_tokens.') from None
-            raise ValueError(f'Worker returned invalid JSON: {exc}') from exc
+                    f'context_tokens. Raw response: {preview}') from None
+            raise ValueError(
+                f'Worker returned invalid JSON: {exc}. Raw response: {preview}') from exc
         if not isinstance(action, dict) or not isinstance(action.get('tool'), str):
-            raise ValueError('Worker must return a JSON tool action.')
+            raise ValueError(
+                f'Worker must return a JSON tool action. Raw response: {preview}')
         return action
 
     def _finish_check(self, goal, tools, action):

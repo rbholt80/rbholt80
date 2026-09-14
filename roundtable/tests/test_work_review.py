@@ -157,6 +157,28 @@ class EmptyResponseTests(unittest.TestCase):
         self.assertNotIn('Expecting value', message)
         self.assertIn('no valid JSON', message)
 
+    def test_the_actual_raw_text_is_included_for_diagnosis(self):
+        # Robert hit Claude-CLI failing this way three times in one run
+        # with no way to tell why -- the error only ever named the failure
+        # category, never what the model actually said. Every failure path
+        # in _ask() must now show the real (truncated) text.
+        work.stream = lambda p, system, prompt, metrics=None: iter(
+            ['I refuse to comply with this specific tool protocol.'])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        self.assertIn('I refuse to comply', str(cm.exception))
+
+    def test_valid_json_missing_the_tool_field_also_shows_the_raw_text(self):
+        work.stream = lambda p, system, prompt, metrics=None: iter(
+            ['{"not_a_tool_field": "oops"}'])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        self.assertIn('not_a_tool_field', str(cm.exception))
+
 
 if __name__ == '__main__':
     unittest.main()
