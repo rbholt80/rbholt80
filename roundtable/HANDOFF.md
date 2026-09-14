@@ -18,15 +18,18 @@ is the current truth.
 
 - **Discussion engine**: working, exercised extensively on Robert's real
   machine (9 real seats: 7 Ollama models, Claude CLI, Codex CLI).
-- **Goal mode**: as of this merge, verified working **end to end for the
-  first time** — a worker executed a real sandboxed command, submitted
-  `finish`, and a *second* seat independently inspected the evidence (not
-  just agreed) and accepted it, producing a written `changes.patch`. Every
-  individual piece (sandbox isolation, evidence-grounded finish, self-review
-  prevention) had been verified before; this was the first time the whole
-  chain completed. Has both a native Tkinter GUI (`goal_gui.py`) and a
-  terminal driver (`goal.py`) — not merged into the discussion app's own
-  browser/terminal UI, which is a separate front end.
+- **Goal mode**: verified working **end to end** — a worker executed a real
+  sandboxed command, submitted `finish`, and a *second* seat independently
+  inspected the evidence (not just agreed) and accepted it, producing a
+  written `changes.patch`. Every individual piece (sandbox isolation,
+  evidence-grounded finish, self-review prevention) has been verified live.
+  Has both a native Tkinter GUI (`goal_gui.py`) and a terminal driver
+  (`goal.py`) — not merged into the discussion app's own browser/terminal UI,
+  which is a separate front end.
+- **`goal_gui.py`**: now VERIFIED_REAL_MACHINE, not just Xvfb-tested —
+  Robert ran it for real, hit two genuine bugs doing so (see below), both
+  fixed and confirmed fixed live. See `CAPABILITIES.md` for the maturity
+  ledger this claim is tracked against.
 
 ## Run it
 
@@ -56,6 +59,22 @@ machine can actually seat.
 
 ## Real bugs found and fixed via live testing (most recent first)
 
+- **`goal_gui.py` froze solid on goal creation** whenever a real project
+  folder was given — `WorkManager.create()` copies the whole folder
+  synchronously, and the New Goal dialog called it directly on Tkinter's one
+  and only thread. Moved off-thread via a queue-based handoff (the same
+  pattern already used for the run loop's own `notify()`).
+- **That fix's own error path then crashed with a `NameError`** —
+  `except ValueError as exc:` deletes `exc` the moment the block ends, so a
+  lambda that captured `exc` itself (not its message) died once it actually
+  ran later on the main thread. Fixed by capturing `str(exc)` immediately.
+- **Small local models kept returning a completely empty response**
+  (`Expecting value: line 1 column 1 (char 0)`), six different models across
+  two live runs. First fix (`if not text:`) missed a real case: a
+  byte-order-mark or zero-width character survives `str.strip()`, so `text`
+  isn't literally empty but still can't parse. Fixed by catching the actual
+  symptom (a `JSONDecodeError` at position 0) rather than guessing at every
+  possible invisible character — confirmed against the BOM case directly.
 - **`{"tool":"diff"}` was completely unimplemented** despite being documented
   and reviewer-whitelisted — any seat that tried the obvious inspection step
   hit `unknown tool: 'diff'`. Fixed in `worktools.py`.
@@ -86,13 +105,12 @@ machine can actually seat.
   (`goal.py`) now, but neither is wired into the discussion app's own
   `cli.py`/`web.py` — they're separate front ends, by design, not a gap
   to close later.
-- `goal_gui.py` was verified by construction and a scripted run under
-  Xvfb (window builds, a goal creates/starts/runs/updates the log pane
-  live, both dialogs open cleanly) — not by a human looking at it. It is
-  not in `tests/`, deliberately: adding it to the standard suite would
-  make `python3 -m unittest discover` fail on any machine without Tk
-  installed, which the rest of this project doesn't require. Actual
-  visual/UX verification on a real desktop is still outstanding.
+- `goal_gui.py` has been run for real by Robert (not just Xvfb-tested) and
+  is confirmed usable — two real bugs found and fixed in the process (see
+  above). It is still not in `tests/`, deliberately: adding it to the
+  standard suite would make `python3 -m unittest discover` fail on any
+  machine without Tk installed, which the rest of this project doesn't
+  require.
 - Small local models (sub-4B) frequently can't complete the two-step
   review protocol (inspect, then verdict) even with the retry fix above —
   it took Gemma2 five attempts across two `resume` calls to get there once.

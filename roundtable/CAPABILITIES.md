@@ -7,9 +7,10 @@ automated suite and/or a scripted smoke test), **VERIFIED_REAL_MACHINE**
 **DEGRADED**, **DEPRECATED**.
 
 Section 37 of the manifest is explicit: *do not claim real-machine
-verification from Xvfb/mock tests.* That rule is why `goal_gui.py` below
-is marked TESTED, not VERIFIED_REAL_MACHINE, despite being fully exercised
-under Xvfb in this session.
+verification from Xvfb/mock tests.* `goal_gui.py` was initially TESTED
+(Xvfb only), not VERIFIED_REAL_MACHINE, on that basis. It has since been
+run for real by Robert, and is promoted below — with the two real bugs
+that surfaced from doing so, which Xvfb testing had not caught.
 
 ## Discussion mode
 
@@ -38,9 +39,10 @@ under Xvfb in this session.
 | Reviewer-retry-not-rotation fix (this session) | VERIFIED_REAL_MACHINE | Watched live: the same seat (Gemma2) got repeated attempts instead of being rotated away, eventually completing inspection. |
 | `diff` sandbox tool | VERIFIED_REAL_MACHINE | Broken (`unknown tool: 'diff'`) until this session; fixed, then used successfully in the run that reached `ready`. |
 | JSON trailing-commentary tolerance (`raw_decode`) | VERIFIED_REAL_MACHINE | Confirmed fixing the exact live failure text (`Extra data: line 4 column 1`). |
+| Empty/undecodable-response handling | VERIFIED_REAL_MACHINE | First pass (`if not text:`) missed a real case: a BOM survives `str.strip()`. Fixed to catch the actual `JSONDecodeError` symptom instead; confirmed live after the first fix's gap was hit on Robert's machine (six local models plus, notably, Claude-CLI itself). |
 | Full loop: worker → sandboxed run → `finish` → independent review → `ready` + patch | VERIFIED_REAL_MACHINE | Completed exactly once, live, after the two fixes above landed. Not yet routine — see Section 4/19 gaps in `MANIFEST_STATUS.md`. |
 | `goal.py` (terminal driver) | VERIFIED_REAL_MACHINE | Used throughout to drive every real run to date. |
-| `goal_gui.py` (native Tkinter GUI) | TESTED, not VERIFIED_REAL_MACHINE | Constructed and driven through a full `create → start → live-updating log` cycle under Xvfb with the mock provider; dialogs and viewers open/close cleanly. **No human has looked at it.** Awaiting Robert's real-display review on PR #5. |
+| `goal_gui.py` (native Tkinter GUI) | VERIFIED_REAL_MACHINE | Run for real by Robert on his desktop: created and resumed a real goal against a real project folder with real seats. Found and fixed two real bugs in the process (a main-thread freeze on `create()` with a real project folder, and a `NameError` in the fix's own error-reporting path) — Xvfb testing had exercised the success path only, not the freeze or the error path. |
 | Goal-mode prompt-injection fencing | PLANNED | Does not exist. Named gap — see `MANIFEST_STATUS.md` §18. |
 | Structured evidence schema (typed, hashed, trust-classed) | PARTIAL/BUILT | Evidence files exist and are cited by ID; fields are `id`/`kind`/`at`/free-form data, not the full schema in manifest §17. |
 | Repo Registry / reuse preflight | PLANNED | Does not exist. |
