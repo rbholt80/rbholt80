@@ -381,7 +381,12 @@ class GoalGUI(tk.Tk):
             try:
                 result = work()
             except ValueError as exc:
-                self.main_thread_calls.put(lambda: messagebox.showerror("Roundtable", str(exc)))
+                # Python deletes the name bound by "except ... as exc" the
+                # moment this block ends, so a lambda capturing `exc` itself
+                # sees a dead reference once it actually runs later on the
+                # main thread. Capture the message now, while it's alive.
+                message = str(exc)
+                self.main_thread_calls.put(lambda: messagebox.showerror("Roundtable", message))
                 return
             self.main_thread_calls.put(lambda: self._after_manager_call(result, on_done))
         threading.Thread(target=worker, daemon=True).start()
