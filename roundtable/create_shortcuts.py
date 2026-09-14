@@ -14,18 +14,25 @@ def main() -> None:
     root = Path(__file__).resolve().parent
     launcher = root / "roundtable.sh"
     launcher.chmod(launcher.stat().st_mode | 0o111)
-    for name, terminal, args in (
-        ("Launch Roundtable", False, ""),
-        ("Roundtable Terminal", True, " --terminal"),
+    goal_gui_launcher = root / "goal-gui.sh"
+    goal_gui_launcher.chmod(goal_gui_launcher.stat().st_mode | 0o111)
+    for name, terminal, exe, args, comment, icon in (
+        ("Launch Roundtable", False, launcher, "",
+         "Let your connected AIs discuss a topic", "system-users"),
+        ("Roundtable Terminal", True, launcher, " --terminal",
+         "Let your connected AIs discuss a topic", "system-users"),
+        ("Roundtable Goal Mode", False, goal_gui_launcher, "",
+         "Set a bounded, sandboxed, independently-reviewed goal for a connected seat",
+         "system-run"),
     ):
         path = root / (name + ".desktop")
         path.write_text(
             "[Desktop Entry]\nType=Application\n"
             f"Name={name}\n"
-            "Comment=Let your connected AIs discuss a topic\n"
-            f"Exec={quote_exec(str(launcher))}{args}\n"
+            f"Comment={comment}\n"
+            f"Exec={quote_exec(str(exe))}{args}\n"
             f"Path={root}\nTerminal={str(terminal).lower()}\n"
-            "Icon=system-users\nCategories=Utility;\n",
+            f"Icon={icon}\nCategories=Utility;\n",
             encoding="utf-8",
         )
         path.chmod(0o755)

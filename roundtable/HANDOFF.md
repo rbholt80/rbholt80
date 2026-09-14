@@ -24,14 +24,16 @@ is the current truth.
   just agreed) and accepted it, producing a written `changes.patch`. Every
   individual piece (sandbox isolation, evidence-grounded finish, self-review
   prevention) had been verified before; this was the first time the whole
-  chain completed. Not yet wired into the browser/terminal UI — it's driven
-  by the standalone `goal.py` CLI at the repo root.
+  chain completed. Has both a native Tkinter GUI (`goal_gui.py`) and a
+  terminal driver (`goal.py`) — not merged into the discussion app's own
+  browser/terminal UI, which is a separate front end.
 
 ## Run it
 
 ```sh
 ./roundtable.sh                                  # browser discussion app
 ./roundtable.sh --terminal "topic"                # terminal version
+./goal-gui.sh                                    # native goal-mode window
 python3 goal.py create "task" --project ~/repo    # autonomous goal mode
 python3 goal.py resume <id> --steps 8
 ```
@@ -49,8 +51,8 @@ machine can actually seat.
 | `autopilot.py` | Continuous draft/independent-review loop for discussion mode (`/auto`). |
 | `local.py` | CLI subprocess + native Ollama transport, no SDK required. |
 | `work.py`, `worktools.py` | Goal-mode loop and its sandbox (bubblewrap/unshare, resource limits, path confinement). |
-| `goal.py` | Standalone CLI driver for goal mode (repo root). |
-| `tests/` | 69 passed, 1 skipped as of this merge. |
+| `goal_gui.py`, `goal.py` | Native Tkinter GUI and terminal driver for goal mode (repo root), both thin front ends over `WorkManager`. |
+| `tests/` | 69 passed, 1 skipped as of this merge (goal_gui.py has no automated tests — GUI construction was verified manually under Xvfb, not added to the suite; see note below). |
 
 ## Real bugs found and fixed via live testing (most recent first)
 
@@ -80,7 +82,17 @@ machine can actually seat.
 
 ## Known limitations / open items
 
-- Goal mode has no UI wiring yet (`cli.py`/`web.py` don't expose it).
+- Goal mode has a native GUI (`goal_gui.py`) and a terminal driver
+  (`goal.py`) now, but neither is wired into the discussion app's own
+  `cli.py`/`web.py` — they're separate front ends, by design, not a gap
+  to close later.
+- `goal_gui.py` was verified by construction and a scripted run under
+  Xvfb (window builds, a goal creates/starts/runs/updates the log pane
+  live, both dialogs open cleanly) — not by a human looking at it. It is
+  not in `tests/`, deliberately: adding it to the standard suite would
+  make `python3 -m unittest discover` fail on any machine without Tk
+  installed, which the rest of this project doesn't require. Actual
+  visual/UX verification on a real desktop is still outstanding.
 - Small local models (sub-4B) frequently can't complete the two-step
   review protocol (inspect, then verdict) even with the retry fix above —
   it took Gemma2 five attempts across two `resume` calls to get there once.
