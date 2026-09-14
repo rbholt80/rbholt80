@@ -332,9 +332,48 @@ class WorkManager:
         goal = self.goals[identifier]
         tools = WorkTools(self.root / identifier)
         seats = self.seats()
-        seat_index, errors = 0, 0
+        last_picked, errors = None, 0
         pending = None
         author = None
+        # Ported from engine.py's proven seat backoff (discussion mode),
+        # scoped to this run only (not persisted across resumes), matching
+        # the rest of this loop's own local state. A chronically-failing
+        # seat's effective share of the rotation now actually shrinks
+        # (exponential cooldown, capped) instead of costing it exactly one
+        # skip per failure -- watched live, a seat pool where most seats
+        # can't reliably produce a valid action left the one capable seat
+        # waiting through the whole rest of the roster's failures every
+        # single time it was rotated away.
+        #
+        # `last_picked` (a name, not an index) still only advances on
+        # failure or on a genuine handoff (finish, a real review verdict)
+        # -- unchanged from before. A seat that keeps succeeding keeps
+        # being reselected on purpose: goal mode is one continuous task,
+        # not a fairness-constrained discussion, and losing a capable
+        # seat's context mid-task to force turn-taking would cost more
+        # than it buys (confirmed by two existing tests that depend on
+        # exactly this: an author completing several actions in a row
+        # before any handoff).
+        #
+        # Deriving position from a name each turn rather than a raw
+        # counter is still the real change here, and is load-bearing now
+        # that cooldown exists: engine.py's own history (see its _next_in
+        # docstring) is that a stored index divided by a pool whose length
+        # changes turn to turn -- which cooldown now makes possible here,
+        # on top of the reviewer/author exclusion that already could --
+        # can converge on a fixed point and repeat one seat indefinitely.
+        consecutive_fail: dict = {}
+        cooldown_until: dict = {}
+        _COOLDOWN_CAP = 30
+
+        def off_cooldown(candidates):
+            step = goal['steps']
+            available = [p for p in candidates if step >= cooldown_until.get(p.name, 0)]
+            return available or candidates
+
+        def next_in(pool):
+            names = [p.name for p in pool]
+            return (names.index(last_picked) + 1) % len(pool) if last_picked in names else 0
         try:
             while not self.stop.is_set():
                 with self.lock:
@@ -343,11 +382,12 @@ class WorkManager:
                         goal['message'] = 'Step budget reached. Review the saved work or add more steps.'
                         break
                     pool = [p for p in seats if p.name != author] if pending else seats
+                    pool = off_cooldown(pool)
                     if not pool:
                         goal['status'] = 'needs_input'
                         goal['message'] = 'Deliverable saved. Connect a second worker for independent review.'
                         break
-                    seat = pool[seat_index % len(pool)]
+                    seat = pool[next_in(pool)]
                     goal['worker'] = seat.name
                     goal['steps'] += 1
                     goal['status'] = 'reviewing' if pending else 'working'
@@ -382,7 +422,7 @@ class WorkManager:
                             # candidate is bad -- don't burn it as an error
                             # (which would rotate to a different seat and
                             # never let this one actually try inspecting).
-                            # Keep seat_index unchanged so the same seat is
+                            # Keep last_picked unchanged so the same seat is
                             # asked again, now under a sharper instruction.
                             with self.lock:
                                 self.record(goal, 'review', {'seat': seat.name,
@@ -404,6 +444,8 @@ class WorkManager:
                         with self.lock:
                             self.record(goal, 'review', {'seat': seat.name, 'reason': reason, 'verdict': 'revise'})
                         pending, author = None, None
+                        consecutive_fail.pop(seat.name, None)
+                        cooldown_until.pop(seat.name, None)
                         continue
                     if name == 'plan':
                         steps = action.get('steps')
@@ -432,6 +474,8 @@ class WorkManager:
                         self._finish_check(goal, tools, action)
                         pending, author = action, seat.name
                         errors = 0
+                        consecutive_fail.pop(seat.name, None)
+                        cooldown_until.pop(seat.name, None)
                         continue
                     elif name == 'read_evidence':
                         result = self.evidence(identifier, action.get('id'))
@@ -444,6 +488,8 @@ class WorkManager:
                                     'result': result, 'revision': tools.revision()})
                         goal['message'] = f'{seat.name}: {name} finished. Result saved.'
                     errors = 0
+                    consecutive_fail.pop(seat.name, None)
+                    cooldown_until.pop(seat.name, None)
                 except InterruptedError:
                     break
                 except Exception as exc:
@@ -451,7 +497,10 @@ class WorkManager:
                         self.record(goal, 'error', {'seat': seat.name, 'error': str(exc)[:2000]})
                         goal['message'] = f'{seat.name}: {str(exc)[:300]}'
                     errors += 1
-                    seat_index += 1
+                    last_picked = seat.name
+                    streak = consecutive_fail.get(seat.name, 0) + 1
+                    consecutive_fail[seat.name] = streak
+                    cooldown_until[seat.name] = goal['steps'] + min(2 ** (streak - 1), _COOLDOWN_CAP)
                     if errors >= max(3, len(seats)):
                         goal['status'] = 'needs_input'
                         goal['message'] = 'Repeated worker/tool failures. Inspect the activity, fix the connection or constraint, then resume.'
