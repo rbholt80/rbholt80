@@ -128,6 +128,35 @@ class EmptyResponseTests(unittest.TestCase):
             self.manager._ask(goal, self.seat)
         self.assertIn('no output at all', str(cm.exception))
 
+    def test_invisible_artifact_survives_strip_but_still_gets_the_clear_message(self):
+        # Observed live: str.strip() does not remove a byte-order mark or
+        # zero-width character, so a model that emits only one of these is
+        # not caught by the `not text` check above -- it still reaches
+        # json.JSONDecoder().raw_decode() and fails with exactly the same
+        # cryptic "Expecting value: line 1 column 1 (char 0)" the `not text`
+        # branch exists to avoid. This is the actual bug Robert hit live
+        # after the first fix: the fix's own regression test never covered
+        # non-empty-but-still-undecodable text.
+        work.stream = lambda p, system, prompt, metrics=None: iter(['﻿'])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        message = str(cm.exception)
+        self.assertNotIn('Expecting value', message)
+        self.assertIn('no valid JSON', message)
+
+    def test_plain_non_json_text_gets_the_same_clear_message_not_a_raw_parser_error(self):
+        work.stream = lambda p, system, prompt, metrics=None: iter(
+            ["Sorry, I can't help with that."])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        message = str(cm.exception)
+        self.assertNotIn('Expecting value', message)
+        self.assertIn('no valid JSON', message)
+
 
 if __name__ == '__main__':
     unittest.main()

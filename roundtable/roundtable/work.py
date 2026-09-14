@@ -251,14 +251,6 @@ class WorkManager:
         if text.startswith('```') and text.endswith('```'):
             text = '\n'.join(text.splitlines()[1:-1])
         if not text:
-            # A JSONDecodeError here always reads "Expecting value: line 1
-            # column 1 (char 0)" no matter the real cause, which reads like
-            # a parser bug and hides what's actually happening: the model
-            # produced zero output tokens. Observed live, repeatedly, across
-            # six different small local models -- most likely this seat's
-            # context budget (see the trimming above) leaves too little room
-            # once the system prompt and tool schema are counted, though a
-            # model simply failing to follow the protocol is possible too.
             raise ValueError(
                 'Worker produced no output at all (not malformed JSON -- an '
                 'empty response). Likely too little context budget left for '
@@ -272,6 +264,22 @@ class WorkManager:
         try:
             action, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except json.JSONDecodeError as exc:
+            if exc.pos == 0 and exc.msg.startswith('Expecting value'):
+                # The `not text` check above only catches a truly empty
+                # string. Observed live: text can be non-empty yet still
+                # produce exactly this error -- e.g. a lone byte-order-mark
+                # or zero-width character, which str.strip() does not
+                # remove, standing in for real output. Whatever the exact
+                # byte content, "nothing decodable at position 0" is the
+                # same failure as an empty response for the caller's
+                # purposes, so it gets the same actionable message instead
+                # of a cryptic parser error.
+                raise ValueError(
+                    "Worker's response contained no valid JSON at all (empty, "
+                    'or content that is not JSON). Likely too little context '
+                    'budget left for this seat, or it cannot follow this '
+                    'protocol; try a larger-context worker or raise '
+                    'context_tokens.') from None
             raise ValueError(f'Worker returned invalid JSON: {exc}') from exc
         if not isinstance(action, dict) or not isinstance(action.get('tool'), str):
             raise ValueError('Worker must return a JSON tool action.')
