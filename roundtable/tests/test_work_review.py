@@ -89,5 +89,45 @@ class ReviewRetryTests(unittest.TestCase):
         self.assertEqual(goal['steps'], goal['limit'])
 
 
+class EmptyResponseTests(unittest.TestCase):
+    """A model that produces zero output tokens must not surface as a raw,
+    context-free JSONDecodeError.
+
+    Observed live, repeatedly: six distinct small local models each
+    returned an empty response at some point across two real goal-mode
+    runs, and every one of them was reported as
+    'Worker returned invalid JSON: Expecting value: line 1 column 1
+    (char 0)' -- true, but it reads like a parser bug rather than what
+    actually happened (no output at all, most likely a context-budget
+    problem: the SYSTEM prompt alone is already ~2100 bytes, leaving a
+    local seat's default budget very little room for the rest).
+    """
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.seat = Participant('TinyLocal', 'mock', context_tokens=2048)
+        self.manager = WorkManager(self.directory.name, [self.seat])
+        self.original_stream = work.stream
+        self.addCleanup(setattr, work, 'stream', self.original_stream)
+
+    def test_empty_output_gets_a_specific_actionable_message(self):
+        work.stream = lambda p, system, prompt, metrics=None: iter([''])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        message = str(cm.exception)
+        self.assertIn('no output at all', message)
+        self.assertNotIn('Expecting value', message)
+
+    def test_whitespace_only_output_is_treated_the_same_as_empty(self):
+        work.stream = lambda p, system, prompt, metrics=None: iter(['   \n  '])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        self.assertIn('no output at all', str(cm.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

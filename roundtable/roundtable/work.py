@@ -250,6 +250,20 @@ class WorkManager:
         text = text.strip()
         if text.startswith('```') and text.endswith('```'):
             text = '\n'.join(text.splitlines()[1:-1])
+        if not text:
+            # A JSONDecodeError here always reads "Expecting value: line 1
+            # column 1 (char 0)" no matter the real cause, which reads like
+            # a parser bug and hides what's actually happening: the model
+            # produced zero output tokens. Observed live, repeatedly, across
+            # six different small local models -- most likely this seat's
+            # context budget (see the trimming above) leaves too little room
+            # once the system prompt and tool schema are counted, though a
+            # model simply failing to follow the protocol is possible too.
+            raise ValueError(
+                'Worker produced no output at all (not malformed JSON -- an '
+                'empty response). Likely too little context budget left for '
+                'this seat once the system prompt and tool schema are '
+                'counted; try a larger-context worker or raise context_tokens.')
         # Smaller local models routinely tack a sentence of commentary onto
         # the end of an otherwise-valid JSON object; json.loads rejects the
         # whole response for that ("Extra data"). raw_decode only needs the
