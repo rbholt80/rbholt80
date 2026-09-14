@@ -268,27 +268,37 @@ class WorkManager:
         # never the text that caused it. Bounded to keep the evidence record
         # (and the 2000-char cap `_run()` applies to error strings) sane.
         preview = repr(text[:300] + ('...' if len(text) > 300 else ''))
+        action = None
         try:
             action, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except json.JSONDecodeError as exc:
             if exc.pos == 0 and exc.msg.startswith('Expecting value'):
-                # The `not text` check above only catches a truly empty
-                # string. Observed live: text can be non-empty yet still
-                # produce exactly this error -- e.g. a lone byte-order-mark
-                # or zero-width character, which str.strip() does not
-                # remove, standing in for real output. Whatever the exact
-                # byte content, "nothing decodable at position 0" is the
-                # same failure as an empty response for the caller's
-                # purposes, so it gets the same actionable message instead
-                # of a cryptic parser error.
+                # Confirmed live once the raw-text diagnostics above existed
+                # to show it: Claude-CLI prefacing its tool call with a
+                # conversational preamble ("I'll check what files exist
+                # first...") before the JSON object. Tolerate a leading
+                # preamble the same way trailing commentary is already
+                # tolerated -- if a '{' appears later in the text, retry
+                # decoding from there rather than failing outright. This
+                # also covers the "not text" gap this branch already
+                # handled: a lone byte-order-mark or zero-width character
+                # with no '{' anywhere still falls through to the error.
+                brace = text.find('{')
+                if brace > 0:
+                    try:
+                        action, _ = json.JSONDecoder().raw_decode(text[brace:])
+                    except json.JSONDecodeError:
+                        pass
+                if action is None:
+                    raise ValueError(
+                        "Worker's response contained no valid JSON at all (empty, "
+                        'or content that is not JSON). Likely too little context '
+                        'budget left for this seat, or it cannot follow this '
+                        'protocol; try a larger-context worker or raise '
+                        f'context_tokens. Raw response: {preview}') from None
+            else:
                 raise ValueError(
-                    "Worker's response contained no valid JSON at all (empty, "
-                    'or content that is not JSON). Likely too little context '
-                    'budget left for this seat, or it cannot follow this '
-                    'protocol; try a larger-context worker or raise '
-                    f'context_tokens. Raw response: {preview}') from None
-            raise ValueError(
-                f'Worker returned invalid JSON: {exc}. Raw response: {preview}') from exc
+                    f'Worker returned invalid JSON: {exc}. Raw response: {preview}') from exc
         if not isinstance(action, dict) or not isinstance(action.get('tool'), str):
             raise ValueError(
                 f'Worker must return a JSON tool action. Raw response: {preview}')

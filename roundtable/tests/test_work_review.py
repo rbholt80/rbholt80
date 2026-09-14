@@ -170,6 +170,31 @@ class EmptyResponseTests(unittest.TestCase):
             self.manager._ask(goal, self.seat)
         self.assertIn('I refuse to comply', str(cm.exception))
 
+    def test_a_conversational_preamble_before_the_json_is_tolerated(self):
+        # The exact live finding: once the raw-text diagnostics existed to
+        # show it, Claude-CLI turned out to be prefacing its tool call with
+        # explanatory prose instead of returning bare JSON. Confirm the
+        # parser now recovers the JSON instead of failing outright.
+        work.stream = lambda p, system, prompt, metrics=None: iter(
+            ['I\'ll check what files exist first. {"tool": "list_files"}'])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        action = self.manager._ask(goal, self.seat)
+        self.assertEqual(action, {'tool': 'list_files'})
+
+    def test_prose_with_no_json_anywhere_still_fails_clearly(self):
+        # A stray '{' inside ordinary prose with nothing that actually
+        # parses after it must not be mistaken for tolerable output.
+        work.stream = lambda p, system, prompt, metrics=None: iter(
+            ["I'll use curly braces {like this} in my explanation."])
+        identifier = self.manager.create('a task', mode='research', max_steps=5)
+        goal = self.manager.get(identifier)
+        with self.assertRaises(ValueError) as cm:
+            self.manager._ask(goal, self.seat)
+        message = str(cm.exception)
+        self.assertIn('no valid JSON', message)
+        self.assertIn('curly braces', message)
+
     def test_valid_json_missing_the_tool_field_also_shows_the_raw_text(self):
         work.stream = lambda p, system, prompt, metrics=None: iter(
             ['{"not_a_tool_field": "oops"}'])
